@@ -1,5 +1,5 @@
-"""The README banner (docs/banner/banner.webp): Rook's real Devs animation, captured offscreen. It plays listening on
-the helix, the thinking loop, a send to six threads, and rest again. The overlay's own GL engine draws the dust in a
+"""The README banner (docs/banner/banner.webp): Rook's real Devs animation, captured offscreen. It plays the resting
+loop, listening on the helix, thinking as the chess rook, the rook assembling into a send to six threads, and rest. The overlay's own GL engine draws the dust in a
 surfaceless EGL context, so no window opens. Cairo draws the labels and thread names over it, as the live overlay does.
 
 To re-run it, from the repo root, under scripts/capped with scratch XDG folders and no display (see AGENTS.md):
@@ -8,6 +8,7 @@ To re-run it, from the repo root, under scripts/capped with scratch XDG folders 
 Then copy both WebP files to docs/banner/.
 """
 import ctypes
+import math
 import os
 import subprocess
 import sys
@@ -23,10 +24,10 @@ CX, CY = W / SCALE / 2, 113 / SCALE  # The presence's centre in logical pixels.
 WORD_Y, LINE_Y = 278, 340  # The tops of the wordmark's and the tagline's sprites, in pixels.
 FPS, PREROLL = 30, 3.0  # Output frames per second; seconds of rest before the first frame, so the loop is settled.
 THREADS = ("T3 Code", "Herdr", "Claude Code", "Codex", "Antigravity", "Pi")
-SEND = 3.0  # When the send starts, in banner seconds: listening ends straight into it.
-# The send's own loop forms once from the helix and assembles into the send form, with no rest loop before it.
-SCRIPT = [(0.0, {"state": "ready"}), (0.8, {"state": "listening"}),
-          (SEND, {"state": "thinking", "activity": "t3_thread_send"}),
+THINK, SEND = 3.0, 5.2  # When thinking and the send start, in banner seconds.
+# Rest on the loop, listen on the helix, think as the chess rook, then the rook assembles into the send form.
+SCRIPT = [(0.0, {"state": "ready"}), (0.8, {"state": "listening"}), (THINK, {"state": "thinking"}),
+          (SEND, {"activity": "t3_thread_send"}),
           (SEND + 0.05, {"send": [{"id": f"t{k}", "name": n} for k, n in enumerate(THREADS)]}),
           (SEND + 3.6, {"send": [{"id": f"t{k}", "outcome": "landed"} for k in range(len(THREADS))]}),
           (SEND + 5.4, {"state": "ready"})]
@@ -69,12 +70,47 @@ def lettering():
     return layer
 
 
+def _send_from_rook():
+    """Banner only: the send form assembles out of the thinking rook, not out of the loop. A grain whose part has not
+    arrived holds its place in the rook, and each part flies out of the rook as it arrives. The live overlay is
+    unchanged: there a send always starts from the loop. This mirrors devs_pack.eval_send_tech with the rook in place
+    of the loop."""
+    dp, orig = ov.devs_pack, ov.devs_pack.eval_targets
+
+    def eval_targets(name, points, scene, now):
+        if name not in dp.SEND_FORMS:
+            return orig(name, points, scene, now)
+        out = orig(name, points, scene, now)  # The send form as live, for the parts and the gather.
+        rx, ry, rb = scene._form_targets("rook", now)  # The rook as the overlay draws it right now.
+        fire_at, _ = scene.send_clock(now)
+        T = now - scene.form_at
+        _, arrive, _ = dp._send_device(name, T, now, fire_at)
+        y_off = scene.dispatch_y_offset()
+        late, flow = T - dp.SEND_MORPH, T * dp.SEND_LOOP_FLOW
+        tx, ty, tb, tz = (list(v) for v in out)
+        for i, rec in enumerate(points):
+            k = (late - arrive[rec[1]] - rec[2] * 0.2) / 0.55
+            if k >= 1.0:
+                continue
+            k = 0.0 if k <= 0.0 else 1.0 - (1.0 - k) ** 3
+            a = rec[0] + flow
+            lx, ly = 60.0 * math.sin(a), 52.0 * math.sin(a) * math.cos(a)  # Where the live form put the loop.
+            gx = tx[i] if k <= 0.0 else lx + (tx[i] - lx) / k if k > 1e-6 else lx  # Undo the loop blend: the part.
+            gy = ty[i] - y_off if k <= 0.0 else ly + (ty[i] - y_off - ly) / k if k > 1e-6 else ly
+            tx[i] = rx[i] + (gx - rx[i]) * k
+            ty[i] = y_off + ry[i] + (gy - ry[i]) * k
+            tb[i] = rb[i] + (tb[i] - rb[i]) * k if k > 0.0 else rb[i]
+        return tx, ty, tb, tz
+    dp.eval_targets = eval_targets
+
+
 def main():
     out, at = sys.argv[1], [float(a) for a in sys.argv[2:]]
     os.makedirs(out, exist_ok=True)
     ov._use_theme("dark")
     ov.FORM_FOR_STATE["listening"] = "helix"  # Devs listening shows only the helix.
     ov._paint_reveal_rows = lambda *_: None  # The GL frame draws the reveal grains (Scene.dispatch_gl_rows).
+    _send_from_rook()
     ctx = egl_context()
     ctx.make_current()
     gl, read = ov._DustGL(None, ctx), ctypes.CDLL("libOpenGL.so.0").glReadPixels
