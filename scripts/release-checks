@@ -1,0 +1,124 @@
+#!/bin/sh
+# Usage: scripts/release-checks [name ...]
+# Runs Rook's fast self-checks under scripts/capped, in scratch XDG folders, with no window, sound or microphone.
+# Each check's output goes to the scratch folder. A failed check prints its last lines. Names pick a subset.
+# rook-media and rook-phone are slower, so they run only when named.
+# ROOK_PYTHON names Rook's Python. The default is the installer's venv, then the AirType tool's Python.
+# KEEP_SCRATCH=1 keeps the scratch folder for a look afterwards.
+set -u
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
+if [ -z "${ROOK_RELEASE_CHECKS_CAPPED:-}" ]; then
+    ROOK_RELEASE_CHECKS_CAPPED=1 exec "$REPO/scripts/capped" env ROOK_RELEASE_CHECKS_CAPPED=1 "$0" "$@"
+fi
+
+# Read the real folders before the scratch ones replace them.
+REAL_DATA=${XDG_DATA_HOME:-$HOME/.local/share}
+REAL_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}
+PY=${ROOK_PYTHON:-}
+for candidate in "$REAL_DATA/rook/venv/bin/python" "$REAL_DATA/uv/tools/airtype/bin/python"; do
+    [ -z "$PY" ] && [ -x "$candidate" ] && PY=$candidate
+done
+if [ -z "$PY" ]; then
+    echo "release-checks: Rook's Python was not found. Install Rook first, or set ROOK_PYTHON." >&2
+    exit 2
+fi
+SYS_PY=$(command -v python3)
+# The owner's machine names, so relay-settings catches a skill that names one. The check itself never reads real state.
+ROOK_CHECK_PRIVATE_NAMES=$("$SYS_PY" -c 'import json, sys; print(",".join(json.load(open(sys.argv[1]))))' \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/rook/machines.json" 2>/dev/null) || ROOK_CHECK_PRIVATE_NAMES=""
+export ROOK_CHECK_PRIVATE_NAMES
+# The owner's name from the owner settings, so relay-settings catches shipped text that names the owner.
+ROOK_CHECK_OWNER=$("$SYS_PY" -c 'import json, sys; print(json.load(open(sys.argv[1])).get("owner_name", ""))' \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/rook/settings.json" 2>/dev/null) || ROOK_CHECK_OWNER=""
+export ROOK_CHECK_OWNER
+
+X=$(mktemp -d "${TMPDIR:-/tmp}/rook-checks.XXXXXX") || exit 2
+case "$X" in */rook-checks.*) ;; *) echo "release-checks: odd scratch folder $X" >&2; exit 2 ;; esac
+if [ -z "${KEEP_SCRATCH:-}" ]; then
+    trap 'rm -rf "$X"' EXIT
+fi
+mkdir -p "$X/state" "$X/data/rook" "$X/config" "$X/cache" "$X/run" "$X/claude" "$X/guard" "$X/gst"
+chmod 700 "$X" "$X/run"
+
+# A check that reaches a real desktop tool, the agent or the sound gets a refusal, never the real program.
+for tool in claude grim hyprctl notify-send paplay pw-play pw-cat pw-record arecord parecord pactl; do
+    printf '#!/bin/sh\necho "guard: a check called the real %s" >&2\nexit 97\n' "$tool" > "$X/guard/$tool"
+    chmod +x "$X/guard/$tool"
+done
+
+# Speech models are read from the real folders, so a run does not copy hundreds of MB into scratch.
+[ -e "$REAL_CACHE/airtype" ] && ln -s "$REAL_CACHE/airtype" "$X/cache/airtype"
+[ -e "$REAL_DATA/rook/voice-phonon" ] && ln -s "$REAL_DATA/rook/voice-phonon" "$X/data/rook/voice-phonon"
+if [ -e "$REAL_DATA/wowfriend/voice-phonon" ]; then
+    mkdir -p "$X/data/wowfriend"
+    ln -s "$REAL_DATA/wowfriend/voice-phonon" "$X/data/wowfriend/voice-phonon"
+fi
+
+export PATH="$X/guard:$PATH" PYTHONDONTWRITEBYTECODE=1 TMPDIR="${TMPDIR:-/tmp}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$REAL_CACHE/uv}" UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$REAL_DATA/uv/python}"
+export HF_HOME="${HF_HOME:-$REAL_CACHE/huggingface}" HF_HUB_OFFLINE=1
+export XDG_STATE_HOME="$X/state" XDG_DATA_HOME="$X/data" XDG_CONFIG_HOME="$X/config" XDG_CACHE_HOME="$X/cache"
+export XDG_RUNTIME_DIR="$X/run" CLAUDE_CONFIG_DIR="$X/claude"
+# Empty GStreamer plugin folders, so no camera or audio plugin loads.
+export GST_PLUGIN_PATH_1_0="$X/gst" GST_PLUGIN_SYSTEM_PATH_1_0="$X/gst" GST_PLUGIN_PATH="$X/gst"
+export GST_PLUGIN_SYSTEM_PATH="$X/gst" GST_REGISTRY_1_0="$X/gst/registry.bin"
+unset ROOK_AGENT T3CODE_THREAD_ID WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE PULSE_SERVER PIPEWIRE_REMOTE
+cd "$REPO" || exit 2
+
+failed=0
+run() {
+    name=$1
+    shift
+    if [ -n "$PICK" ]; then
+        case " $PICK " in *" $name "*) ;; *) return ;; esac
+    fi
+    start=$(date +%s)
+    "$@" > "$X/out-$name.txt" 2>&1 < /dev/null
+    code=$?
+    if [ "$code" -eq 0 ]; then
+        echo "ok    $name ($(( $(date +%s) - start )) s)"
+    else
+        failed=$((failed + 1))
+        echo "FAIL  $name (exit $code)"
+        tail -n 5 "$X/out-$name.txt" | sed 's/^/      /'
+    fi
+}
+PICK="$*"
+
+for flag in journal restart agent steps dark timing mailbox desktop speech; do
+    run "rook-$flag" "$PY" desktop/rook.py "--check-$flag"
+done
+# Slower checks with a headless browser or media: they run only when named, such as rook-media.
+for flag in media phone; do
+    case " $PICK " in *" rook-$flag "*) run "rook-$flag" "$PY" desktop/rook.py "--check-$flag" ;; esac
+done
+run agy-harness "$PY" desktop/agy_harness.py --check
+run antigravity-home "$SYS_PY" desktop/antigravity_home.py check
+run codex-harness "$SYS_PY" desktop/codex_harness.py --check
+run pi-harness "$SYS_PY" desktop/pi_harness.py --check-pi
+run relay "$SYS_PY" desktop/relay.py --check
+run relay-settings "$SYS_PY" desktop/relay.py --check-settings
+run relay-herdr "$SYS_PY" desktop/relay.py --check-herdr
+run relay-memory "$SYS_PY" desktop/relay.py --check-memory
+run relay-plugins "$SYS_PY" desktop/relay.py --check-plugins
+run work "$SYS_PY" desktop/work.py
+run watch "$SYS_PY" desktop/watch.py
+run mailbox "$SYS_PY" desktop/mailbox.py
+run journal "$SYS_PY" desktop/journal.py
+run agent-inbox "$SYS_PY" desktop/agent_inbox.py --check
+run render "$SYS_PY" desktop/render.py --check
+run server "$PY" desktop/server.py --check
+run speech-words "$PY" desktop/speech.py --check-words
+run turn-end "$PY" desktop/turn_end.py --check
+run desk "$SYS_PY" desktop/desk.py
+run machine "$SYS_PY" desktop/machine.py
+run boundaries "$SYS_PY" scripts/check_boundaries.py
+run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
+
+[ -n "${KEEP_SCRATCH:-}" ] && echo "Output is in $X"
+if [ "$failed" -gt 0 ]; then
+    echo "$failed check(s) failed."
+    exit 1
+fi
+echo "All checks passed."

@@ -1,0 +1,26 @@
+[Unit]
+Description=Rook, a voice assistant for the Omarchy desktop
+# Rook needs the Wayland session: it starts with the graphical session and stops with it.
+PartOf=graphical-session.target
+After=graphical-session.target
+# A crash loop stops after five failed starts in five minutes, and then a desktop notice is shown.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=rook-failed.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/rook/live
+# AirType's Python, because Rook records through AirType's pipeline.
+ExecStart=%h/.local/share/uv/tools/airtype/bin/python %h/.local/share/rook/live/desktop/rook.py
+# Rook exits 0 on a clean stop and non-zero when it or a child keeps failing.
+Restart=on-failure
+RestartSec=5
+# A restart goes straight back to starting, so OnFailure= runs only once systemd gives up.
+RestartMode=direct
+TimeoutStopSec=20
+Environment=XDG_RUNTIME_DIR=%t
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

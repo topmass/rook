@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Prints the memory folder for a directory (default: the current one).
+#
+# The rule: memory lives in the folder the agent starts in.
+#   memory-dir --start DIR   the folder for a session that starts in DIR (the session hook uses this)
+#   memory-dir DIR           the folder to use from DIR later in a session: the nearest one that already
+#                            exists at DIR or above, so a `cd` into a subfolder still finds the session's memory
+# It prints nothing and exits with 3 for a folder listed under NO_MEMORY in memory.conf.
+start=""
+[ "${1:-}" = --start ] && { start=1; shift; }
+d=$(realpath -m "${1:-$PWD}")
+d=${d%%/.agent-memory*}
+started=$d # the folder as given, before a worktree is traced to its repository
+
+# A linked worktree is a temporary copy, so it counts as its repository's real folder. Git is used for nothing else.
+if common=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  [ "$(basename "$common")" = .git ] && [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" != "$(dirname "$common")" ]; then
+  d=$(dirname "$common")
+fi
+
+[ -n "${PROJECT_ROOTS+set}" ] || . "$(dirname "$(dirname "$(readlink -f "$0")")")/memory.conf"
+
+# A folder named in NO_MEMORY has memory switched off, with everything inside it. This prints nothing and exits
+# with 3, so no caller can fall back to a parent folder's memory or to the shared one.
+IFS=: read -ra off <<<"${NO_MEMORY:-}"
+for root in "${off[@]}"; do
+  [ -n "$root" ] || continue
+  root=$(realpath -m "${root/#\~/$HOME}")
+  case "$d/" in "$root"/*) exit 3 ;; esac
+  case "$started/" in "$root"/*) exit 3 ;; esac
+done
+
+# A folder named in PROJECT_ROOTS is one project: every session that starts anywhere inside it uses its memory.
+IFS=: read -ra roots <<<"${PROJECT_ROOTS:-}"
+for root in "${roots[@]}"; do
+  [ -n "$root" ] || continue
+  root=$(realpath -m "${root/#\~/$HOME}")
+  case "$d/" in "$root"/*) d=$root ;; esac
+done
+
+if [ -z "$start" ]; then
+  p=$d
+  while [ "$p" != / ] && [ "$p" != "$HOME" ]; do
+    [ -d "$p/.agent-memory" ] && { d=$p; break; }
+    p=$(dirname "$p")
+  done
+fi
+
+case "$d/" in
+  # Home, hidden folders in home (threads with no project), and temp folders share one memory.
+  "$HOME/" | "$HOME"/.* | /) echo "$HOME/.agents/memory" ;;
+  "$HOME"/*) echo "$d/.agent-memory" ;; # keep projects inside a scratch HOME under /tmp out of /tmp/*
+  /tmp/*) echo "$HOME/.agents/memory" ;;
+  *) echo "$d/.agent-memory" ;;
+esac

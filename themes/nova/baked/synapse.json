@@ -1,0 +1,25 @@
+{
+ "image": "baked/synapse.webp",
+ "frames": 36,
+ "fps": 12,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  6,
+  6
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1172,
+  0.1133,
+  0.8828,
+  0.8164
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

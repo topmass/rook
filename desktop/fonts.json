@@ -1,0 +1,38 @@
+[
+  {
+    "name": "serif",
+    "description": "Today's look: a sturdy book serif in bold, warm and easy to read.",
+    "caption": {"family": "Noto Serif", "weight": 700, "size": 21, "line_spacing": 1.35},
+    "label": {"family": "Noto Serif", "weight": 900, "size": 10, "spacing": 2.4}
+  },
+  {
+    "name": "display",
+    "description": "A sharp, high-contrast serif with fine hairlines, like a film title card.",
+    "caption": {"family": "Noto Serif Display", "weight": 700, "size": 23, "line_spacing": 1.28},
+    "label": {"family": "Noto Serif Display", "weight": 900, "size": 11, "spacing": 2.6}
+  },
+  {
+    "name": "plex",
+    "description": "A calm engineering sans, precise and quiet, with a little warmth in its curves.",
+    "caption": {"family": "IBM Plex Sans", "weight": 600, "size": 20, "line_spacing": 1.39},
+    "label": {"family": "IBM Plex Sans", "weight": 700, "size": 9.5, "spacing": 2.4}
+  },
+  {
+    "name": "grotesk",
+    "description": "A geometric grotesque with odd little quirks, clean and slightly uncanny.",
+    "caption": {"family": "Space Grotesk", "weight": 600, "size": 20, "line_spacing": 1.35},
+    "label": {"family": "Space Grotesk", "weight": 700, "size": 10, "spacing": 2.2}
+  },
+  {
+    "name": "mono",
+    "description": "The terminal's own monospace, so the captions match the answer panel.",
+    "caption": {"family": "JetBrainsMono Nerd Font", "weight": 700, "size": 18, "line_spacing": 1.42},
+    "label": {"family": "JetBrainsMono Nerd Font", "weight": 700, "size": 9.5, "spacing": 1.6}
+  },
+  {
+    "name": "garamond",
+    "description": "An elegant old-style Garamond, delicate and literary.",
+    "caption": {"family": "Cormorant Garamond", "weight": 700, "size": 25, "line_spacing": 1.32},
+    "label": {"family": "Cormorant Garamond", "weight": 700, "size": 12, "spacing": 2.6}
+  }
+]

@@ -1,0 +1,25 @@
+{
+ "image": "baked/rest.webp",
+ "frames": 36,
+ "fps": 12,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  6,
+  6
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1094,
+  0.3125,
+  0.8906,
+  0.6875
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

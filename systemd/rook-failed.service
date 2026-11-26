@@ -1,0 +1,7 @@
+[Unit]
+Description=Notify when Rook stops after repeated failures
+# rook.service starts this through OnFailure= once systemd stops restarting it.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/notify-send --urgency=critical --app-name=Rook "Rook stopped" "Rook kept failing, so systemd stopped restarting it. Why: journalctl --user -u rook.service. Start again: systemctl --user reset-failed rook.service && systemctl --user start rook.service"

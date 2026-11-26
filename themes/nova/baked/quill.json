@@ -1,0 +1,25 @@
+{
+ "image": "baked/quill.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  5,
+  5
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1289,
+  0.1484,
+  0.8828,
+  0.793
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

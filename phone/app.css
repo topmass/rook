@@ -1,0 +1,885 @@
+/* Rook on the phone. The colours are the desktop overlay's: TERM_BG, TERM_FG, TERM_DIM, AMBER, PALE_GOLD, IVORY. */
+
+:root {
+  color-scheme: dark;
+  --bg: oklch(15.5% 0.007 271);
+  --fg: oklch(87.7% 0.021 92);
+  --dim: oklch(64% 0.011 286);
+  --ivory: oklch(96.5% 0.039 86);
+  --amber: oklch(80.6% 0.141 77);
+  --pale-gold: oklch(94.2% 0.075 90);
+  --gold-mid: color-mix(in oklch, var(--amber), var(--pale-gold));
+  --code: oklch(87% 0.045 250);
+  --garnet: oklch(72% 0.11 28);
+  --surface: color-mix(in oklch, var(--bg), var(--pale-gold) 4%);
+  --hairline: color-mix(in oklch, var(--amber) 16%, transparent);
+  --edge: color-mix(in oklch, var(--amber) 34%, transparent);
+  --request: color-mix(in oklch, var(--pale-gold) 82%, var(--fg));
+
+  --serif: ui-serif, "Noto Serif", "New York", Georgia, serif;
+  --mono: ui-monospace, "JetBrains Mono", "JetBrainsMono Nerd Font", "SF Mono", Menlo, "Noto Sans Mono", monospace;
+  --gutter: max(20px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--serif);
+  font-size: 100%;
+  line-height: 1.5;
+  text-wrap: pretty;
+  overflow-wrap: break-word;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  caret-color: var(--amber);
+  accent-color: var(--amber);
+  scrollbar-color: var(--edge) transparent;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background:
+    radial-gradient(120% 60% at 50% -10%, color-mix(in oklch, var(--amber) 7%, transparent), transparent 70%),
+    var(--bg);
+}
+
+[hidden] { display: none !important; }
+
+::selection {
+  background: color-mix(in oklch, var(--amber) 35%, transparent);
+  color: oklch(97.5% 0.03 85);
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+button, input, textarea { font: inherit; color: inherit; }
+button { touch-action: manipulation; user-select: none; -webkit-user-select: none; cursor: pointer; }
+p, h1, h2, h3, ul, ol { margin: 0; }
+
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: clip;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The small caps of the desktop labels: Noto Serif at its heaviest, spaced wide. */
+.label {
+  font-family: var(--serif);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--amber);
+}
+
+/* The dust. */
+.dust {
+  display: block;
+  flex: none;
+  overflow: visible;
+  filter: drop-shadow(0 0 3px color-mix(in oklch, var(--amber) 45%, transparent));
+}
+
+.dust-ring { transform-box: view-box; transform-origin: 50% 50%; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .dust-large .dust-ring { animation: turn 90s linear infinite; }
+}
+
+@keyframes turn { to { rotate: 1turn; } }
+
+/* Pairing. */
+.pair {
+  min-block-size: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  inline-size: min(100%, 26rem);
+  margin-inline: auto;
+  padding-block: calc(env(safe-area-inset-top, 0px) + 32px) calc(env(safe-area-inset-bottom, 0px) + 32px);
+  padding-inline: var(--gutter);
+}
+
+.dust-large {
+  inline-size: 132px;
+  block-size: 132px;
+  margin-block-end: 28px;
+  margin-inline-start: -14px;
+}
+
+.pair-title {
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--ivory);
+  text-wrap: balance;
+}
+
+.pair-lede {
+  margin-block: 12px 36px;
+  font-size: 1.0625rem;
+  color: color-mix(in oklch, var(--fg) 82%, var(--bg));
+}
+
+.pair-form { display: grid; gap: 20px; }
+
+.field { display: grid; gap: 8px; }
+.field .field-label {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.field input {
+  block-size: 54px;
+  padding-inline: 16px;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 1.0625rem;
+  color: var(--ivory);
+}
+
+.field input:focus-visible {
+  outline: 2px solid transparent;
+  border-color: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--amber) 22%, transparent);
+}
+
+.field .pair-code {
+  font-family: var(--mono);
+  font-size: 1.375rem;
+  letter-spacing: 0.12em;
+}
+
+@media (max-height: 780px) {
+  .dust-large { inline-size: 92px; block-size: 92px; margin-block-end: 16px; margin-inline-start: -10px; }
+  .pair-lede { margin-block-end: 24px; }
+  .pair-form { gap: 16px; }
+}
+
+.pair-error {
+  font-size: 1rem;
+  color: var(--garnet);
+}
+
+.pair-form .button { margin-block-start: 8px; }
+
+/* Buttons, after the overlay's card: a gold hairline and gold words; the main choice is filled. */
+.button {
+  min-block-size: 50px;
+  padding-inline: 20px;
+  border: 1px solid color-mix(in oklch, var(--amber) 45%, transparent);
+  border-radius: 12px;
+  background: transparent;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--pale-gold);
+}
+
+.button-primary {
+  background: color-mix(in oklch, var(--amber) 16%, transparent);
+  border-color: color-mix(in oklch, var(--amber) 72%, transparent);
+}
+
+.button:active { background: color-mix(in oklch, var(--amber) 26%, transparent); scale: 0.98; }
+.button:disabled { opacity: 0.45; cursor: default; }
+
+@media (hover: hover) and (pointer: fine) {
+  .button:hover:not(:disabled) { background: color-mix(in oklch, var(--amber) 22%, transparent); }
+  .bar-button:hover { color: var(--pale-gold); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .button, .send, .bar-button { transition: scale 160ms var(--ease-out), background-color 160ms var(--ease-out); }
+}
+
+/* The app shell fills the visual viewport, so the field rides above the keyboard. */
+.shell {
+  position: fixed;
+  inset-inline: 0;
+  inset-block-start: 0;
+  block-size: var(--app-height, 100dvh);
+  translate: 0 var(--app-top, 0px);
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+  --presence-h: clamp(150px, 23dvh, 188px);
+  --zoom: 1.7;
+}
+
+.shell > * { flex: none; }
+.shell > .talk { flex: 1 1 0; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: calc(env(safe-area-inset-top, 0px) + 6px) 6px;
+  padding-inline: calc(var(--gutter) - 6px) calc(var(--gutter) - 12px);
+}
+
+/* Rook's presence: the desktop's dust at the top centre. The whole of it is the talk control. */
+.stage {
+  display: grid;
+  justify-items: center;
+  padding-block: calc(env(safe-area-inset-top, 0px) + 6px) 4px;
+  padding-inline: var(--gutter);
+}
+
+.presence {
+  display: block;
+  inline-size: min(100%, 260px);
+  block-size: var(--presence-h);
+  padding: 0;
+  border: 0;
+  border-radius: 32px;
+  background: none;
+  touch-action: none;  /* A pull on Rook is the app's own gesture, never a scroll or a refresh. */
+}
+
+.presence:active { background: radial-gradient(closest-side, color-mix(in oklch, var(--amber) 9%, transparent), transparent); }
+
+.dust-canvas {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.presence-label {
+  min-block-size: 1.3em;
+  font-size: 0.75rem;
+  letter-spacing: 0.24em;
+  text-align: center;
+  color: var(--gold-mid);
+}
+
+[data-mood="away"] .presence-label, [data-mood="dark"] .presence-label { color: var(--dim); }
+
+/* Live captions, in Rook-only view only: the desk's caption type, ivory serif with a crisp dark edge. */
+.caption {
+  max-inline-size: 22rem;
+  margin-block-start: 12px;
+  font-size: 1.1875rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--ivory);
+  text-shadow: 0 1px 2px oklch(0% 0 none / 0.85);
+}
+
+.presence-note {
+  max-inline-size: 26rem;
+  margin-block-start: 6px;
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  text-align: center;
+  text-wrap: balance;
+  color: color-mix(in oklch, var(--fg) 82%, var(--bg));
+}
+
+.bar-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  padding-inline: 12px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+}
+
+.bar-button:active { background: color-mix(in oklch, var(--amber) 14%, transparent); }
+
+.bar-button svg, .send svg {
+  inline-size: 20px;
+  block-size: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bar-back { padding-inline-start: 6px; }
+.bar-spacer { inline-size: 72px; }
+
+.flag {
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 8px 1px color-mix(in oklch, var(--amber) 60%, transparent);
+}
+
+/* The handle on the text's top edge: a tap, or a pull down, tucks the text away. */
+.collapse {
+  position: relative;
+  z-index: 1;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  inline-size: 96px;
+  block-size: 16px;
+  margin-block-end: -12px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  touch-action: none;
+}
+
+.collapse::after {
+  content: "";
+  position: absolute;
+  inset: -14px 0;
+}
+
+.grabber {
+  inline-size: 36px;
+  block-size: 4px;
+  border-radius: 2px;
+  background: var(--edge);
+}
+
+.collapse:active .grabber { background: var(--amber); }
+.asking .collapse { visibility: hidden; }
+
+@media (hover: hover) and (pointer: fine) {
+  .collapse:hover .grabber { background: color-mix(in oklch, var(--amber) 62%, transparent); }
+}
+
+/* Presence only: the text slides down out of sight, still laid out, and Rook grows in the middle of the screen. */
+.expand {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: calc(env(safe-area-inset-bottom, 0px) + 10px);
+  margin-inline: auto;
+  opacity: 0;
+  visibility: hidden;
+  translate: 0 12px;
+}
+
+.collapsed .expand { opacity: 1; visibility: visible; translate: none; }
+.collapsed .stage { translate: 0 calc((var(--app-height, 100dvh) - 100% - 64px) / 2); }
+.collapsed .presence { scale: var(--zoom); }
+.collapsed { touch-action: none; }  /* Only Rook is left: a push up anywhere brings the text back. */
+.collapsed :is(.presence-label, .caption, .presence-note) { translate: 0 calc(var(--presence-h) * (var(--zoom) - 1) / 4); }
+
+.collapsed :is(.collapse, .talk, .dock) {
+  opacity: 0;
+  visibility: hidden;
+  translate: 0 var(--app-height, 100dvh);
+}
+
+/* The pull's hint: Rook follows the finger a little, and the text fades as the pull nears the change. */
+.pulling:not(.collapsed) :is(.collapse, .talk, .dock) { opacity: calc(1 - 0.6 * var(--pull, 0)); }
+.pulling.collapsed .expand { opacity: calc(1 - 0.6 * var(--pull, 0)); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulling .stage { transform: translateY(calc(var(--pull, 0) * 28px)); }
+  .pulling.collapsed .stage { transform: translateY(calc(var(--pull, 0) * -28px)); }
+
+  :is(.stage, .presence, .presence-label, .caption, .presence-note, .collapse, .talk, .dock, .expand) {
+    transition: translate 420ms var(--ease-out), scale 420ms var(--ease-out), opacity 260ms var(--ease-out),
+      visibility 420ms linear, transform 260ms var(--ease-out);
+  }
+
+  .pulling :is(.stage, .collapse, .talk, .dock, .expand) { transition: none; }
+}
+
+/* The conversation. The owner's requests are typed words, set in the terminal face in gold. Rook's answers are prose. */
+.talk {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-inline: var(--gutter);
+  padding-block: 18px 28px;
+  mask-image: linear-gradient(to bottom, transparent, #000 18px, #000 calc(100% - 12px), transparent);
+}
+
+.talk > * { inline-size: min(100%, 38rem); margin-inline: auto; }
+
+.talk .empty {
+  inline-size: min(100%, 18rem);
+  padding-block: 12px;
+  font-size: 1.0625rem;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--dim);
+}
+
+.turn + .turn {
+  margin-block-start: 26px;
+  padding-block-start: 26px;
+  border-block-start: 1px solid var(--hairline);
+}
+
+.ask-meta {
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  color: var(--dim);
+}
+
+.ask {
+  margin-block: 8px 16px;
+  font-family: var(--mono);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--request);
+}
+
+.answer {
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--fg);
+}
+
+.answer > * + * { margin-block-start: 0.75em; }
+.answer .lead { font-weight: 600; color: var(--ivory); }
+.answer strong { font-weight: 600; color: var(--pale-gold); }
+
+.answer h3 {
+  margin-block-start: 1.25em;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--pale-gold);
+}
+
+.answer ul, .answer ol { padding-inline-start: 1.25em; }
+.answer li + li { margin-block-start: 0.35em; }
+.answer li::marker { color: var(--amber); }
+
+.answer code, .work-try {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--code);
+}
+
+.answer :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: color-mix(in oklch, var(--pale-gold) 7%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.answer pre {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--pale-gold) 5.5%, transparent);
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+.pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  color: var(--pale-gold);
+}
+
+.pending-offline { color: var(--dim); }
+
+.pending-grains {
+  inline-size: 22px;
+  block-size: 6px;
+  flex: none;
+  background:
+    radial-gradient(circle, var(--amber) 1.6px, transparent 2.2px) 0 50% / 8px 6px repeat-x;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pending:not(.pending-offline) .pending-grains { animation: glimmer 1.4s ease-in-out infinite alternate; }
+}
+
+@keyframes glimmer { from { opacity: 0.3; } }
+
+/* The activity icons: one sprite of gold line drawings, each with one part drawn in dust. */
+.sprite {
+  position: absolute;
+  inline-size: 0;
+  block-size: 0;
+  overflow: clip;
+}
+
+.icon, .trail-chevron {
+  display: block;
+  flex: none;
+  inline-size: 20px;
+  block-size: 20px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The trail: what Rook does during a turn, a calm log on a thread of dust, newest at the bottom. */
+.turn-trail:not(:empty) { margin-block-end: 12px; }
+
+.trail-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  column-gap: 12px;
+  padding-block: 5px;
+}
+
+.step .icon {
+  margin-block-start: 1px;
+  color: color-mix(in oklch, var(--pale-gold) 62%, transparent);
+}
+
+.step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 9px;
+  inset-block: 29px -3px;
+  inline-size: 2px;
+  background: radial-gradient(circle, color-mix(in oklch, var(--amber) 50%, transparent) 0.8px, transparent 1.15px)
+    50% 0 / 2px 4px repeat-y;
+}
+
+.step-label {
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  color: color-mix(in oklch, var(--fg) 78%, var(--bg));
+}
+
+.step-detail {
+  margin-block-start: 2px;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.step-now .step-label { color: var(--ivory); }
+.step-now .icon { color: var(--amber); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .step-now { animation: step-in 480ms var(--ease-out); }
+  .step-now .icon { animation: glimmer 1.6s ease-in-out 480ms infinite alternate; }
+}
+
+@keyframes step-in { from { opacity: 0; translate: 0 4px; } }
+
+/* The fold: once the answer is in, the trail is one quiet line that opens again. */
+.trail summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-block-size: 44px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: 10px;
+}
+
+.trail summary::-webkit-details-marker { display: none; }
+.trail summary:active { background: color-mix(in oklch, var(--amber) 8%, transparent); }
+
+.trail-marks {
+  display: flex;
+  gap: 4px;
+  color: color-mix(in oklch, var(--pale-gold) 62%, transparent);
+}
+
+.trail-said {
+  flex: 1;
+  font-size: 0.9375rem;
+  font-style: italic;
+  line-height: 1.4;
+  color: color-mix(in oklch, var(--fg) 72%, var(--bg));
+}
+
+.trail-chevron {
+  inline-size: 16px;
+  block-size: 16px;
+  color: var(--dim);
+}
+
+.trail[open] .trail-chevron { rotate: 90deg; }
+.trail[open] .trail-list { margin-block: 2px 4px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .trail-chevron { transition: rotate 200ms var(--ease-out); }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .trail summary:hover .trail-said { color: var(--fg); }
+}
+
+/* The answer as it is written: the answer's own type, a little dimmer, ending in a grain of dust. */
+.answer.draft { color: color-mix(in oklch, var(--fg) 80%, var(--bg)); }
+.answer.draft .lead { color: color-mix(in oklch, var(--ivory) 84%, var(--bg)); }
+
+.draft-grain {
+  display: inline-block;
+  inline-size: 6px;
+  block-size: 6px;
+  margin-inline-start: 6px;
+  border-radius: 50%;
+  vertical-align: 0.12em;
+  background: var(--amber);
+  box-shadow: 0 0 8px 1px color-mix(in oklch, var(--amber) 55%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .draft-grain { animation: glimmer 0.9s ease-in-out infinite alternate; }
+}
+
+.turn-note {
+  font-size: 1rem;
+  font-style: italic;
+  color: var(--dim);
+}
+
+.turn-error { font-style: normal; color: var(--garnet); }
+
+.ask-waiting { font-family: var(--serif); font-style: italic; color: var(--dim); }
+
+/* The dock: the field, with the work list beside it. */
+.dock {
+  display: grid;
+  gap: 10px;
+  padding-inline: calc(var(--gutter) - 8px);
+  padding-block: 4px calc(env(safe-area-inset-bottom, 0px) + 10px);
+}
+
+.keyboard .dock { padding-block-end: 8px; }
+.dock > * { inline-size: min(100%, 40rem); margin-inline: auto; }
+
+.card {
+  display: grid;
+  gap: 12px;
+  margin-block-end: 26px;
+  padding: 16px;
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px -12px oklch(0% 0 none / 0.7), 0 0 48px -20px color-mix(in oklch, var(--amber) 35%, transparent);
+}
+
+.card-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ivory);
+}
+
+.card-question {
+  display: grid;
+  gap: 6px;
+  max-block-size: 28dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.card-option { color: var(--request); }
+
+.card-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.card-note {
+  margin-block-end: 20px;
+  padding-inline: 8px;
+  font-size: 0.9375rem;
+  text-align: center;
+  color: var(--dim);
+}
+
+.composer-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: end;
+  gap: 4px;
+}
+
+.tool-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  inline-size: 44px;
+  block-size: 44px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: color-mix(in oklch, var(--pale-gold) 66%, transparent);
+}
+
+.tool-button .icon { inline-size: 22px; block-size: 22px; }
+.tool-button:active { background: color-mix(in oklch, var(--amber) 14%, transparent); }
+.tool-button .flag { position: absolute; inset-block-start: 8px; inset-inline-end: 7px; }
+.voice-toggle[aria-pressed="true"] { color: var(--amber); }
+.voice-toggle[aria-pressed="false"] .icon { opacity: 0.7; }
+
+@media (hover: hover) and (pointer: fine) {
+  .tool-button:hover { color: var(--pale-gold); }
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: end;
+  gap: 4px;
+  padding: 3px 3px 3px 16px;
+  border: 1px solid var(--edge);
+  border-radius: 24px;
+  background: var(--surface);
+}
+
+.composer:focus-within { border-color: color-mix(in oklch, var(--amber) 62%, transparent); }
+
+.composer textarea {
+  field-sizing: content;
+  min-block-size: 44px;
+  max-block-size: calc(5lh + 20px);
+  padding-block: 11px;
+  border: 0;
+  background: none;
+  resize: none;
+  font-family: var(--mono);
+  font-size: max(16px, 1rem);
+  line-height: 1.4;
+  color: var(--request);
+  text-wrap: stable;
+}
+
+.composer textarea:focus-visible { outline: 2px solid transparent; }
+.composer textarea::placeholder { color: var(--dim); opacity: 1; }
+
+.send {
+  display: grid;
+  place-items: center;
+  inline-size: 44px;
+  block-size: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--amber) 88%, var(--pale-gold));
+  color: var(--bg);
+}
+
+.send svg { stroke-width: 2.2; }
+
+.send.stop {
+  background: none;
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--amber) 62%, transparent);
+  color: var(--amber);
+}
+
+.send.stop:active:not(:disabled) { background: color-mix(in oklch, var(--amber) 16%, transparent); }
+.send.stop:disabled { opacity: 0.5; }
+.send:active:not(:disabled) { scale: 0.94; }
+.send:disabled {
+  background: none;
+  color: color-mix(in oklch, var(--amber) 50%, transparent);
+  cursor: default;
+}
+
+/* The work list, one tap from the conversation. */
+.work {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background:
+    radial-gradient(120% 60% at 50% -10%, color-mix(in oklch, var(--amber) 7%, transparent), transparent 70%),
+    var(--bg);
+}
+
+.work .bar h2 { color: var(--pale-gold); }
+.work .bar-back { color: var(--amber); }
+
+.work-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-inline: var(--gutter);
+  padding-block: 12px calc(env(safe-area-inset-bottom, 0px) + 32px);
+}
+
+.work-body > * { inline-size: min(100%, 38rem); margin-inline: auto; }
+.work-group + .work-group { margin-block-start: 36px; }
+
+.work-heading {
+  padding-block-end: 10px;
+  border-block-end: 1px solid var(--hairline);
+}
+
+.work-list { padding: 0; list-style: none; }
+
+.work-item {
+  display: grid;
+  gap: 4px;
+  padding-block: 16px;
+  border-block-end: 1px solid color-mix(in oklch, var(--amber) 8%, transparent);
+}
+
+.work-project {
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  color: var(--pale-gold);
+}
+
+.work-wish {
+  font-size: 1.0625rem;
+  line-height: 1.45;
+  color: var(--ivory);
+}
+
+.work-news {
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: color-mix(in oklch, var(--fg), var(--dim) 30%);
+}
+
+.work-try { font-size: 0.8125rem; }

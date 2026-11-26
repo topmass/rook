@@ -1,0 +1,27 @@
+{
+  "name": "Omarchy",
+  "version": "0.1.0",
+  "description": "Omarchy desktop control: omarchy skill routing, browser link launcher, terminal folder lookup, and desktop confirmations.",
+  "activation": "auto",
+  "detect": {
+    "platform": "linux",
+    "commands_on_path": ["omarchy-launch-browser"],
+    "host_skill_present": "omarchy"
+  },
+  "host_skills_allow": ["omarchy"],
+  "prompt_slots": {
+    "identity_desktop": {
+      "text": "Omarchy Linux desktop, which runs Hyprland on Arch"
+    },
+    "desktop_control": "prompts/desktop_control.md",
+    "desktop_confirmations": {
+      "text": " Before you edit a config file under ~/.config, reload Hyprland or the shell, or move ⟦his⟧ windows or desktops, say in one sentence what you will change and wait for ⟦his⟧ yes, unless ⟦he⟧ asked for exactly that change."
+    }
+  },
+  "hook_policy": {
+    "read_only_commands": ["omarchy-cmd-terminal-cwd"],
+    "activity_prefixes": {
+      "omarchy": "windows"
+    }
+  }
+}

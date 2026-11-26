@@ -1,0 +1,26 @@
+{
+ "image": "baked/helix.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main",
+  "voice"
+ ],
+ "cell": 256,
+ "grid": [
+  7,
+  7
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.0781,
+  0.2539,
+  0.9219,
+  0.7461
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

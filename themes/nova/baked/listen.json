@@ -1,0 +1,26 @@
+{
+ "image": "baked/listen.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main",
+  "voice"
+ ],
+ "cell": 256,
+ "grid": [
+  7,
+  7
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1289,
+  0.1289,
+  0.8711,
+  0.8711
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

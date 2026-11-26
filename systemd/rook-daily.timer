@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart Rook once a day, at 04:30, after the nightly dream at 04:00
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+# A day the machine sleeps through 04:30 has no restart, so Rook never restarts during the day.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

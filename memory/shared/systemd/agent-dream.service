@@ -1,0 +1,8 @@
+[Unit]
+Description=Nightly dream: update agent memory folders from the day's sessions
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/.agents/bin/dream
+TimeoutStartSec=4h

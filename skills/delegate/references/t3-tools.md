@@ -1,0 +1,27 @@
+# The T3 tools
+
+Rook's Claude session reaches T3's tool server under the name `t3`, so each tool appears as `mcp__t3__<name>`. Every tool below takes `environmentId`. Pass the machine's id from the workspace skill. Thread and project ids belong to the machine they came from, so always pass the same `environmentId` you found them with.
+
+Rook is denied four tools: `t3_project_delete`, `t3_environment_unlink`, `t3_environment_link`, and `pull_request_merge`. Some allowed tools, such as `t3_queue`, `t3_thread_organize`, `t3_thread_transfer`, and `delete_scheduled_task`, mix safe and destructive actions. Never delete, archive, cancel, or merge anything in ⟦owner⟧'s threads, queues, or scheduled tasks unless ⟦verb:he asks|they ask⟧ for it in so many words. The one exception: you settle your own finished research threads, as research.md says. ⟦Owner⟧ approves permission requests ⟦himself⟧ in T3 Code.
+
+## Reading
+
+- **`t3_environment_links`** takes no arguments. It lists each linked machine with its `status`, such as `reachable`, its `access`, and `expiresAt`.
+- **`t3_project_list`** takes `environmentId`, and `limit` and `cursor` for paging. Each project has `id`, `title`, `workspaceRoot`, and `repositoryIdentity` with the GitHub owner and name.
+- **`t3_thread_list`** takes `environmentId`, then either `projectId` or `allProjects: true`. Also pass `includeSubagents: false`, a `limit` of 10 to 15, and `settled: false` when you want only open work. `statuses` filters by state, and `titleContains` by title. Each thread has `threadId`, `title`, `status`, `model`, `updatedAt`, `settled`, `itemCount`, `parentThreadId`, and `pendingBackgroundTasks`. Threads come newest first. A list does not show `pendingRequestCount`.
+- **`t3_thread_search`** takes `query` and `environmentId`, and optionally `projectId` and `limit`. It searches titles, branches, pull requests, project names, and then message text. It skips subagent threads. It is not exhaustive, so also list the project's threads.
+- **`t3_thread_read`** takes `threadId` and `environmentId`. For the latest messages, pass `view: "messages"`, `beforePosition` set to the thread's `itemCount`, `limit: 4`, `maxCharsPerItem: 600`, and `runLimit: 1`. Without `beforePosition`, it reads from the start of the thread. The answer's `thread` part has `status`, `activeRunId`, `pendingRequestCount`, and `pendingBackgroundTasks`.
+- **`t3_pending_request`** with `action: "list"` and a `threadId` returns the ids of the thread's open questions. With `action: "read"` and a `requestId`, it returns each question's `id`, text, and options. With `action: "respond"`, the `requestId`, and `answers` mapping each question `id` to ⟦owner⟧'s answer, it answers the question and the turn carries on. Rook does this for ⟦owner⟧'s own answers only. Permission requests are not listed, and `respond` cannot approve them.
+- **`t3_queue`** with `action: "list"` or `"read"` shows a thread's queued messages. Use its other actions, such as `cancel`, only when ⟦owner⟧ asks for that in so many words.
+
+## Acting
+
+- **`t3_thread_send`** takes `threadId`, `message`, `environmentId`, `mode`, and a `clientRequestId`: for a handoff, the key `relay.py handoff --print` gives on line one; otherwise a new one. `queue` makes the message the thread's next turn and disturbs nothing: into a running turn it returns a new run id with `delivery: "queued"`, and into an idle thread it returns `delivery: "started"`. `auto` or `steer` into a running turn returns that turn's run id with `delivery: "steered"`, and `auto` starts a turn on an idle thread. `steer` fails while a turn is still starting. Always send with `auto`, unless ⟦owner⟧ asks for a queue. A thread that waits only on a background task takes a new message as a run at once. Never use `restart` or `freshContext`.
+- **`t3_thread_launch`** starts a top-level thread. Pass `projectId`, `environmentId`, a `title` of three to six words, the brief as `message`, `modelSelection`, and a new `clientRequestId`, such as `rook-` and the time, so a retry after a lost reply cannot make a second thread. On another machine, also pass the `runtimeMode` the workspace skill gives for it, because the link allows no more. The `modelSelection` shape is `{"instanceId": "claudeAgent", "model": "claude-opus-5-5", "options": [{"id": "effort", "value": "high"}]}`. Take the provider, model, and option from models.md. Never pass `scratch: true` for ⟦owner⟧'s work, because a scratch thread lands in a dated folder under `~/.t3/scratch`.
+- **`t3_thread_interrupt`** takes `threadId`, `environmentId`, and a short `reason`. It stops the running turn, drops messages steered into that turn, and keeps queued ones. It has no effect on an idle thread. Use it only as conversation.md describes.
+- **`t3_project_create`** registers a folder as a project. It works on this machine, and returns `capability_denied` through a link that may not change projects. New projects go through `relay.py project new` instead, as new-project.md shows.
+- **`t3_project_clone`** clones a repository into `destinationPath`, which must be new or empty. Register the folder with `t3_project_create` afterwards.
+
+## Speed
+
+A list call returns about 1.5 kilobytes per thread, so keep `limit` low. Make independent calls in one turn, such as the search and the list for the same project, or the lists for several machines. Read at most three threads before you choose.

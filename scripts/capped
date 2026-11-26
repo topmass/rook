@@ -1,0 +1,21 @@
+#!/bin/sh
+# Usage: scripts/capped <command> [args...]
+# Rook and the game use about half the RAM, so a test at 50% would still freeze the desktop.
+# Pages the job writes to tmpfs count against MemoryMax.
+# Zero swap keeps a runaway job inside its scope.
+set -eu
+
+if [ "$#" -eq 0 ]; then
+	echo "Usage: scripts/capped <command> [args...]" >&2
+	exit 2
+fi
+
+cores=$(nproc --all)
+cpu_quota=$((cores * 50))
+mem_kb=$(awk '/^MemTotal:/ { printf "%d", $2 / 4; exit }' /proc/meminfo)
+
+exec systemd-run --user --scope --quiet \
+	-p "CPUQuota=${cpu_quota}%" \
+	-p "MemoryMax=${mem_kb}K" \
+	-p MemorySwapMax=0 \
+	-- nice -n 10 ionice -c 3 "$@"

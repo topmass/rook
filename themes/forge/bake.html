@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src data:; style-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="forge-job" content="__FORGE_JOB_B64__">
+<title>Forge bake</title>
+<body>
+<script>
+// bake.py fills the base64 meta tag with JOB: {src, cell, ss, frames, layers, times}. It renders each layer's frames,
+// packs them into one atlas (layer by layer, frame by frame, left to right, top to bottom), and prints JSON.
+const _jobB64 = document.querySelector('meta[name="forge-job"]').getAttribute("content") || "";
+const _jobBytes = Uint8Array.from(atob(_jobB64), c => c.charCodeAt(0));
+const JOB = JSON.parse(new TextDecoder().decode(_jobBytes));
+function bake() {
+  const size = JOB.cell * JOB.ss;
+  const glc = document.createElement("canvas");
+  glc.width = glc.height = size;
+  const gl = glc.getContext("webgl2", {premultipliedAlpha: true, preserveDrawingBuffer: true, antialias: false});
+  const vs = "#version 300 es\nin vec2 a;void main(){gl_Position=vec4(a,0.,1.);}";
+  const fs = "#version 300 es\n" + JOB.src + `
+void main() {
+  AA = 2.0 / u_res.y;
+  vec2 p = (gl_FragCoord.xy - 0.5 * u_res) / (0.5 * u_res.y);
+  vec4 c = clamp(icon(p, u_t, u_layer), 0.0, 1.0);
+  // Fade everything to nothing before the cell's edge, so no glow ever shows the square it was baked in.
+  c *= 1.0 - smoothstep(0.86, 0.99, max(abs(p.x), abs(p.y)));
+  c *= step(0.006, c.a);  // Drop the last faint tail of each glow: it costs file size and nobody sees it.
+  forge_out = vec4(min(c.rgb, vec3(c.a)), c.a);
+}`;
+  const prog = gl.createProgram();
+  for (const [type, text] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, text);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(prog, sh);
+  }
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const U = n => gl.getUniformLocation(prog, n);
+  gl.uniform2f(U("u_res"), size, size);
+
+  // A loop samples t in [0, 1); a one-shot samples [0, 1] inclusive, so its last frame is exactly its end.
+  const times = JOB.times || [...Array(JOB.frames).keys()].map(f => f / (JOB.loop ? JOB.frames : JOB.frames - 1));
+  const n = times.length * JOB.layers.length;
+  const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+  const atlas = document.createElement("canvas");
+  atlas.width = cols * JOB.cell;
+  atlas.height = rows * JOB.cell;
+  const ctx = atlas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  let k = 0;
+  for (let layer = 0; layer < JOB.layers.length; layer++) {
+    gl.uniform1i(U("u_layer"), layer);
+    for (const t of times) {
+      gl.uniform1f(U("u_t"), t);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      ctx.drawImage(glc, 0, 0, size, size, (k % cols) * JOB.cell, Math.floor(k / cols) * JOB.cell, JOB.cell, JOB.cell);
+      k++;
+    }
+  }
+  if (JOB.seam) {
+    // Loop check: cells 0 and 1 hold t = 0 and t = 1, which must match.
+    const a = ctx.getImageData(0, 0, JOB.cell, JOB.cell).data, b = ctx.getImageData(JOB.cell, 0, JOB.cell, JOB.cell).data;
+    let worst = 0, off = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let c = 0; c < 4; c++) d = Math.max(d, Math.abs(a[i + c] - b[i + c]));
+      worst = Math.max(worst, d);
+      if (d > 8) off++;
+    }
+    return {seam: worst, off};
+  }
+  // The bounding box over every frame, in the cell's own 0..1 units, y down.
+  const px = ctx.getImageData(0, 0, atlas.width, atlas.height).data;
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0, edge = 0, edgeAt = null;
+  const EDGE = 0.86;
+  for (let y = 0; y < atlas.height; y++) for (let x = 0; x < atlas.width; x++) {
+    if (px[(y * atlas.width + x) * 4 + 3] < 6) continue;
+    const u = (x % JOB.cell) / JOB.cell, v = (y % JOB.cell) / JOB.cell;
+    x0 = Math.min(x0, u); y0 = Math.min(y0, v); x1 = Math.max(x1, u + 1 / JOB.cell); y1 = Math.max(y1, v + 1 / JOB.cell);
+    // The edge check: nothing may show in the cell's outer band, where the forge fades everything out; anything
+    // there shows the square it was baked in.
+    const al = px[(y * atlas.width + x) * 4 + 3];
+    if (Math.max(Math.abs(2 * u - 1), Math.abs(2 * v - 1)) > EDGE && al > edge) { edge = al; edgeAt = [+u.toFixed(2), +v.toFixed(2)]; }
+  }
+  return {png: atlas.toDataURL(JOB.format === "webp" ? "image/webp" : "image/png", JOB.quality || 0.9), grid: [cols, rows], bbox: [x0, y0, x1, y1].map(v => +v.toFixed(4)), edge, edgeAt};
+}
+let out;
+try { out = bake(); } catch (e) { out = {error: String(e.message || e)}; }
+const pre = document.createElement("pre");
+pre.id = "forge";
+pre.textContent = JSON.stringify(out);
+document.body.append(pre);
+</script>

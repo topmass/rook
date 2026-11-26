@@ -1,0 +1,25 @@
+{
+ "image": "baked/lattice.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  5,
+  5
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1797,
+  0.1523,
+  0.8203,
+  0.8477
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

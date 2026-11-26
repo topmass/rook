@@ -1,0 +1,25 @@
+{
+ "image": "baked/dispatch_in.webp",
+ "frames": 18,
+ "fps": 60,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  5,
+  4
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.125,
+  0.3086,
+  0.875,
+  0.6875
+ ],
+ "loop": false,
+ "alpha": "straight"
+}

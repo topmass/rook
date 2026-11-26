@@ -1,0 +1,25 @@
+{
+ "image": "baked/strand_head.webp",
+ "frames": 12,
+ "fps": 24,
+ "layers": [
+  "main"
+ ],
+ "cell": 64,
+ "grid": [
+  4,
+  3
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.0938,
+  0.2188,
+  0.9375,
+  0.7813
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

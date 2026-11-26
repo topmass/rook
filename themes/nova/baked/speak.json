@@ -1,0 +1,27 @@
+{
+ "image": "baked/speak.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main",
+  "glow",
+  "wave"
+ ],
+ "cell": 256,
+ "grid": [
+  9,
+  8
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1055,
+  0.1563,
+  0.8945,
+  0.9063
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

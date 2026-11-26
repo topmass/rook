@@ -1,0 +1,25 @@
+{
+ "image": "baked/flash.webp",
+ "frames": 20,
+ "fps": 60,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  5,
+  4
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1328,
+  0.0977,
+  0.875,
+  0.8711
+ ],
+ "loop": false,
+ "alpha": "straight"
+}

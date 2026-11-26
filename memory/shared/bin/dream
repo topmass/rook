@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Nightly dream: improve each project's memory folder from the day's agent sessions.
+
+Design follows Anthropic's "components of agent memory" research. For each project with new session activity:
+analysts read the transcripts against the memory and propose changes, without writing. Then one writer per project
+checks the proposals, decides, and edits the memory folder in place: it adds what was missed, corrects what is
+wrong, forgets what is stale, and keeps the index small.
+Models and the nightly run cap come from memory.conf. Workers are Claude Code CLI runs on the subscription login.
+
+  dream                    sessions changed since the last run, and idle for 30 minutes
+  dream --dry-run          show what a run would read, call no model
+  dream --session FILE     dream over one whole session file now
+  dream --review DIR...    full writer review of the given memory folders now
+  dream --reindex DIR...   rewrite only the index lines of the given memory folders now
+  dream --baseline         mark every existing session as already dreamed
+"""
+import fcntl, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, threading, time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+HOME = Path.home()
+BASE = Path(__file__).resolve().parents[1]  # installed root (~/.agents)
+SYS = HOME / ".agents/dream"         # runtime data: state, log, status
+CACHE = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "agent-dream"  # transcript exports and memory backups
+STATE = SYS / "state.json"
+SOURCES = [f"{HOME}/.claude/projects/*/*.jsonl", f"{HOME}/.codex/sessions/*/*/*/*.jsonl", f"{HOME}/.pi/agent/sessions/*/*.jsonl"]
+IDLE_SECS = 30 * 60   # a session touched more recently than this is still in flight
+KB = 1024             # every size limit here is in kilobytes
+BLOCK_KB = 100        # one message or tool result larger than this keeps its head and tail; the same size as the note limit
+PART_KB = 400         # one analyzer reads at most this much
+SMALL_KB = 2          # a session with less text than this has nothing to teach
+INDEX_LINES, INDEX_BYTES = 200, 25_000  # the part of MEMORY.md a session loads, as in Claude Code; the hook and writer prompt match
+UNREAD_DAYS = 60      # a note no session opened for this long is a candidate to forget
+REVIEW_DAYS = 30      # an active project gets a full review this often, so stale notes do not sit forever
+DEFAULT_MAX_RUNS = 12  # default hard cap on model runs per night (minimum 2: one analyst plus one writer)
+NOISE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+INJECTED = ("# AGENTS.md instructions", "<environment_context>")  # Codex context blocks, not the user's words
+DELEGATED = re.compile(r"Act as the [\w -]{1,40}sub-?agent\b")    # how a T3 delegate_task brief opens
+STUB = re.compile(r"\s*MOVED TO \[\[[^\]]+\]\]\s*")
+NOTE_PATH = re.compile(r"(/[\w./~-]*?(?:\.agent-memory|\.agents/memory)/[\w.-]+\.md)")
+ANALYZE = ("Please dream over the transcript at {f}: check the memory directory at {mem} against it, and report what "
+           "should be added, corrected, or removed. Change no file. Reply with your report only.")
+WRITE = ("{proposals} Files in the memory directory at {mem} that changed since the last run: {changed}. {extra}"
+         "Decide on the proposals, write the memory, and tidy it as your instructions describe. Write only inside "
+         "that directory.")
+
+
+def load_conf():
+    conf = {}
+    for raw in (BASE / "memory.conf").read_text().splitlines():
+        line = raw.strip()
+        if "=" not in line or line.startswith("#"):
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        conf[k.strip()] = v
+    return conf
+
+
+CONF = load_conf()
+try:
+    MAX_RUNS = max(2, int(CONF.get("DREAM_MAX_RUNS", str(DEFAULT_MAX_RUNS))))
+except ValueError:
+    MAX_RUNS = DEFAULT_MAX_RUNS
+# Rook, the voice assistant, keeps no session files, so that no screenshot is saved. Its turn log holds text only.
+_rook_log_cfg = CONF.get("ROOK_TURN_LOG", "")
+if _rook_log_cfg == "~/.local/state/rook/turns.jsonl" and os.environ.get("XDG_STATE_HOME"):
+    ROOK_LOG = str(Path(os.environ["XDG_STATE_HOME"]) / "rook/turns.jsonl")
+else:
+    ROOK_LOG = os.path.expanduser(_rook_log_cfg)
+ROOK_DIR = os.path.expanduser(CONF.get("ROOK_START_DIR", ""))
+if ROOK_LOG and ROOK_DIR:
+    SOURCES.append(ROOK_LOG)
+if f"{HOME}/.local/bin" not in os.environ.get("PATH", "").split(":"):
+    os.environ["PATH"] = f"{HOME}/.local/bin:{os.environ.get('PATH', '')}"
+for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    os.environ.pop(key, None)  # subscription login only: a stray API key must never be billed
+
+RUNS_LOCK = threading.Lock()
+RUNS_USED = 0
+RUNS_LIMIT = None
+
+
+def resolve_claude():
+    """Return the Claude Code executable from memory.conf, PATH, or common install locations."""
+    configured = os.path.expanduser(CONF.get("CLAUDE_BIN", ""))
+    if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+        return configured
+    if found := shutil.which("claude"):
+        return found
+    for candidate in (HOME / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude")):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "claude"
+
+
+def agent_of(path):
+    return "rook" if path == ROOK_LOG else "codex" if "/.codex/" in path else "pi" if "/.pi/" in path else "claude"
+
+
+def text_of(c):
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(text_of(i) for i in c)
+    if isinstance(c, dict):
+        return c.get("text") or text_of(c.get("content") or c.get("output") or "")
+    return ""
+
+
+def size(s):
+    return len(s.encode())  # bytes
+
+
+def cut(s):
+    """Keep the head and tail of a block larger than BLOCK_KB."""
+    cap = BLOCK_KB * KB
+    if size(s) <= cap:
+        return s
+    return f"{s[:cap * 3 // 4]}\n[... {(size(s) - cap) // KB} KB cut ...]\n{s[-cap // 4:]}"
+
+
+def items(label, content):
+    """Yield (label, text) for one message's content: a string or a list of blocks."""
+    if isinstance(content, str):
+        yield label, content
+        return
+    for b in content or []:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") in ("tool_use", "toolCall"):
+            yield f"TOOL CALL {b.get('name')}", json.dumps(b.get("input") or b.get("arguments"))
+        elif b.get("type") == "tool_result":
+            yield "TOOL RESULT", text_of(b.get("content"))
+        elif b.get("text"):  # thinking blocks carry no "text"
+            yield label, b["text"]
+
+
+def events(agent, o):
+    """Yield (label, text) for one line of a Claude Code, Codex, or Pi session file."""
+    if agent == "claude":
+        if o.get("type") in ("user", "assistant") and not o.get("isSidechain") and not o.get("isMeta"):
+            yield from items("USER" if o["type"] == "user" else "AGENT", (o.get("message") or {}).get("content"))
+    elif agent == "codex":
+        p = o.get("payload") or {}
+        kind = p.get("type") if o.get("type") == "response_item" else None
+        if kind == "message" and p.get("role") in ("user", "assistant"):
+            yield from items("USER" if p["role"] == "user" else "AGENT", p.get("content"))
+        elif kind in ("function_call", "custom_tool_call"):
+            yield f"TOOL CALL {p.get('name')}", str(p.get("arguments") or p.get("input"))
+        elif kind in ("function_call_output", "custom_tool_call_output"):
+            yield "TOOL RESULT", text_of(p.get("output"))
+    elif agent == "rook":
+        if o.get("event") == "request":
+            # Only a spoken or typed request is the user's own words. Old rows with no source were spoken.
+            # Anything else reached Rook from a thread, a watcher, a restart, or a test.
+            who = o.get("source")
+            yield ("USER" if who in (None, "spoken", "typed") else f"MESSAGE {who}"), str(o.get("text") or "")
+        elif o.get("event") == "response" and str(o.get("text") or "").strip() != "PASS":  # PASS: Rook chose silence
+            used = o.get("tools") or []
+            used = ", ".join(map(str, used)) if isinstance(used, list) else str(used)
+            yield "AGENT", str(o.get("text") or "") + (f"\n[tools used: {used}]" if used else "")
+    else:
+        m = (o.get("message") or {}) if o.get("type") == "message" else {}
+        if m.get("role") == "toolResult":
+            yield "TOOL RESULT", text_of(m.get("content"))
+        elif m.get("role") in ("user", "assistant"):
+            yield from items("USER" if m["role"] == "user" else "AGENT", m.get("content"))
+
+
+def export(path, start):
+    """Read a session file from line `start`. Return its cwd, line count, text blocks, block end lines, timestamps, and opened notes."""
+    agent, cwd, blocks, ends, span, opened, n = agent_of(path), None, [], [], [], set(), -1
+    if agent == "rook":
+        cwd = ROOK_DIR  # the log does not record a folder; Rook always starts in this one
+    with open(path, errors="replace") as f:
+        for n, line in enumerate(f):
+            if cwd and n < start:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            payload = o.get("payload") if isinstance(o.get("payload"), dict) else {}
+            cwd = cwd or o.get("cwd") or payload.get("cwd")
+            if n < start:
+                continue
+            for label, text in events(agent, o):
+                said = label in ("USER", "AGENT")
+                if label.startswith("TOOL CALL"):
+                    opened.update(NOTE_PATH.findall(text))
+                text = NOISE.sub("", text).strip() if said else text.strip()
+                if text and not (label == "USER" and text.startswith(INJECTED)):
+                    blocks.append(f"{label}:\n{cut(text)}")
+                    ends.append(n + 1)
+                    span.append(o.get("timestamp") or o.get("at"))
+    return cwd, n + 1, blocks, ends, span, opened
+
+
+def delegated(path):
+    """True for a sub-agent session that a main agent started through T3. Its parent thread holds the user's words
+    and the outcome, so dreaming both would read the same work twice."""
+    agent = agent_of(path)
+    with open(path, errors="replace") as f:
+        for n, line in enumerate(f):
+            if n > 300:
+                break
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            for label, text in events(agent, o) if isinstance(o, dict) else ():
+                text = NOISE.sub("", text).strip()
+                if label == "USER" and text and not text.startswith(INJECTED):
+                    return bool(DELEGATED.match(text))
+    return False
+
+
+def parts(blocks, ends=None):
+    """Split blocks into chunks up to PART_KB each. When ends is given, return [(chunk, end_line)].
+    If a boundary falls between blocks on the same line, end the part before that line so it is re-read."""
+    out, cur, cur_end, total = [], [], 0, 0
+    for i, b in enumerate(blocks):
+        if cur and total + size(b) > PART_KB * KB:
+            out.append((cur, ends[i] - 1 if ends[i] == cur_end else cur_end) if ends is not None else cur)
+            cur, total = [], 0
+        cur.append(b)
+        if ends is not None:
+            cur_end = ends[i]
+        total += size(b)
+    return out + ([(cur, cur_end)] if ends is not None else [cur])
+
+
+OFF = "memory is off"  # what memory_dir returns for a folder listed under NO_MEMORY
+
+
+def memory_dir(cwd, dirs):
+    found = subprocess.run([BASE / "bin/memory-dir", "--start", cwd], capture_output=True, text=True)
+    if found.returncode == 3:  # the folder is listed under NO_MEMORY; this holds even after the folder is deleted
+        return OFF
+    if not os.path.isdir(cwd):
+        return dirs.get(cwd)  # a deleted worktree: use what the session hook recorded
+    return found.stdout.strip() or None
+
+
+def project_of(mem):
+    """The project a memory folder belongs to. The shared memory in ~/.agents has none."""
+    return os.path.dirname(mem) if mem.endswith("/.agent-memory") else None
+
+
+def has_notes(mem):
+    """Memory is in use in a project once the memory model has written a first note. The hook's empty index does not count."""
+    return any(f.name != "MEMORY.md" for f in Path(mem).glob("*.md"))
+
+
+def context_for(mem, run, n):
+    """Write the reference files a worker may read, and return the sentences that point it to them."""
+    text, project = [], project_of(mem)
+    if project:
+        text.append(f"You can also read the project at {project}, to check what its code and instruction files "
+                    "already show. You cannot change it.")
+        history = subprocess.run(["git", "-C", project, "log", "-n", "80", "--date=short", "--format=%ad %s"],
+                                 capture_output=True, text=True).stdout
+        if history:
+            (run / f"git-log-{n}.txt").write_text(history)
+            text.append(f"The project's recent commit history is in {run}/git-log-{n}.txt.")
+    return " ".join(text)
+
+
+def backup(mem, manual):
+    """One snapshot per project per night, plus one before each manual run. Newest 7 kept.
+    They live outside the memory folder; no agent reads them."""
+    dest = CACHE / "backups" / mem.strip("/").replace("/", "-")
+    dest.mkdir(parents=True, exist_ok=True)
+    today = dest / time.strftime("%Y%m%d-%H%M%S.tgz" if manual else "%Y%m%d.tgz")
+    if not today.exists():
+        with tarfile.open(today, "w:gz") as t:
+            t.add(mem, arcname=".")
+    for old in sorted(dest.glob("*.tgz"))[:-7]:
+        old.unlink()
+
+
+def snapshot(mem):
+    """The name and content hash of every file in a memory folder, for the change ledger."""
+    return {str(f.relative_to(mem)): hashlib.sha256(f.read_bytes()).hexdigest() for f in Path(mem).rglob("*") if f.is_file()}
+
+
+def claude(role, mem, brief, run, context):
+    """Run one worker in the Claude Code CLI. It can read the memory folder, the project, and the run folder.
+    Only the writer can write, and only in the memory folder. No worker has a shell or the network, because
+    transcripts can carry text from web pages and tools."""
+    global RUNS_USED
+    with RUNS_LOCK:
+        if RUNS_LIMIT is not None and RUNS_USED >= RUNS_LIMIT:
+            return False, f"Nightly cap of {RUNS_LIMIT} model runs reached.", (0, 0, 0)
+        RUNS_USED += 1
+    system = (BASE / "prompts" / f"{role.lower()}.md").read_text().replace("{mem_dir}", mem).replace("{context}", context)
+    # An Edit rule covers every file-writing tool, Write included.
+    tools, may_edit = ("Read,Write,Edit,Glob,Grep", [f"Edit(/{mem}/**)"]) if role == "WRITER" else ("Read,Glob,Grep", [])
+    cmd = [resolve_claude(), "-p", "--restricted", "--strict-mcp-config", "--tools", tools,
+           "--permission-mode", "dontAsk", "--allowedTools", "Read", "Glob", "Grep", *may_edit,
+           "--no-session-persistence", "--disable-slash-commands",
+           "--add-dir", *[str(d) for d in (run, project_of(mem)) if d],
+           "--model", CONF[f"DREAM_{role}_MODEL"], "--effort", CONF[f"DREAM_{role}_EFFORT"],
+           "--system-prompt", system, "--output-format", "json", brief]
+    try:
+        r = subprocess.run(cmd, cwd=mem, capture_output=True, text=True, timeout=3600, stdin=subprocess.DEVNULL)
+        o = json.loads(r.stdout)
+        models = [m for m in (o.get("modelUsage") or {}).values() if isinstance(m, dict)]
+        read = sum(m.get("inputTokens", 0) + m.get("cacheReadInputTokens", 0) + m.get("cacheCreationInputTokens", 0) for m in models)
+        wrote = sum(m.get("outputTokens", 0) for m in models)
+        return not o.get("is_error"), str(o.get("result", "")), (1, read, wrote)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"[:300], (1, 0, 0)
+
+
+def add(a, b):
+    """Add two usage counts: (agent runs, tokens read, tokens written)."""
+    return tuple(x + y for x, y in zip(a, b))
+
+
+def flat(text, limit):
+    return " ".join(text.split())[:limit]
+
+
+def analyze(mem, f, run, context):
+    """One analyst reads one transcript part against the memory and reports proposals. It writes nothing itself.
+    Its report is saved beside the transcript for the writer."""
+    ok, text, spent = claude("ANALYZER", mem, ANALYZE.format(f=f, mem=mem), run, context)
+    if ok:
+        f.with_suffix(".proposals.md").write_text(text)
+    return ok, text, spent
+
+
+def write_memory(mem, proposals, run, context, since, unread, full, manual):
+    """The writer checks the night's proposals, decides, and edits the memory folder. It is the folder's only writer.
+    Returns None when there is nothing to do, else whether it succeeded, its reply, its usage, and whether it
+    did a full review."""
+    # Sizes go in the brief because a model cannot measure a file.
+    changed = sorted(f"{f.name} ({f.stat().st_size / 1024:.1f} KB)" for f in Path(mem).glob("*.md") if f.stat().st_mtime > since)
+    index = Path(mem) / "MEMORY.md"
+    text = index.read_text(errors="replace") if index.exists() else ""
+    lines, kb = len(text.splitlines()), len(text.encode()) / KB
+    over = lines > INDEX_LINES or kb * KB > INDEX_BYTES
+    proposals = [p for p in proposals if "NO PROPOSALS" not in p.read_text(errors="replace")]
+    if not proposals and not changed and not full and not over:
+        return None
+    backup(mem, manual)
+    listed = ("Tonight's proposal files, in time order: " + ", ".join(map(str, proposals)) + ". Each sits beside the "
+              "transcript it came from, which has the same name ending in .txt.") if proposals else "There are no proposals tonight."
+    extra = "Tonight is a full review: go through the whole directory. " if full is True else ""
+    if full == "index":
+        extra += ("Rewrite every line of MEMORY.md in the short form your instructions describe. Read each note's "
+                  "frontmatter for this, not the whole note. Change no note. ")
+    if over:  # a full index is fixed in the index; it is never a reason to forget or merge notes
+        extra += (f"MEMORY.md is over its limit: it has {lines} lines and {kb:.1f} KB, and the limit is {INDEX_LINES} lines "
+                  f"and {INDEX_BYTES // 1000} KB. Reshape the index as your instructions describe. ")
+    if unread:
+        extra += f"Candidates to forget, opened by no session for over {UNREAD_DAYS} days: {', '.join(unread)}. "
+    before = snapshot(mem)
+    ok, text, spent = claude("WRITER", mem, WRITE.format(proposals=listed, mem=mem, changed=", ".join(changed) or "none", extra=extra), run, context)
+    if ok:  # a failed writer may have stopped halfway through a move, and its stubs say where the lines went
+        for f in Path(mem).rglob("*.md"):
+            if STUB.fullmatch(f.read_text(errors="replace")):
+                f.unlink()
+    # The ledger records what changed on disk, by hash. It holds file names only, never note text.
+    after = snapshot(mem)
+    entry = {"at": time.strftime("%Y-%m-%d %H:%M"), "project": mem, "writer": "ok" if ok else "FAILED",
+             "added": sorted(after.keys() - before.keys()), "deleted": sorted(before.keys() - after.keys()),
+             "changed": sorted(f for f in before.keys() & after.keys() if before[f] != after[f]),
+             "writer_said_unverified": flat(text, 1500)}  # the writer's own account, as dream.log holds it
+    with open(SYS / "ledger.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return ok, text, spent, full is True and ok
+
+
+def cap_jobs(jobs, max_runs):
+    """Admit sessions into the nightly model-run budget (analysts plus one writer per project).
+    Returns (admitted, deferred_paths, cut_notes). A cut session records only the line count of kept parts
+    and stays in retry so the remainder runs on a later night."""
+    max_runs = max(2, max_runs)
+    admitted, deferred, cuts, planned = {}, [], [], 0
+    for mem in sorted(jobs):
+        for ts, p, first_line, total, part_items in jobs[mem]:
+            writer_cost = 0 if mem in admitted else 1
+            need = len(part_items) + writer_cost
+            if planned + need <= max_runs:
+                admitted.setdefault(mem, []).append((ts, p, total, [f for f, _ in part_items]))
+                planned += need
+            elif planned == 0 and len(part_items) + 1 > max_runs:
+                keep = max_runs - 1
+                kept_end = part_items[keep - 1][1]
+                if kept_end <= first_line:
+                    # One transcript line spans every kept part; advance past it so later nights make progress.
+                    kept_end = min(total, first_line + 1)
+                    admitted.setdefault(mem, []).append((ts, p, kept_end, [f for f, _ in part_items[:keep]]))
+                    planned += keep + 1
+                    if kept_end < total:
+                        deferred.append(p)
+                    cuts.append(
+                        f"{mem} | single line in {Path(p).name} spans more than {keep} part(s) ({max_runs}-run cap); "
+                        f"skipped remainder of line {first_line + 1}"
+                    )
+                else:
+                    admitted.setdefault(mem, []).append((ts, p, kept_end, [f for f, _ in part_items[:keep]]))
+                    planned += keep + 1
+                    if kept_end < total:
+                        deferred.append(p)
+                    cuts.append(f"{mem} | cut {Path(p).name} to {keep} of {len(part_items)} part(s) by {max_runs}-run cap; remainder deferred")
+            else:
+                deferred.append(p)
+    return admitted, deferred, cuts
+
+
+def main():
+    global RUNS_USED, RUNS_LIMIT
+    args = sys.argv[1:]
+    SYS.mkdir(parents=True, exist_ok=True)
+    lock = open(SYS / "lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # fails if another dream is running
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    files, started, today = state.setdefault("files", {}), time.time(), time.strftime("%Y-%m-%d")
+    reads = state.setdefault("reads", {})        # memory note -> the last day a session opened it
+    reviewed = state.setdefault("reviewed", {})  # memory folder -> the day of its last full review
+    state.setdefault("reads_since", today)
+    since = state.get("last_run", started - 86400)  # first night: the last 24 hours
+    every = [p for pattern in SOURCES for p in glob.glob(pattern)]
+
+    def save():
+        STATE.with_suffix(".tmp").write_text(json.dumps(state))
+        STATE.with_suffix(".tmp").replace(STATE)
+
+    def days_ago(n):
+        return time.strftime("%Y-%m-%d", time.localtime(started - n * 86400))
+
+    if "--baseline" in args:
+        for p in every:
+            with open(p, "rb") as fh:
+                files[p] = sum(1 for _ in fh)
+        state.update(last_run=started, retry=[])
+        save()
+        return print(f"baseline: {len(every)} sessions marked as already dreamed")
+
+    one = os.path.abspath(args[args.index("--session") + 1]) if "--session" in args else None
+    reindex = "--reindex" in args  # like --review, but the writer only rewrites the index lines
+    flag = "--reindex" if reindex else "--review"
+    review = [os.path.abspath(d) for d in args[args.index(flag) + 1:]] if flag in args else None
+    manual = bool(one or review is not None)
+    picked = [] if review is not None else [one] if one else [p for p in every if os.path.getmtime(p) > since or p in state.get("retry", [])]
+    dirs = dict(l.rstrip("\n").split("\t") for l in open(SYS / "dirs.tsv")) if (SYS / "dirs.tsv").exists() else {}
+    run = CACHE / time.strftime("run-%Y%m%d-%H%M%S")
+    jobs, retry = {mem: [] for mem in review or []}, set()  # jobs: memory folder -> [(ts, session file, line count, [(export, end_line)])]
+    unused = set()  # projects with sessions but no notes yet: memory is not in use there
+    children = 0    # delegated sub-agent sessions, covered by their parent threads
+    switched_off = 0  # sessions in folders listed under NO_MEMORY
+    for p in picked:
+        # Rook's log never goes idle, because Rook is always on. The job reads it up to its current end.
+        if not one and p != ROOK_LOG and started - os.path.getmtime(p) < IDLE_SECS:
+            retry.add(p)  # still in flight: the next run takes it
+            continue
+        done = 0 if one else files.get(p, 0)
+        cwd, total, blocks, ends, span, opened = export(p, done)
+        if total < done:  # the file was rewritten
+            cwd, total, blocks, ends, span, opened = export(p, 0)
+        reads.update({note: today for note in opened if not note.endswith("/MEMORY.md")})
+        if not one and delegated(p):
+            files[p] = total
+            children += 1
+            continue
+        mem = memory_dir(cwd, dirs) if cwd else None
+        if mem == OFF:
+            files[p] = total  # no analyst reads it and no writer runs for it
+            switched_off += 1
+            continue
+        teaches = any(b.startswith("USER:") for b in blocks) and sum(map(size, blocks)) >= SMALL_KB * KB
+        if not mem or cwd.startswith(mem) or not teaches:
+            files[p] = total  # too little to learn from, or no project to file it under
+            continue
+        if not one and not has_notes(mem):
+            files[p] = total  # the memory model starts a project's memory; the dream never writes the first note
+            unused.add(mem)
+            continue
+        times = sorted(t for t in span if isinstance(t, str))
+        when = f"{times[0][:16]} to {times[-1][:16]} UTC" if times else "time unknown"
+        chunks, part_items = parts(blocks, ends), []
+        run.mkdir(parents=True, exist_ok=True)
+        for i, (chunk, end_line) in enumerate(chunks):
+            head = f"SESSION {Path(p).stem} | agent: {agent_of(p)} | project: {cwd} | {when}"
+            head += f" | part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""
+            out_path = run / f"{agent_of(p)}-{Path(p).stem}-{i + 1}.txt"
+            out_path.write_text(head + "\n\n" + "\n\n".join(chunk) + "\n")
+            part_items.append((out_path, total if i == len(chunks) - 1 else end_line))
+        first_line = (ends[0] - 1) if ends else 0
+        jobs.setdefault(mem, []).append((times[0] if times else "", p, first_line, total, part_items))
+    for sessions in jobs.values():
+        sessions.sort()  # by start time, so the writer reads the night in order
+
+    deferred, cuts = [], []
+    if not manual and jobs:
+        jobs, deferred, cuts = cap_jobs(jobs, MAX_RUNS)
+        retry.update(deferred)
+    else:
+        jobs = {mem: [(ts, p, total, [f for f, _ in items]) for ts, p, _, total, items in sessions] for mem, sessions in jobs.items()}
+
+    if "--dry-run" in args:
+        for mem, sessions in jobs.items():
+            for _, p, total, outs in sessions:
+                print(f"{mem}  <-  {p}  ({len(outs)} part(s), {sum(o.stat().st_size for o in outs) // 1024} KB)")
+        for line in cuts:
+            print(line)
+        for mem in sorted(unused):
+            print(f"{mem}  skipped: no notes yet, so memory is not in use here")
+        cap_note = f", {len(deferred)} deferred by {MAX_RUNS}-run cap" if deferred else ""
+        print(f"{sum(map(len, jobs.values()))} session(s) to dream, {len(retry) - len(deferred)} still in flight, "
+              f"{children} sub-agent session(s) left to their parent threads, {switched_off} in folders with memory off{cap_note}")
+        return shutil.rmtree(run, ignore_errors=True)
+
+    def unread(mem):
+        return sorted(f.name for f in Path(mem).glob("*.md")
+                      if f.name != "MEMORY.md" and reads.get(str(f), state["reads_since"]) < days_ago(UNREAD_DAYS))
+
+    log, cost, failures = [f"{mem} | skipped: no notes yet, so memory is not in use here" for mem in sorted(unused)], (0, 0, 0), 0
+    if children:
+        log.append(f"{children} sub-agent session(s) not dreamed: their parent threads carry the outcome")
+    if switched_off:
+        log.append(f"{switched_off} session(s) not dreamed: memory is off in their folder")
+    log.extend(cuts)
+    if deferred:
+        log.append(f"capped at {MAX_RUNS} model runs: {len(deferred)} session(s) deferred to next night")
+
+    RUNS_USED = 0
+    RUNS_LIMIT = None if manual else MAX_RUNS
+
+    if jobs:
+        run.mkdir(parents=True, exist_ok=True)
+        with ThreadPoolExecutor(int(CONF["DREAM_PARALLEL"])) as pool:
+            for mem in jobs:
+                os.makedirs(mem, exist_ok=True)
+            contexts = {mem: context_for(mem, run, n) for n, mem in enumerate(jobs)}
+            # Analysts only read, so they all run side by side.
+            reports = [(mem, p, total, [(f, pool.submit(analyze, mem, f, run, contexts[mem])) for f in outs])
+                       for mem, sessions in jobs.items() for _, p, total, outs in sessions]
+            read, proposals = {mem: [] for mem in jobs}, {mem: [] for mem in jobs}  # sessions read in full, and their reports
+            for mem, p, total, parts_run in reports:
+                good = True
+                for n, (f, future) in enumerate(parts_run):
+                    ok, text, spent = future.result()
+                    good, cost = good and ok, add(cost, spent)
+                    log.append(f"{mem} | analyst {'ok' if ok else 'FAILED'} for {Path(p).name} part {n + 1}: {flat(text, 400)}")
+                if good:
+                    read[mem].append((p, total))
+                    proposals[mem] += [f.with_suffix(".proposals.md") for f, _ in parts_run]
+                else:
+                    retry.add(p)  # a failed session keeps its window: the next run reads it again
+                    failures += 1
+            # One writer per project, so each memory folder has a single writer.
+            writers = {}
+            for mem in jobs:
+                # A full review on first sight would be costly, so a new folder starts its clock today.
+                due = "index" if reindex else review is not None or reviewed.setdefault(mem, today) < days_ago(REVIEW_DAYS)
+                writers[mem] = pool.submit(write_memory, mem, proposals[mem], run, contexts[mem], since, unread(mem), due, manual)
+            for mem, future in writers.items():
+                result = future.result()
+                if result is None:
+                    log.append(f"{mem} | nothing to change, writer skipped")
+                else:
+                    ok, text, spent, was_full = result
+                    cost = add(cost, spent)
+                    log.append(f"{mem} | writer {'ok' if ok else 'FAILED'}{' (full review)' if was_full else ''}: {flat(text, 1500)}")
+                    if was_full:
+                        reviewed[mem] = today
+                    if not ok:  # the proposals were not applied, so the next run reads these sessions again
+                        retry.update(p for p, _ in read[mem])
+                        failures += 1
+                        continue
+                files.update(read[mem])
+
+    shutil.rmtree(run, ignore_errors=True)
+    if not manual:
+        state.update(last_run=started, retry=sorted(retry))
+    save()
+    log = log or ["nothing to dream"]
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    with open(SYS / "dream.log", "a") as f:
+        f.writelines(f"{stamp} | {line}\n" for line in log)
+        # Usage is counted in agent runs and tokens. The runs use the subscription login, so there is no price.
+        f.write(f"{stamp} | run total: {cost[0]} agent runs, {cost[1]:,} tokens read, {cost[2]:,} tokens written\n")
+    # The session hook reads this file and tells the user when the dream is failing.
+    bad = next((line for line in log if "FAILED" in line), "")
+    (SYS / "status").write_text(f"{'FAILED' if failures else 'ok'} {stamp} {bad[:300]}\n")
+    print("\n".join(log))
+    sys.exit(1 if failures else 0)
+
+
+if __name__ == "__main__":
+    main()

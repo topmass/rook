@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Hands one note to the memory model, which files it in this project's memory folder.
+# Usage: remember "<fact and why>"
+set -euo pipefail
+[ $# -gt 0 ] || { echo 'usage: remember "<fact and why>"' >&2; exit 2; }
+base=$(dirname "$(dirname "$(readlink -f "$0")")")
+. "$base/memory.conf"
+claude_bin=${CLAUDE_BIN:-}
+if [ -z "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    claude_bin=$(command -v claude)
+  else
+    claude_bin=claude
+    for candidate in "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+      [ -x "$candidate" ] && { claude_bin=$candidate; break; }
+    done
+  fi
+fi
+dir=$("$base/bin/memory-dir") || { echo "Memory is off in this folder. Nothing was saved." >&2; exit 3; }
+mkdir -p "$dir"
+cd "$dir"
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN # subscription login only: a stray API key must never be billed
+project="" context=""
+case "$dir" in
+  */.agent-memory)
+    project=$(dirname "$dir")
+    context="You can also read the project at $project, to check what its code already shows. You cannot change it."
+    ;;
+esac
+prompt=$(cat "$base/prompts/remember.md")
+# The memory model runs in the Claude Code CLI. It can read the project and write only in the memory folder.
+"$claude_bin" -p --restricted --strict-mcp-config --tools Read,Write,Edit,Glob,Grep \
+  --permission-mode dontAsk --allowedTools Read Glob Grep "Edit(/$dir/**)" \
+  --no-session-persistence --disable-slash-commands ${project:+--add-dir "$project"} \
+  --model "$MEMORY_MODEL" --effort "$MEMORY_EFFORT" \
+  --system-prompt "${prompt//\{context\}/$context}" \
+  "Save this note. Today is $(date +%F). The memory folder is $dir. Note: $*" </dev/null

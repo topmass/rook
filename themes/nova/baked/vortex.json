@@ -1,0 +1,25 @@
+{
+ "image": "baked/vortex.webp",
+ "frames": 24,
+ "fps": 12,
+ "layers": [
+  "main"
+ ],
+ "cell": 256,
+ "grid": [
+  5,
+  5
+ ],
+ "pivot": [
+  0.5,
+  0.5
+ ],
+ "bbox": [
+  0.1172,
+  0.25,
+  0.875,
+  0.75
+ ],
+ "loop": true,
+ "alpha": "straight"
+}

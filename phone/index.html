@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; media-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0c0f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Rook">
+<title>Rook</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+<script src="/presence.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+
+<!-- Rook's activity icons: the desktop dust's forms as gold line drawings. The dotted part of each is its dust. -->
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-thinking" viewBox="0 0 24 24">
+    <path d="M12 3.2 19.6 7.6v8.8L12 20.8 4.4 16.4V7.6Z"/><path d="M4.4 7.6 12 12l7.6-4.4M12 12v8.8"/>
+    <path d="M8.2 5.4l7.6 4.4M15.8 5.4 8.2 9.8" stroke-width="1.7" stroke-dasharray="0 2.6"/>
+  </symbol>
+  <symbol id="i-reading" viewBox="0 0 24 24">
+    <path d="M6.5 3.5H14l4 4v13H6.5Z"/><path d="M14 3.5v4h4"/>
+    <path d="M9.5 11.5h5.6M9.5 14.5h5.6M9.5 17.5h3" stroke-width="1.9" stroke-dasharray="0 2.8"/>
+  </symbol>
+  <symbol id="i-searching" viewBox="0 0 24 24">
+    <circle cx="10.5" cy="10.5" r="6.2"/><path d="m15.2 15.2 5 5" stroke-width="2.2"/>
+    <path d="M7.4 9.6a3.4 3.4 0 0 1 2.2-2.3" stroke-width="1.8" stroke-dasharray="0 2.4"/>
+  </symbol>
+  <symbol id="i-running" viewBox="0 0 24 24">
+    <path d="m4.5 6.5 6 5.5-6 5.5" stroke-width="2"/><path d="M13 18h7" stroke-width="2" stroke-dasharray="0 3.4"/>
+  </symbol>
+  <symbol id="i-editing" viewBox="0 0 24 24">
+    <path d="M20 3.6C13.4 4.2 8.6 9 7.6 16.4 14.2 15.8 19 11 20 3.6Z"/><path d="M4 20.4 15 9.4"/>
+    <path d="M10.6 21h9" stroke-width="1.9" stroke-dasharray="0 3"/>
+  </symbol>
+  <symbol id="i-sending" viewBox="0 0 24 24">
+    <path d="M20.6 3.4c-.6 1.8-6.6 7.8-10.2 10.6 2.8-3.6 8.8-9.6 10.2-10.6Z"/>
+    <path d="M18.4 5.6C13 2.8 5.2 6.4 7.6 11.2s-1.6 8.4-4.2 9.4" stroke-width="1.9" stroke-dasharray="0 2.8"/>
+  </symbol>
+  <symbol id="i-launching" viewBox="0 0 24 24">
+    <path d="M4.5 4.5h10M4.5 15.5h10" stroke-width="2.2"/><path d="M6.2 4.5v11M12.8 4.5v11"/>
+    <path d="M6.6 8h5.8M6.6 10.5h5.8M6.6 13h5.8" stroke-width="1.1"/>
+    <path d="M12.8 9.2c4.6-.4 6.6 2.6 6 6.2-.4 2.4.6 4 1.8 5" stroke-width="1.9" stroke-dasharray="0 2.8"/>
+  </symbol>
+  <symbol id="i-waiting" viewBox="0 0 24 24">
+    <path d="M12 3.8a8.2 8.2 0 0 1 8.2 8.2" stroke-width="2"/>
+    <path d="M20.2 12A8.2 8.2 0 1 1 9 4.3" stroke-width="1.8" stroke-dasharray="0 3"/>
+  </symbol>
+  <symbol id="i-showing" viewBox="0 0 24 24">
+    <rect x="3.2" y="5" width="17.6" height="14" rx="1.6"/>
+    <path d="M5.8 7.6h12.4M5.8 16.4h12.4" stroke-width="1.6" stroke-dasharray="0 2.5"/>
+    <path d="M10.6 10.2v3.6l3.2-1.8Z" fill="currentColor" stroke-width="1"/>
+  </symbol>
+  <symbol id="i-drawing" viewBox="0 0 24 24">
+    <path d="M7.2 15.8 11 8.2M13.2 8.1l4.3 5.8M16.4 16.1l-8.2 1.3" stroke-width="1.8" stroke-dasharray="0 2.6"/>
+    <circle cx="12" cy="6" r="2" fill="currentColor"/><circle cx="6.2" cy="17.6" r="2" fill="currentColor"/>
+    <circle cx="18.6" cy="15.6" r="2" fill="currentColor"/>
+  </symbol>
+  <symbol id="i-timing" viewBox="0 0 24 24">
+    <path d="M6.8 3.5h10.4M6.8 20.5h10.4" stroke-width="2"/>
+    <path d="M8.2 3.5c0 4.8 7.6 5.8 7.6 8.5s-7.6 3.7-7.6 8.5M15.8 3.5c0 4.8-7.6 5.8-7.6 8.5s7.6 3.7 7.6 8.5"/>
+    <path d="M12 12.8v3M10.2 18.6h3.6" stroke-width="1.8" stroke-dasharray="0 2.2"/>
+  </symbol>
+  <symbol id="i-game" viewBox="0 0 24 24">
+    <path d="M20.4 3.6 17.6 4.2 9.8 12l2.2 2.2 7.8-7.8Z"/><path d="m7 11.6 5.4 5.4M9.4 15.6l-4.2 4.2" stroke-width="2"/>  </symbol>
+  <symbol id="i-speaking" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="8.4" stroke-width="1.9" stroke-dasharray="0 3.3"/>
+  </symbol>
+  <symbol id="i-tool" viewBox="0 0 24 24">
+    <path d="M18.31 10.43 20.69 10.62 20.69 13.38 18.31 13.57 17.57 15.35 19.12 17.17 17.17 19.12 15.35 17.57 13.57 18.31 13.38 20.69 10.62 20.69 10.43 18.31 8.65 17.57 6.83 19.12 4.88 17.17 6.43 15.35 5.69 13.57 3.31 13.38 3.31 10.62 5.69 10.43 6.43 8.65 4.88 6.83 6.83 4.88 8.65 6.43 10.43 5.69 10.62 3.31 13.38 3.31 13.57 5.69 15.35 6.43 17.17 4.88 19.12 6.83 17.57 8.65Z"/>
+    <circle cx="12" cy="12" r="2.8" stroke-width="1.8" stroke-dasharray="0 2.2"/>
+  </symbol>
+  <symbol id="i-dot" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-list" viewBox="0 0 24 24">
+    <path d="M9 6.5h11M9 12h11M9 17.5h7"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/>
+  </symbol>
+  <symbol id="i-voice" viewBox="0 0 24 24">
+    <path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4Z"/><path d="M15.4 9a4.2 4.2 0 0 1 0 6" />
+    <path d="M18 6.4a8 8 0 0 1 0 11.2" stroke-width="1.9" stroke-dasharray="0 2.8"/>
+  </symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24">
+    <rect x="7.5" y="7.5" width="9" height="9" rx="1.6" fill="currentColor" stroke="none"/>
+  </symbol>
+</svg>
+
+<main id="pair" class="pair" hidden>
+  <svg class="dust dust-large" viewBox="0 0 200 200" aria-hidden="true" data-grains="96"></svg>
+  <h1 class="pair-title">Pair this phone with Rook.</h1>
+  <p class="pair-lede">Ask Rook at your desk for a pairing code. A code works once, for ten minutes.</p>
+  <form id="pair-form" class="pair-form" novalidate>
+    <label class="field">
+      <span class="field-label">Pairing code</span>
+      <input id="pair-code" class="pair-code" name="code" required autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="next">
+    </label>
+    <label class="field">
+      <span class="field-label">Name for this phone</span>
+      <input id="pair-name" name="name" required maxlength="40" autocomplete="off" enterkeyhint="go">
+    </label>
+    <p id="pair-error" class="pair-error" role="alert" hidden></p>
+    <button class="button button-primary" type="submit">Pair this phone</button>
+  </form>
+</main>
+
+<div id="shell" class="shell" hidden>
+  <header class="stage">
+    <button id="presence" class="presence" type="button" aria-label="Talk to Rook" aria-describedby="presence-label">
+      <canvas id="dust" class="dust-canvas" aria-hidden="true"></canvas>
+    </button>
+    <p id="presence-label" class="presence-label label" aria-live="polite"></p>
+    <p id="caption" class="caption" hidden></p>
+    <p id="presence-note" class="presence-note" role="status" hidden></p>
+  </header>
+
+  <button id="collapse" class="collapse" type="button" aria-label="Hide the text" aria-controls="talk" aria-expanded="true">
+    <span class="grabber" aria-hidden="true"></span>
+  </button>
+
+  <main id="talk" class="talk" aria-label="What Rook says and does">
+    <section id="card" class="card" aria-labelledby="card-title" hidden></section>
+    <p id="card-note" class="card-note" role="status" hidden></p>
+    <p id="empty" class="empty" hidden>Tap Rook to talk. Type below to start work without a word.</p>
+  </main>
+
+  <footer class="dock">
+    <form id="ask-form" class="composer-row">
+      <button id="work-open" class="tool-button" type="button" aria-label="Work list" aria-controls="work">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-list"/></svg>
+        <span id="work-flag" class="flag" hidden><span class="visually-hidden">, something waits on you</span></span>
+      </button>
+      <div class="composer">
+        <label class="visually-hidden" for="ask-text">Request for Rook</label>
+        <textarea id="ask-text" rows="1" placeholder="Type to Rook" enterkeyhint="send" autocomplete="off"></textarea>
+        <button id="ask-voice" class="tool-button voice-toggle" type="button" aria-pressed="false"
+                aria-label="Answer typed requests aloud">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-voice"/></svg>
+        </button>
+        <button id="ask-send" class="send" type="submit" aria-label="Send" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+        <button id="ask-stop" class="send stop" type="button" aria-label="Stop this turn" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-stop"/></svg>
+        </button>
+      </div>
+    </form>
+  </footer>
+
+  <button id="expand" class="tool-button expand" type="button" aria-label="Show the text" aria-controls="talk"
+          aria-expanded="false" inert>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14.5 6-6 6 6"/></svg>
+    <span id="expand-flag" class="flag" hidden></span>
+  </button>
+
+  <section id="work" class="work" aria-labelledby="work-title" hidden>
+    <header class="bar">
+      <button id="work-close" class="bar-button bar-back label" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>Back
+      </button>
+      <h2 id="work-title" class="label">Work</h2>
+      <span class="bar-spacer" aria-hidden="true"></span>
+    </header>
+    <div id="work-body" class="work-body"></div>
+  </section>
+
+  <audio id="voice-a" preload="auto"></audio>
+  <audio id="voice-b" preload="auto"></audio>
+</div>
+
+</body>
+</html>

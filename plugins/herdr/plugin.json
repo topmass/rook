@@ -1,0 +1,13 @@
+{
+  "name": "Herdr",
+  "version": "0.1.0",
+  "description": "Herdr hand-offs: coding agents in Herdr's terminal panes, here and on saved Herdr machines, and Pi's saved sessions.",
+  "activation": "auto",
+  "detect": {
+    "commands_on_path": ["herdr"]
+  },
+  "skills": ["skills"],
+  "prompt_slots": {
+    "delegation": "prompts/delegation.md"
+  }
+}

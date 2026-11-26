@@ -1,0 +1,207 @@
+{
+  "tracked_dirs": ["desktop", "wow", "phone", "stage", "themes/forge", "skills"],
+  "classes": {
+    "core": [
+      "desktop/rook.py",
+      "desktop/relay.py",
+      "desktop/onboard.py",
+      "desktop/harness.py",
+      "desktop/agy_harness.py",
+      "desktop/antigravity_home.py",
+      "desktop/codex_harness.py",
+      "desktop/pi_harness.py",
+      "desktop/settings.py",
+      "desktop/plugin_loader.py",
+      "desktop/journal.py",
+      "desktop/mailbox.py",
+      "desktop/work.py",
+      "desktop/machine.py",
+      "desktop/speech.py",
+      "desktop/turn_end.py",
+      "desktop/memory.py",
+      "desktop/media.py"
+    ],
+    "platform": [
+      "desktop/desk.py"
+    ],
+    "presence": [
+      "desktop/overlay.py",
+      "desktop/devs_pack.py",
+      "desktop/pack_player.py",
+      "desktop/stage_link.py",
+      "desktop/render.py",
+      "desktop/stencils.py"
+    ],
+    "phone": [
+      "desktop/server.py",
+      "desktop/session.py",
+      "phone/check.py",
+      "phone/forms.py",
+      "phone/standin.py"
+    ],
+    "extension": [
+      "desktop/watch.py",
+      "desktop/agent_inbox.py",
+      "desktop/herdr.py",
+      "desktop/medium_voice.py",
+      "desktop/render_tool.py",
+      "skills/delegate/scripts/t3_threads.py",
+      "stage/art.py",
+      "stage/dispatch.py",
+      "stage/host.py",
+      "stage/overlay_trace.py",
+      "stage/preview.py",
+      "stage/probe.py",
+      "stage/scene.py",
+      "stage/today.py",
+      "themes/forge/bake.py",
+      "themes/forge/forge.py",
+      "themes/forge/preview.py",
+      "wow/channel.py",
+      "wow/check_prices.py",
+      "wow/game.py",
+      "wow/gamedata.py",
+      "wow/relay_commands.py",
+      "wow/strip.py"
+    ]
+  },
+  "platform_seam": [
+    "desktop/desk.py"
+  ],
+  "platform_specific_imports": [
+    "evdev",
+    "gi",
+    "cairo",
+    "dbus"
+  ],
+  "known_exceptions": [
+    {
+      "from": "desktop/rook.py",
+      "to": "evdev",
+      "kind": "platform-specific",
+      "reason": "Global talk keys import evdev at top level under IS_LINUX (rook.py:56)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "to": "desktop/session.py",
+      "kind": "phone",
+      "reason": "Companion.__init__ constructs PhoneSession directly (rook.py:73)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "to": "desktop/render.py",
+      "kind": "presence",
+      "reason": "Companion.scene_showing reads SCENE_SECONDS from render.py at import time (rook.py:75)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "to": "desktop/watch.py",
+      "kind": "extension",
+      "reason": "Companion owns watch.Watcher directly for delegated T3/Herdr threads (rook.py:76)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "to": "desktop/watch.py",
+      "kind": "extension",
+      "reason": "relay watch, machines, and project commands import watch directly (relay.py:208)."
+    },
+    {
+      "from": "desktop/mailbox.py",
+      "to": "desktop/agent_inbox.py",
+      "kind": "extension",
+      "reason": "Mailbox sync calls agent_inbox directly for open T3 and PR waits (mailbox.py:23)."
+    },
+    {
+      "from": "desktop/mailbox.py",
+      "to": "desktop/watch.py",
+      "kind": "extension",
+      "reason": "Mailbox uses watch machine and thread helpers directly (mailbox.py:24)."
+    }
+  ],
+  "lazy_exceptions": [
+    {
+      "from": "desktop/agy_harness.py",
+      "function": "render_guide",
+      "to": "desktop/render.py",
+      "kind": "presence",
+      "reason": "Antigravity render_guide reads render scene docs lazily (agy_harness.py:365)."
+    },
+    {
+      "from": "desktop/agy_harness.py",
+      "function": "check",
+      "to": "desktop/render.py",
+      "kind": "presence",
+      "reason": "agy_harness self-check verifies render tool guide alignment (agy_harness.py:1047)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "herdr_command",
+      "to": "desktop/herdr.py",
+      "kind": "extension",
+      "reason": "relay herdr subcommand calls herdr CLI helpers lazily (relay.py:1382)."
+    },
+    {
+      "from": "desktop/onboard.py",
+      "function": "onboard_scan",
+      "to": "desktop/herdr.py",
+      "kind": "extension",
+      "reason": "onboarding's scan lists Herdr's agents only when herdr is installed, lazily (onboard.py onboard_scan)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "pi_command",
+      "to": "desktop/herdr.py",
+      "kind": "extension",
+      "reason": "relay pi subcommand reads Pi sessions through herdr.py lazily (relay.py:1449)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "inbox_command",
+      "to": "desktop/agent_inbox.py",
+      "kind": "extension",
+      "reason": "relay inbox subcommand delegates to agent_inbox lazily (relay.py:1501)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "check_herdr",
+      "to": "desktop/herdr.py",
+      "kind": "extension",
+      "reason": "relay --check-herdr self-check tests herdr and Pi helpers lazily (relay.py:2614)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "device_command",
+      "to": "desktop/server.py",
+      "kind": "phone",
+      "reason": "relay device pairing command loads phone server helpers lazily (relay.py:3640)."
+    },
+    {
+      "from": "desktop/relay.py",
+      "function": "device_command",
+      "to": "desktop/session.py",
+      "kind": "phone",
+      "reason": "relay device pairing command loads phone session helpers lazily (relay.py:3641)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "function": "Companion.__init__",
+      "to": "wow/game.py",
+      "kind": "extension",
+      "reason": "Companion loads optional wow.game.Game when --wow is active (rook.py:2060)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "function": "check_mailbox",
+      "to": "desktop/agent_inbox.py",
+      "kind": "extension",
+      "reason": "rook --check-mailbox self-check exercises agent_inbox sync lazily (rook.py:9603)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "function": "check_phone.run",
+      "to": "phone/check.py",
+      "kind": "phone",
+      "reason": "rook --check-phone self-check drives the headless phone browser flow lazily (rook.py:12995)."
+    }
+  ]
+}

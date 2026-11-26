@@ -1,0 +1,12 @@
+[Unit]
+Description=Restart Rook once a day after the nightly dream, when Rook is idle
+# rook-daily.timer starts this. In own-memory mode, daily-restart runs the nightly tidy first.
+# It leaves a stopped Rook stopped.
+After=agent-dream.service
+
+[Service]
+Type=oneshot
+# The command tries again every five minutes and gives up after two hours.
+ExecStart=/usr/bin/python %h/.local/share/rook/live/desktop/relay.py daily-restart
+TimeoutStartSec=130min
+Environment=XDG_RUNTIME_DIR=%t

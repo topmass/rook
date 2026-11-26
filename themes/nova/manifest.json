@@ -1,0 +1,263 @@
+{
+ "name": "nova",
+ "title": "Nova",
+ "format": 1,
+ "kind": "flipbook",
+ "cell": 256,
+ "defaults": {
+  "frames": 24,
+  "fps": 12,
+  "format": "webp",
+  "quality": 0.7
+ },
+ "palette": {
+  "ink": "#150B33",
+  "deep": "#4B1FB8",
+  "violet": "#8A45FF",
+  "pink": "#FF5BD8",
+  "core": "#FFF4FF",
+  "cyan": "#46E6FF",
+  "amber": "#FFB547",
+  "rose": "#FF3D6A"
+ },
+ "icons": {
+  "rest": {
+   "src": "icons/rest.glsl",
+   "frames": 36
+  },
+  "listen": {
+   "src": "icons/listen.glsl",
+   "layers": [
+    "main",
+    "voice"
+   ],
+   "voice": {
+    "voice": {
+     "opacity": [
+      0.12,
+      1.0
+     ],
+     "scale": [
+      0.9,
+      1.14
+     ]
+    }
+   }
+  },
+  "helix": {
+   "src": "icons/helix.glsl",
+   "layers": [
+    "main",
+    "voice"
+   ],
+   "voice": {
+    "voice": {
+     "opacity": [
+      0.45,
+      1.0
+     ],
+     "scale": [
+      1.0,
+      1.04
+     ],
+     "stretch": [
+      0.3,
+      1.15
+     ]
+    }
+   }
+  },
+  "transcribe": {
+   "src": "icons/rows.glsl",
+   "frames": 36
+  },
+  "quill": {
+   "src": "icons/quill.glsl",
+   "frames": 24
+  },
+  "rook": {
+   "src": "icons/rook.glsl",
+   "frames": 60,
+   "think": true
+  },
+  "lattice": {
+   "src": "icons/lattice.glsl",
+   "think": true
+  },
+  "star": {
+   "src": "icons/star.glsl",
+   "think": true,
+   "frames": 36
+  },
+  "synapse": {
+   "src": "icons/synapse.glsl",
+   "think": true,
+   "frames": 36
+  },
+  "board": {
+   "src": "icons/board.glsl",
+   "frames": 48,
+   "think": true
+  },
+  "speak": {
+   "src": "icons/speak.glsl",
+   "frames": 24,
+   "layers": [
+    "main",
+    "glow",
+    "wave"
+   ],
+   "voice": {
+    "main": {
+     "opacity": [
+      1.0,
+      1.0
+     ],
+     "scale": [
+      0.96,
+      1.05
+     ]
+    },
+    "glow": {
+     "opacity": [
+      0.0,
+      1.0
+     ],
+     "scale": [
+      0.96,
+      1.05
+     ]
+    },
+    "wave": {
+     "opacity": [
+      0.55,
+      1.0
+     ],
+     "scale": [
+      0.96,
+      1.05
+     ],
+     "stretch": [
+      0.1,
+      1.0
+     ]
+    }
+   }
+  },
+  "search": {
+   "src": "icons/globe.glsl",
+   "frames": 24
+  },
+  "find": {
+   "src": "icons/find.glsl",
+   "frames": 24
+  },
+  "cascade": {
+   "src": "icons/cascade.glsl",
+   "label": {
+    "at": [
+     0.5,
+     0.93
+    ],
+    "size": 0.085
+   }
+  },
+  "dispatch": {
+   "src": "icons/dispatch.glsl",
+   "frames": 36,
+   "fps": 12,
+   "layers": [
+    "main",
+    "tip_r",
+    "tip_l"
+   ],
+   "tips": {
+    "tip_r": {
+     "at": [
+      0.83,
+      0.5
+     ],
+     "side": 1
+    },
+    "tip_l": {
+     "at": [
+      0.17,
+      0.5
+     ],
+     "side": -1
+    }
+   },
+   "intro": {
+    "icon": "dispatch_in",
+    "from": "rest"
+   }
+  },
+  "dispatch_in": {
+   "src": "icons/dispatch_in.glsl",
+   "frames": 18,
+   "fps": 60,
+   "loop": false
+  },
+  "strand_head": {
+   "src": "icons/strand_head.glsl",
+   "cell": 64,
+   "frames": 12,
+   "fps": 24,
+   "sprite": true
+  },
+  "vortex": {
+   "src": "icons/vortex.glsl"
+  },
+  "timer": {
+   "src": "icons/hourglass.glsl",
+   "frames": 48
+  },
+  "card": {
+   "src": "icons/card.glsl"
+  },
+  "error": {
+   "src": "icons/error.glsl"
+  },
+  "flash": {
+   "src": "icons/flash.glsl",
+   "frames": 20,
+   "fps": 60,
+   "loop": false
+  }
+ },
+ "states": {
+  "rest": "rest",
+  "listening": {
+   "cycle": [
+    "listen",
+    "helix"
+   ],
+   "level": "in"
+  },
+  "transcribing": "transcribe",
+  "thinking": {
+   "rook": "rook",
+   "turn": 3.0
+  },
+  "speaking": {
+   "icon": "speak",
+   "level": "out"
+  },
+  "send": "dispatch",
+  "open": "vortex",
+  "timer": "timer",
+  "waiting": "card",
+  "error": "error",
+  "search": "search",
+  "find": "find",
+  "write": "quill"
+ },
+ "transition": {
+  "seconds": 0.45,
+  "from_scale": 0.88,
+  "to_scale": 0.9,
+  "flash": "flash",
+  "flash_at": 0.08,
+  "flash_scale": 0.8
+ }
+}
