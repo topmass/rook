@@ -1205,7 +1205,7 @@ def check():
                                            "media", "media status", "media pause", "media play", "media toggle",
                                            "media pause chromium",
                                            "forge list", "forge bake nova-mine orbit --show",
-                                           "forge new nova-mine orbit --think <<'GLSL'\nvec4 icon(vec2 p, float t, int l){return vec4(0);}\nGLSL",
+                                           "forge new nova-mine orbit --base nova --think <<'GLSL'\nvec4 icon(vec2 p, float t, int l){return vec4(0);}\nGLSL",
                                            "work list", "watch abc", "dark on", "dark off",
                                            "set agent claude", "set agent_model gemini-4-neon",
                                            "handoff --print --work 'fix x' --done 'y' - <<'EOF'\nbrief\nEOF",

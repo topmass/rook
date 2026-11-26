@@ -140,7 +140,8 @@ ALLOWED_UNITS = frozenset({
 STOPPED_UNITS = ("rook.service", "rook-daily.timer", "rook-medium-voice.service")
 ALLOWED_DIR_ROLES = frozenset({"prefix", "rook_venv", "voice_venv", "medium_voice"})
 # On a Mac, the installer's launchd agents are Rook's own and its daily restart, and Rook.app has one exact path.
-ALLOWED_PLISTS = frozenset({f"{launchd_label}.plist", f"{launchd_label}.daily.plist", "com.rook.medium-voice.plist"})
+ALLOWED_PLISTS = frozenset({f"{launchd_label}.plist", f"{launchd_label}.daily.plist",
+                            f"{os.environ.get('ROOK_MEDIUM_LABEL') or 'com.rook.medium-voice'}.plist"})
 LAUNCH_AGENTS_REAL = os.path.realpath(os.path.normpath(launch_agents_arg))
 MAC_APP_REAL = os.path.realpath(os.path.normpath(mac_app_arg))
 UNIT_MARKER = "# Managed by Rook install/install.sh"
@@ -695,7 +696,8 @@ if PURGE:
             kept_items.append((p_norm, f"user {label} symlink not created by installer (left untouched even with --purge)"))
         elif os.path.exists(p_norm):
             if not created_flag:
-                kept_items.append((p_norm, f"pre-existing {label} folder not created by installer (left untouched even with --purge)"))
+                kept_items.append((p_norm, f"pre-existing {label} folder not created by installer (left untouched even "
+                                           f"with --purge; remove it by hand with: rm -r {shlex.quote(p_norm)})"))
                 continue
             p_real = os.path.realpath(p_norm)
             if p_real in ("/", HOME_REAL):
@@ -727,7 +729,35 @@ if skipped_bad:
     for disp, reason in skipped_bad:
         print(f"    - {safe_display(disp)}: {safe_display(reason)}")
 
-print(f"  Shared model caches under {safe_display(cache_arg)} (huggingface, airtype) are left untouched.")
+def folder_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+# What stays, because other programs may use it too: each with its size and the command that removes it.
+LEFTOVERS = [(os.path.join(cache_arg, "huggingface/hub", name), None) for name in
+             ("models--gradium--phonon-31m-en", "models--gradium--phonon-voices")]
+LEFTOVERS += [(os.path.join(cache_arg, "airtype/models", name), None) for name in
+              (sorted(os.listdir(os.path.join(cache_arg, "airtype/models")))
+               if os.path.isdir(os.path.join(cache_arg, "airtype/models")) else [])]
+LEFTOVERS += [(os.path.join(cache_arg, "uv"), "uv cache clean  (other uv projects share it)"),
+              (os.path.join(os.path.dirname(data_arg), "uv/python"), "uv python uninstall 3.12.14  (if nothing else uses it)")]
+shown = [(path, how) for path, how in LEFTOVERS if os.path.isdir(path) and not os.path.islink(path)]
+if shown:
+    print("  Left in place, since other programs may share them:")
+    for path, how in shown:
+        size = folder_size(path) / 1e6
+        print(f"    - {safe_display(path)} ({f'{size:.0f} MB' if size >= 1 else 'under 1 MB'}). Remove with: "
+              f"{how or 'rm -r ' + shlex.quote(path)}")
+if os.path.isfile(os.path.join(HOME_NORM, ".agents/rook-shared-manifest.json")):
+    print(f"  Note: the shared memory from onboarding stays in {safe_display(os.path.join(HOME_NORM, '.agents'))}, and "
+          "agent-dream.timer still runs its nightly tidy. To stop the tidy: systemctl --user disable --now agent-dream.timer")
 
 
 def print_replaced_unit_notes(disabled_units=(), dry_run=False):

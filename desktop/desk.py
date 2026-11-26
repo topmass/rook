@@ -295,6 +295,41 @@ class _Linux:
             "grim": grim,
         }
 
+    def find_session(self):
+        """Set HYPRLAND_INSTANCE_SIGNATURE and WAYLAND_DISPLAY when they are missing, from the live sockets in the
+        runtime folder: the newest that takes a connection. A variable that is set is never changed. Return the
+        names it set. For a service whose systemd manager never got the session's variables."""
+        import glob
+        set_now = []
+        run = str(self.runtime_dir())
+        for name, pattern, value in (("HYPRLAND_INSTANCE_SIGNATURE", "hypr/*/.socket.sock", lambda p: p.split("/")[-2]),
+                                     ("WAYLAND_DISPLAY", "wayland-[0-9]*", os.path.basename)):
+            if os.environ.get(name, "").strip():
+                continue
+            def mtime(path):
+                try:
+                    return os.stat(path).st_mtime
+                except OSError:  # Gone since the listing: it sorts last, and the connect below finds it dead.
+                    return 0
+            for path in sorted((p for p in glob.glob(f"{run}/{pattern}") if not p.endswith(".lock")), key=mtime,
+                               reverse=True):
+                if self.socket_alive(path):
+                    os.environ[name] = value(path)
+                    set_now.append(name)
+                    break
+        return set_now
+
+    def socket_alive(self, path):
+        """Whether a Unix socket at path takes a connection now."""
+        import socket
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.2)
+                sock.connect(path)
+            return True
+        except OSError:
+            return False
+
     def has_keys(self):
         return True
 
@@ -660,6 +695,9 @@ class _Mac(_Linux):
 
     def desktop_capabilities(self, timeout=1.0):
         return {"hyprland": False, "overlay": False, "capture": False, "grim": False}
+
+    def find_session(self):
+        return []
 
     def has_keys(self):
         return False
@@ -1230,6 +1268,16 @@ def desktop_capabilities(timeout=1.0):
     return PLATFORM.desktop_capabilities(timeout=timeout)
 
 
+def find_session():
+    return PLATFORM.find_session()
+
+
+def wayland_alive():
+    """Whether the Wayland socket named by WAYLAND_DISPLAY still takes a connection."""
+    display = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    return bool(display) and PLATFORM.socket_alive(os.path.join(str(PLATFORM.runtime_dir()), display))
+
+
 def has_keys():
     return PLATFORM.has_keys()
 
@@ -1687,6 +1735,35 @@ def _check():
     assert router.handle({"type": "talk_key", "action": "chord_cancel", "key": "RightOption", "ts": 4.05}) == "cancelled"
     assert router.handle({"type": "talk_key", "action": "up", "key": "RightOption", "held": 0.2, "ts": 4.2}) == "ignored"
     assert log == ["start", "stop", "start", "stop", "start", "cancel"], log
+
+    # find_session: live sockets only, newest first, and a variable that is set never changes.
+    import socket
+    import tempfile
+    saved = {k: os.environ.get(k) for k in ("XDG_RUNTIME_DIR", "HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY")}
+    with tempfile.TemporaryDirectory(prefix="dk-", dir="/tmp") as run:
+        servers = []
+        for path in (f"{run}/hypr/old/.socket.sock", f"{run}/hypr/live/.socket.sock", f"{run}/wayland-1"):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+            servers.append(server)
+        servers.pop(0).close()  # hypr/old: a socket file nothing listens on, made newest below.
+        os.utime(f"{run}/hypr/old/.socket.sock", (2e9, 2e9))
+        try:
+            os.environ["XDG_RUNTIME_DIR"] = run
+            os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+            os.environ.pop("WAYLAND_DISPLAY", None)
+            assert PLATFORM.find_session() == ["HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY"]
+            assert os.environ["HYPRLAND_INSTANCE_SIGNATURE"] == "live" and os.environ["WAYLAND_DISPLAY"] == "wayland-1"
+            assert wayland_alive() and PLATFORM.find_session() == []
+            os.environ["WAYLAND_DISPLAY"] = "wayland-9"  # Set by the session: kept, even though it is dead.
+            assert PLATFORM.find_session() == [] and os.environ["WAYLAND_DISPLAY"] == "wayland-9" and not wayland_alive()
+        finally:
+            for server in servers:
+                server.close()
+            for key, value in saved.items():
+                os.environ.pop(key, None) if value is None else os.environ.__setitem__(key, value)
     print("Desk platform seam: all checks passed.")
 
 

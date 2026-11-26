@@ -1397,6 +1397,9 @@ def _render_memory_conf():
 
 def install_shared():
     """Install the vendored shared memory system into ~/.agents/. Return (ok, message)."""
+    if not shutil.which("systemctl"):  # Its nightly tidy is agent-dream.timer: refuse before anything is written.
+        return False, ("Refused: the shared memory tidies its notes each night with a systemd timer, and this computer "
+                       "has no systemd, so Rook keeps its own memory.")
     agents = agents_dir()
     mpath = manifest_path()
     dream_bin = agents / "bin/dream"

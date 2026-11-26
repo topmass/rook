@@ -19,7 +19,7 @@ sh install/get.sh /path/to/rook
 curl -fsSL <get.sh URL> | sh -s -- <git URL or .tar.gz URL>
 ```
 
-`install/get.sh` installs uv when it is missing and gets the code. Then it runs `install/install.sh` with the agent it finds on `PATH`, the medium voice when this computer can run it (else the small voice), both speech models, and the login service. When neither T3 Code nor Herdr is on `PATH`, it recommends T3 Code, and offers to install Herdr with Herdr's official installer (`https://herdr.dev/install.sh`). It asks on the terminal, and installs nothing without a yes. Then it starts Rook. Any `install/install.sh` option after the source replaces a default, for example `--agent codex` or `--dry-run`. The system packages, the `input` group, and the agent sign-in in steps 1 and 3 are still by hand. When a package or the agent is missing, the installer stops and prints the fix. Run the same command again after the fix. The installer does not stop for the `input` group or the agent sign-in: it prints a note, and the talk key works only after the next login.
+`install/get.sh` needs `git`. It installs uv when it is missing and gets the code. Then it runs `install/install.sh` with the agent named by `--agent`, or else the first agent on `PATH` that runs, and says which one Rook will run on. It installs Rook with the medium voice when this computer can run it (else the small voice), both speech models, and the login service. When neither T3 Code nor Herdr is on `PATH`, it recommends T3 Code, and offers to install Herdr with Herdr's official installer (`https://herdr.dev/install.sh`). It asks on the terminal, and installs nothing without a yes. Then it starts Rook. Any `install/install.sh` option after the source replaces a default, for example `--agent codex` or `--dry-run`. The system packages, the `input` group, and the agent sign-in in steps 1 and 3 are still by hand. When a package or the agent is missing, the installer stops and prints the fix. Run the same command again after the fix. The installer does not stop for the `input` group or the agent sign-in: it prints a note, and the talk key works only after the next login. When the agent is not signed in, the last line says `Sign in first:` with the command to run. Until the talk key works, the person can type to Rook with the `relay.py ask` line it prints.
 
 On an Apple Silicon Mac, use this one command. Steps 3 to 5 below are for Linux. The Mac needs the Command Line Tools first (`xcode-select --install`). The installer builds Rook.app, starts it with launchd, and prints the two permission commands to run.
 
@@ -54,7 +54,7 @@ Onboarding offers the same choice and saves it as `agent_model` and `agent_effor
 
 The chosen agent must be installed and signed in **(by hand)**:
 
-- Claude Code: `claude` on `PATH`, signed in with:
+- Claude Code: `claude` on `PATH`, signed in with the command below. Claude Code's own installer (`curl -fsSL https://claude.ai/install.sh | bash`) puts it in `~/.local/bin`, which a new shell on Arch may not search. Then run `~/.local/bin/claude auth login`.
   ```sh
   claude auth login
   ```
@@ -85,7 +85,7 @@ Say this, then ask:
 
 Ask:
 
-> Rook uses AirType to hear you offline. Do you speak mostly English, or other languages too? English uses Parakeet English. Other languages use Parakeet multilingual, which knows 25 European languages, English among them. Each is about a 490 MB download (about 670 MB on disk). May I download it?
+> Rook uses AirType to hear you offline. Do you speak mostly English, or other languages too? English uses Parakeet English. Other languages use Parakeet multilingual, which knows 25 European languages, English among them. English is about a 480 MB download (660 MB on disk), and multilingual about 490 MB (670 MB on disk). May I download it?
 
 - Record `--recogniser-model en` (the default) or `--recogniser-model multi`, and `--recogniser yes` or `--recogniser no`.
 - The installer saves the choice as `recogniser_model` in `settings.json`, and Rook loads that model at start. When `recogniser_model` is not set, Rook uses the model in AirType's own config.
@@ -106,7 +106,7 @@ The installer never runs `sudo`. Have the person run this command themselves fir
 ```sh
 sudo pacman -S --needed base-devel linux-api-headers python gtk4 gtk4-layer-shell \
   python-gobject python-cairo grim pipewire-audio libpulse wl-clipboard ffmpeg \
-  libnotify git portaudio libsndfile uv python-dbus
+  libnotify git portaudio libsndfile uv python-dbus noto-fonts
 ```
 
 Omarchy already has most of these. For hardware video playback in Rook's media viewer, they can also install:
@@ -125,9 +125,10 @@ Tell the person plainly before they run it: joining the `input` group lets any p
 
 ## 4. Run the installer
 
-Run `install/install.sh` from the checkout you already cloned, passing every answer from step 1 and step 2 explicitly:
+Clone Rook first, unless you already have a checkout. Run `install/install.sh` from it, passing every answer from step 1 and step 2 explicitly:
 
 ```sh
+git clone https://github.com/topmass/rook.git && cd rook
 bash install/install.sh \
   --agent claude \
   --voice small \
@@ -160,9 +161,9 @@ What `install/install.sh` does and verifies at every step:
    - Pre-warms `uv` script cache for `desktop/render_tool.py` (`mcp 2.3.0`).
 5. Fetches the pinned speech models using a temporary folder on disk inside `~/.local/share/rook/` (never `/tmp` for model downloads), verifies SHA256 checksums and exact file sizes for the pinned Phonon and recogniser model files, and exits 2 (incomplete) if a required model was skipped:
    - Small voice (`gradium/phonon-31m-en@92741c5b...` q8 + `Miles` voice): about **65 MB** (62 MiB on disk).
-   - Recogniser, only the chosen one: `parakeet-unified-en-0.6b-int8` (`--recogniser-model en`, about **480 MB** download, **663 MB** on disk) or `parakeet-tdt-0.6b-v3-int8` (`--recogniser-model multi`, about **490 MB** download, **671 MB** on disk).
+   - Recogniser, only the chosen one: `parakeet-unified-en-0.6b-int8` (`--recogniser-model en`, about **480 MB** download, **660 MB** on disk) or `parakeet-tdt-0.6b-v3-int8` (`--recogniser-model multi`, about **490 MB** download, **670 MB** on disk).
 6. Creates `~/.config/rook/` (mode `0700`), `~/.config/rook/skills/`, and `~/.config/rook/settings.json` (mode `0600`). Preserves symlinks (writing through to the target) and refuses to overwrite an existing `settings.json` that does not parse as JSON.
-7. When `--service yes` is passed, the installer records each unit's SHA256 hash and writes Rook's user units (`rook.service`, `rook-failed.service`, `rook-daily.service`, `rook-daily.timer`) with systemd-quoted paths and without `--wow`, never writing or touching `rook.service.d/` drop-ins and calling `daemon-reload` only when a unit file changed or was removed. The daily restart timer may be enabled only while the installer owns all three of `rook.service`, `rook-daily.service`, and `rook-daily.timer` (checked on every run, including `--service no`); if any of the three is unowned or edited, the installer leaves your units alone, disables and removes its own timer (and removes its own daily service only when no user timer remains), and reports what was left and how to use `--replace-units`. Passing `--replace-units` (refused when `~/.config/systemd/user` is a symlink) copies any unowned or edited regular unit beside it as `<unit>.replaced-<date>`, records that copy in the manifest as yours so uninstall never deletes it, and writes Rook's unit.
+7. When `--service yes` is passed, the installer records each unit's SHA256 hash and writes Rook's user units (`rook.service`, `rook-failed.service`, `rook-daily.service`, `rook-daily.timer`) with systemd-quoted paths and without `--wow` (when the agent's folder, such as `~/.local/bin`, is missing from the systemd user manager's `PATH`, `rook.service` gets a `PATH` line that adds it; `rook.service` starts with `graphical-session.target` when that target is active or uwsm is installed, and otherwise with `default.target`, and then Rook finds the Hyprland and Wayland sockets itself and leaves when that session ends, so the next start finds the next one), never writing or touching `rook.service.d/` drop-ins and calling `daemon-reload` only when a unit file changed or was removed. The daily restart timer may be enabled only while the installer owns all three of `rook.service`, `rook-daily.service`, and `rook-daily.timer` (checked on every run, including `--service no`); if any of the three is unowned or edited, the installer leaves your units alone, disables and removes its own timer (and removes its own daily service only when no user timer remains), and reports what was left and how to use `--replace-units`. Passing `--replace-units` (refused when `~/.config/systemd/user` is a symlink) copies any unowned or edited regular unit beside it as `<unit>.replaced-<date>`, records that copy in the manifest as yours so uninstall never deletes it, and writes Rook's unit.
 
 If your checkout includes the optional `wow/` folder, enable `--wow` by hand (the installer never writes a drop-in itself) with a drop-in at `~/.config/systemd/user/rook.service.d/wow.conf` containing `[Service]`, `ExecStart=`, and `ExecStart=%h/.local/share/rook/venv/bin/python %h/.local/share/rook/live/desktop/rook.py --workspace %h --wow`, then run `systemctl --user daemon-reload && systemctl --user restart rook.service`.
 
@@ -178,6 +179,12 @@ The log says "Rook is ready" when it runs. Rook's presence then appears on the s
 Now Rook's own onboarding takes over, by voice. Tell the person:
 
 > Rook is running. Hold Right Control and say "run onboarding". Rook asks the rest itself.
+
+The talk key works only after the `input` group takes effect at the next login. Until then the person can type each answer instead:
+
+```sh
+~/.local/share/rook/venv/bin/python ~/.local/share/rook/live/desktop/relay.py ask "run onboarding"
+```
 
 Until onboarding sets one, the talk keys are Right Control, F15, and F14. Onboarding sets the person's name, pronouns and talk key, finds their coding tool and where new projects start, sets how Rook's own agent asks before it acts, offers a build thread in T3 Code, offers the shared memory for Claude Code projects, explains screenshots, and auditions the voices. The key, the voice and screenshots apply at once, and the name, the pronouns and the permission mode at Rook's next start. The coding tool takes effect at Rook's next start too. By default Rook's own agent runs in full mode, and the person can change that by asking Rook.
 
@@ -198,9 +205,11 @@ The command fetches the newest code and moves Rook's checkout to it. It runs the
 To preview or remove only what `install/install.sh` created (keeping `~/.config/rook`, `~/.local/state/rook`, any pre-existing checkout or environment, any venv with user-added files, any unit you wrote or edited, any user symlink, and any checkout with linked worktrees, custom `.git/hooks`, commits not reachable from a remote-tracking ref, extra branches, stashes, or user/ignored files):
 
 ```sh
-bash install/uninstall.sh --dry-run
-bash install/uninstall.sh
+bash ~/.local/share/rook/live/install/uninstall.sh --dry-run
+bash ~/.local/share/rook/live/install/uninstall.sh
 ```
+
+Uninstall removes its own copy too, so keep the checkout of Rook you cloned (or download `install/uninstall.sh` again) for a later `--purge`. It names each model cache and Python it leaves, with its size and the command that removes it, and the nightly tidy of the shared memory when onboarding installed it.
 
 Inside folders it owns, uninstall removes only compiled Python files (`*.pyc`, `*.pyo`, and `__pycache__` folders when empty of other files) and any edit made in place to a file the installer created inside an environment. A checkout with local work is kept, except tracked edits hidden with `git update-index --skip-worktree` or `--assume-unchanged` which git status cannot see. Any `<unit>.replaced-<date>` copy saved by `--replace-units` is kept and not restored automatically; uninstall tells you where it is and how to put it back by hand.
 

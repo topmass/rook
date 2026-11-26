@@ -20,7 +20,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLED = ROOT / "plugins"
 SCHEMA = 1
-SNAPSHOT_REVISION = 2  # The snapshot's own shape, apart from SCHEMA, which guard_policy.json shares.
+SNAPSHOT_REVISION = 3  # The snapshot's own shape, apart from SCHEMA, which guard_policy.json shares.
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}\Z")
 COMMAND = re.compile(r"[a-z][a-z0-9-]{0,39}\Z")
 SERVER = re.compile(r"[a-z][a-z0-9]{0,39}\Z")  # No underscore: the guard splits mcp_<server>_<tool> on it.
@@ -34,7 +34,7 @@ FRAGMENT_MAX = {"bundled": 4000, "user": 600}  # Characters. Every fragment is p
 SLOT_MAX = 8000  # Characters of all fragments in one slot.
 ACTIVATIONS = ("always", "auto", "opt-in")
 FIELDS = {"name", "description", "version", "activation", "detect", "skills", "commands", "prompt_slots", "mcp",
-          "hook_policy", "host_skills_allow"}
+          "hook_policy", "host_skills_allow", "hold_command"}
 DETECTS = {"platform", "commands_on_path", "path_exists", "desktop_session", "host_skill_present"}
 BUILTIN_SERVERS = ("render", "t3", "wow")
 _CACHE = None
@@ -164,7 +164,7 @@ def _manifest(pid, folder, origin, notes):
               "activation": activation, "detect": detect, "skills": [], "skill_names": [], "commands": None,
               "prompt_slots": {}, "mcp": [], "hook_policy": {"read_only_commands": [], "relay_commands": [],
                                                                       "activity_prefixes": {}},
-              "host_skills_allow": []}
+              "host_skills_allow": [], "hold_command": None}
     skills = data.get("skills", [])
     if not isinstance(skills, list):
         raise ValueError("its skills must be a list of folders")
@@ -237,6 +237,11 @@ def _manifest(pid, folder, origin, notes):
     if stray := [name for name in plugin["hook_policy"]["relay_commands"] if name not in own]:
         raise ValueError(f"its hook policy names relay commands it does not have: {', '.join(stray)}")
     plugin["host_skills_allow"] = _strings(data.get("host_skills_allow", []), ID, "host skills")
+    # One of its own relay commands. While it exits 0, such as during a fight in a game, routine updates wait.
+    if (hold := data.get("hold_command")) is not None:
+        if hold not in own:
+            raise ValueError("its hold_command must name one of its own relay commands")
+        plugin["hold_command"] = hold
     return plugin
 
 
@@ -371,7 +376,7 @@ def resolve(raw=None):
                 del plugin["prompt_slots"][slot]
             else:
                 totals[slot] = totals.get(slot, 0) + len(fragment["text"])
-    keep = ("id", "origin", "root", "skills", "prompt_slots", "mcp", "hook_policy", "host_skills_allow")
+    keep = ("id", "origin", "root", "skills", "prompt_slots", "mcp", "hook_policy", "host_skills_allow", "hold_command")
     return {
         "schema_version": SCHEMA, "snapshot_revision": SNAPSHOT_REVISION, "checkout_root": str(ROOT), "settings_sha256": hashlib.sha256(raw).hexdigest(),
         "pid": os.getpid(), "written_at": time.time(),
@@ -429,6 +434,8 @@ def _whole(doc, sha):
         _strings(plugin["hook_policy"]["relay_commands"], COMMAND, "relay commands")
         _prefixes(plugin["hook_policy"]["activity_prefixes"])
         _strings(plugin["host_skills_allow"], ID, "host skills")
+        if plugin["hold_command"] is not None and not COMMAND.match(plugin["hold_command"]):
+            return False
     origins = {plugin["id"]: plugin["origin"] for plugin in doc["plugins"]}
     active = {plugin["id"] for plugin in doc["active_plugins"]}
     return all(COMMAND.match(name) and inside(entry["plugin"], entry["module"])  # A user plugin's only when active.
@@ -506,6 +513,11 @@ def slot_entries(slot):
 def fragments(slot):
     """Every active plugin's fragment for this slot, joined as they are. The empty string when there is none."""
     return "".join(text for _, text in slot_entries(slot))
+
+
+def hold_commands():
+    """The hold commands of active plugins. While one exits 0, routine updates wait."""
+    return [plugin["hold_command"] for plugin in activation()["active_plugins"] if plugin["hold_command"]]
 
 
 def command(name):
@@ -646,7 +658,8 @@ FIXTURE_FILES = {
         "prompt_slots": {"fixture_slot": "prompts/slot.md"},
         "mcp": [{"name": "fixture", "command": ["true", "./server.py"], "eager_tools": ["ping"],
                  "denied_tools": ["secret"]}],
-        "hook_policy": {"relay_commands": ["fixture-hello"], "read_only_commands": ["fixture-read", "git"]}}),
+        "hook_policy": {"relay_commands": ["fixture-hello"], "read_only_commands": ["fixture-read", "git"]},
+        "hold_command": "fixture-hello"}),
     "relay_commands.py": 'HELP = """relay.py fixture-hello       Print the fixture\'s line."""\n'
                          'COMMANDS = {"fixture-hello": lambda argv: print("The fixture plugin says hello.")}\n',
     "skills/fixture-skill/SKILL.md": "---\nname: fixture-skill\ndescription: Say hello through the fixture.\n---\n\n"
@@ -802,7 +815,8 @@ def check():
                "badallow": {**manifest, "host_skills_allow": ["omarchy/x"]},
                "hostsettings": {**manifest, "host_skills_allow": ["settings"]},
                "hostfixture": {**manifest, "host_skills_allow": ["fixture-skill"]},
-               "selfclash": {**manifest, "skills": ["skills"], "host_skills_allow": ["selfclash"]}}
+               "selfclash": {**manifest, "skills": ["skills"], "host_skills_allow": ["selfclash"]},
+               "badhold": {**manifest, "hold_command": "get"}}
         for pid, data in bad.items():
             write(users / pid, {"plugin.json": json.dumps(data), "relay_commands.py": ""})
         (users / "escape/skills").symlink_to(root / "skills")
@@ -833,7 +847,8 @@ def check():
                            ("badallow", "its host skills must be a list of plain names"),
                            ("hostsettings", "the skill settings is already Rook's own"),
                            ("hostfixture", "the skill fixture-skill is already the fixture plugin's"),
-                           ("selfclash", "it both ships and lets through the skill selfclash")):
+                           ("selfclash", "it both ships and lets through the skill selfclash"),
+                           ("badhold", "its hold_command must name one of its own relay commands")):
             assert any(line.startswith(f"The {pid} ") and words in line for line in listing.splitlines()), (pid, listing)
         assert relay("fixture-hello") == (0, "The fixture plugin says hello.\n")
         assert relay("get", "voice_engine")[0] == 0 and "is not a setting" not in relay("get", "plugins")[1]

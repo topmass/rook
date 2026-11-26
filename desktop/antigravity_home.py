@@ -600,6 +600,11 @@ def warn_once(key, text):
         print(text, file=sys.stderr)
 
 
+def dcg_configured():
+    """Whether this person set DCG up, so its absence is worth a line. Most people never install it."""
+    return (Path.home() / ".config/dcg").exists()
+
+
 def dcg_path():
     """Return the DCG binary path when installed, else None."""
     if DCG.is_file() and os.access(DCG, os.X_OK):
@@ -640,7 +645,8 @@ def build(wow=False):
         copy(config / "AGENTS.md", agents_md)
     else:
         (config / "AGENTS.md").unlink(missing_ok=True)
-        warn_once("agents_md", f"antigravity: {agents_md} is missing, skipping global instructions.")
+        if AGENTS.is_dir():  # Said only to a person who keeps a shared setup there.
+            warn_once("agents_md", f"antigravity: {agents_md} is missing, skipping global instructions.")
     (config / "skills.json").write_text(json.dumps({"entries": skills_entries()}))
     # agy reads its default project on every request and logs an error when it is missing. The same file agy
     # writes for the owner's own CLI, which holds no setting.
@@ -658,7 +664,7 @@ def build(wow=False):
     else:  # No plugin adds policy: no file, which is the static policy, so the folder matches a Rook without plugins.
         policy.unlink(missing_ok=True)
     POLICY.update(load_policy(policy))  # Rook's own policy, decide(), reads the same checked data as the hook.
-    if dcg_path() is None:
+    if dcg_path() is None and dcg_configured():
         warn_once("dcg", f"antigravity: {DCG} is not installed, skipping DCG command guard.")
         try:
             (HOME / ".dcg-warned").touch()
@@ -770,7 +776,7 @@ def _guard():
     dcg = dcg_path()
     if dcg is None:
         marker = HOME / ".dcg-warned"
-        if not marker.exists():
+        if not marker.exists() and dcg_configured():
             warn_once("dcg", f"antigravity: {DCG} is not installed, skipping DCG command guard.")
             if HOME.is_dir():
                 try:
@@ -1059,6 +1065,11 @@ def check():
             (fake_rt / "rook-antigravity").mkdir(parents=True)
             fake_home.mkdir()
             env = {**os.environ, "HOME": str(fake_home), "XDG_RUNTIME_DIR": str(fake_rt), "PATH": "/usr/bin:/bin"}
+            quiet = subprocess.run([sys.executable, __file__, "guard"], capture_output=True, text=True, env=env,
+                                   input=json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}},
+                                                     "workspacePaths": ["/tmp"]}))
+            assert "not installed" not in quiet.stderr, quiet.stderr  # A person who never set DCG up hears nothing.
+            (fake_home / ".config/dcg").mkdir(parents=True)
             first = subprocess.run([sys.executable, __file__, "guard"], capture_output=True, text=True, env=env,
                                    input=json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}},
                                                      "workspacePaths": ["/tmp"]}))

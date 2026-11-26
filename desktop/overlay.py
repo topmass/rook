@@ -1253,6 +1253,8 @@ def _mask_points(name, rng, count=GRAINS):
 
 def _form_points(name):
     """Each form's grain positions, sorted by angle so grains keep their side of the swarm when forms change."""
+    if name in _DATA_FORMS:
+        return _DATA_FORMS[name]
     rng = random.Random(sum(map(ord, name)))
     if PARTICLE_VARIANT == "C" and name in devs_pack.BUILDERS:
         return devs_pack.BUILDERS[name](GRAINS, rng)
@@ -1581,6 +1583,8 @@ def _form_points(name):
 
 
 _FORMS = {}
+_DATA_FORMS = {}  # A user dust pack's own forms, "pack:<pack>/<icon>": [(x, y, z), ...] (see Scene.use_pack_forms).
+DATA_SWAY = 0.3  # The most a pack's own form turns either way, in radians.
 
 
 _FORMS_3D_C = frozenset(devs_pack.BUILDERS.keys())
@@ -4606,6 +4610,8 @@ class Scene:
         self.pack = pack_player.load_pack(self.pack_name)
         self.pack_kind = self.pack.get("kind", "points")
         _use_pack_text(self.pack)  # Loads its font now, not on the first draw.
+        self.think_forms = devs_pack.THINK_OTHERS  # The thinking rotation after the rook: a pack's, then Devs' own.
+        self.pack_notes = ()  # The refusals last said for the pack's forms, so a reload says them only when they change.
         self.flipbook = None
         self._cairo_flipbook = None
         # Multi-thread send fan (None when idle -> zero per-frame cost).
@@ -4686,6 +4692,23 @@ class Scene:
         self.dispatch.draw_overlay(cr, cx, cy + self.dispatch_y_offset(), now, self.monitor_width, PALETTE,
                                    is_nova=(self.pack_kind == "flipbook"))
 
+    def use_pack_forms(self, forms, problems):
+        """A user dust pack's own forms come first in the thinking rotation after the rook, then Devs' own. A refused
+        file is named in one sentence and left out. Other packs' forms are dropped, but for the one on screen."""
+        if tuple(problems) != self.pack_notes:
+            for note in problems:
+                print(f"theme pack {self.pack_name}: {note}", file=sys.stderr, flush=True)
+            self.pack_notes = tuple(problems)
+        keep = {*forms, self.form, self.prev}
+        for key in [key for key in _DATA_FORMS if key not in keep]:
+            del _DATA_FORMS[key]
+            SPIN.pop(key, None)
+            _FORMS.pop((PARTICLE_VARIANT, key), None)
+        for key, (points, spin) in forms.items():
+            _FORMS.pop((PARTICLE_VARIANT, key), None)
+            _DATA_FORMS[key], SPIN[key] = points, spin
+        self.think_forms = tuple(forms) + devs_pack.THINK_OTHERS
+
     def fallback_to_devs(self, now=None, reason=""):
         """Safely fall back to Devs on the live GL path after any pack error (logs once, never raises)."""
         if reason:
@@ -4696,6 +4719,7 @@ class Scene:
         except Exception:
             self.pack = {"name": self.pack_name, "kind": "points", "icons": {}, "states": {}}
         self.pack_kind = "points"
+        self.use_pack_forms({}, [])
         _use_pack_text(self.pack)
         self.refont()
         self.flipbook = None
@@ -4713,6 +4737,11 @@ class Scene:
             return False
         pack_player.ATLAS_LOADER.clear_failed()
         if name == self.pack_name and themes_dir is None and (self.pack_kind != "flipbook" or self.flipbook is not None):
+            if self.pack.get("_user") and self.pack_kind == "points":  # A newly forged form joins without a restart.
+                try:
+                    self.use_pack_forms(*pack_player.pack_forms(pack_player.load_pack(name, reload=True)))
+                except Exception as exc:
+                    print(f"theme pack {name}: its forms could not be read again ({exc})", file=sys.stderr, flush=True)
             return True
         try:
             pack = pack_player.validate_pack(name, themes_dir=tdir)
@@ -4725,12 +4754,14 @@ class Scene:
                 flipbook.set_state(pack_player.map_overlay_state(self), t)
                 flipbook.prefetch_warm()
                 cairo_fb = pack_player.CairoFlipbookPlayer()
+            forms, problems = pack_player.pack_forms(pack)
         except Exception as exc:
             self.fallback_to_devs(t, f"pack '{name}' rejected ({exc})")
             return False
         self.pack_name = name
         self.pack = pack
         self.pack_kind = kind
+        self.use_pack_forms(forms, problems)
         _use_pack_text(pack)
         self.refont()
         self.flipbook = flipbook
@@ -5440,7 +5471,7 @@ class Scene:
                     self.thinking_since = now
                 turn = int((now - self.thinking_since) / THINK_TURN)
                 if PARTICLE_VARIANT == "C":
-                    others = devs_pack.THINK_OTHERS
+                    others = self.think_forms
                     form = devs_pack.THINK_ANCHOR if turn % 2 == 0 else others[(turn // 2) % len(others)]
                 else:
                     form = ("lattice", "rook")[turn % 2]
@@ -5450,7 +5481,7 @@ class Scene:
                 if self.form not in devs_pack.SEND_FORMS:
                     SEND_CYCLE.append(SEND_CYCLE.pop(0))  # A new send takes the next send form.
                 form = SEND_CYCLE[0]
-            if form not in ("lattice", "rook", *devs_pack.THINK_OTHERS):
+            if form not in ("lattice", "rook", *self.think_forms):
                 self.thinking_since = None
             if form != self.form:
                 # Flights to and from the card are fast: stiffer springs and shorter delays.
@@ -5576,6 +5607,8 @@ class Scene:
         sin, cos = math.sin, math.cos
         if name in SPIN:
             a = now * SPIN[name]
+            if name in _DATA_FORMS:  # A pack's own form sways, so a flat one never turns edge-on: spin sets the pace.
+                a = DATA_SWAY * math.sin(a)
             ca, sa, ct, st = cos(a), sin(a), cos(TILT), sin(TILT)
             # The speaking globe carries a wave for each syllable of Rook's voice. With no levels for 0.3 s it
             # keeps the old wobble on the voice fallback instead.
@@ -8574,6 +8607,7 @@ def _gl_functions():
         "glClientWaitSync": (u, p, u, ctypes.c_uint64), "glBufferStorage": (None, u, n, p, u),
         "glCopyBufferSubData": (None, u, u, n, n, n), "glDeleteBuffers": (None, i, ctypes.POINTER(u)),
         "glFenceSync": (p, u, u), "glDeleteSync": (None, p), "glFlush": (None,), "glGetError": (u,),
+        "glReadPixels": (None, i, i, i, i, u, u, p),
     }
     gl = types.SimpleNamespace()
     for name, (restype, *argtypes) in table.items():
@@ -8667,6 +8701,7 @@ class _DustGL:
         self.head, self.head_size = None, (0, 0)
         self.dust_key, self.dust_count, self.dust_sparks, self.epoch = None, 0, False, 0.0
         self.free = []  # (texture, sync, size) that GSK has let go of, for the next strips.
+        self.readback = None  # Offscreen callers set a w * h * 4 bytearray: each frame is read into it (BGRA).
         self._check("setting up")
         self.ctx.clear_current()
 
@@ -9825,6 +9860,11 @@ class _DustGL:
         return out
 
     def _build(self, tex, sync, w, h):
+        if self.readback is not None:  # Offscreen (themes/forge/dust_preview.py): the frame's pixels, no GDK texture.
+            self.gl.BindFramebuffer(0x8D40, self.out_fbo)
+            self.gl.ReadPixels(0, 0, w, h, 0x80E1, 0x1401, (ctypes.c_char * (w * h * 4)).from_buffer(self.readback))
+            self.free.append((tex, sync, (w, h)))
+            return None
         builder = Gdk.GLTextureBuilder()
         builder.set_context(self.ctx)
         builder.set_id(tex)
@@ -14766,6 +14806,74 @@ def _check_render():
                 }))
                 s_ub.set_pack("nova-bomb", 0.0)
                 assert s_ub.pack_name == "devs"
+                # A dust pack's own form comes first in the thinking rotation, after the rook. Each bad file is
+                # refused in one sentence, and its icon keeps the built-in forms.
+                u_dust = os.path.join(utmp, "rook", "themes", "dust-mine")
+                os.makedirs(os.path.join(u_dust, "forms"))
+                rows = [[30 * math.cos(k), 40 * math.sin(k / 2), 10.0] for k in range(640)]
+
+                def dust_pack(icons):
+                    open(os.path.join(u_dust, "manifest.json"), "w").write(json.dumps({
+                        "name": "dust-mine", "format": 1, "kind": "points", "base": "devs", "states": {},
+                        "icons": {icon: {"form": form, "think": True} for icon, form in icons.items()}}))
+                    return pack_player.pack_forms(pack_player.load_pack("dust-mine", reload=True))
+
+                files = {"good": rows, "few": rows[1:], "wide": rows[1:] + [[0, 63, 0]], "word": rows[1:] + [[0, "x", 0]],
+                         "four": rows[1:] + [[0, 0, 0, 1]], "huge": rows[1:] + [[0, 10 ** 400, 0]],
+                         "nan": rows[1:] + [[0, float("nan"), 0]], "big": " " * 70000 + "[]",
+                         "deep": "[" * 30000 + "]" * 30000, "gone": None}
+                for icon, data in files.items():
+                    if data is not None:
+                        open(os.path.join(u_dust, "forms", f"{icon}.json"), "w").write(
+                            data if isinstance(data, str) else json.dumps(data))
+                for icon in [*files, "out"]:
+                    forms, problems = dust_pack({icon: "../nova-custom/manifest.json" if icon == "out" else
+                                                 f"forms/{icon}.json"})
+                    assert (list(forms) == ["pack:dust-mine/good"] and not problems if icon == "good" else
+                            not forms and len(problems) == 1 and problems[0].count(". ") == 1
+                            and problems[0].endswith(".")), (icon, problems)
+                # At most MAX_PACK_FORMS forms are read, and the rest get one sentence.
+                forms, problems = dust_pack({f"x{k}": "forms/good.json" for k in range(9)})
+                assert len(forms) == pack_player.MAX_PACK_FORMS and len(problems) == 1, problems
+                # Broken files do not count toward the cap. An icon with no .json form gets one sentence, and a name
+                # with control characters is printed safely.
+                forms, problems = dust_pack({**{f"bad{k}": "forms/few.json" for k in range(3)},
+                                             **{f"x{k}": "forms/good.json" for k in range(5)}})
+                assert len(forms) == 4 and len(problems) == 4, problems
+                forms, problems = dust_pack({"named": "rook", "evil\x1b[2J": "forms/few.json"})
+                assert not forms and len(problems) == 2 and not any("\x1b" in p for p in problems), problems
+                # A reload with the same refusals, as on every settings change, does not say them again.
+                import contextlib
+                said = io.StringIO()
+                with contextlib.redirect_stderr(said):
+                    s_n = Scene(0.0)
+                    assert s_n.set_pack("dust-mine", 0.0) and s_n.set_pack("dust-mine", 1.0)
+                assert said.getvalue().count("keeps the built-in forms") == 2, said.getvalue()
+                dust_pack({"good": "forms/good.json"})
+                s_d, shown = Scene(0.0), None
+                assert s_d.set_pack("dust-mine", 0.0) and s_d.pack_name == "dust-mine"
+                assert s_d.think_forms == ("pack:dust-mine/good", *devs_pack.THINK_OTHERS)
+                s_d.handle({"state": "thinking"}, 0.0)
+                for k in range(int(THINK_TURN * 2 * len(s_d.think_forms) * 4) + 4):
+                    s_d.step(k / 4)
+                    shown = k / 4 if shown is None and s_d.form == "pack:dust-mine/good" else shown
+                assert shown == THINK_TURN and s_d.pack_name == "dust-mine", shown
+                tx, ty, _ = s_d._form_targets("pack:dust-mine/good", 0.0)
+                assert len(tx) == GRAINS and max(map(abs, ty)) > 30, (len(tx), max(map(abs, ty)))
+                # A flat form, even one set to spin fast, sways and never turns edge-on: over a whole sway it keeps
+                # at least 90% of its settled width.
+                SPIN["pack:dust-mine/good"], settled = 2.0, max(tx) - min(tx)
+                for k in range(64):
+                    tx, _, _ = s_d._form_targets("pack:dust-mine/good", k * math.pi / 64)
+                    assert max(tx) - min(tx) >= 0.9 * settled, (k, max(tx) - min(tx), settled)
+                # Rook sends the theme again on every settings change: the same pack reads its forms again.
+                dust_pack({"good": "forms/good.json", "again": "forms/good.json"})
+                assert s_d.set_pack("dust-mine", 30.0)
+                assert s_d.think_forms[:2] == ("pack:dust-mine/good", "pack:dust-mine/again"), s_d.think_forms
+                # Back on Devs, the pack's forms are dropped, but for one still on screen.
+                s_d.set_pack("devs", 30.0)
+                assert s_d.think_forms == devs_pack.THINK_OTHERS
+                assert set(_DATA_FORMS) <= {s_d.form, s_d.prev}, (set(_DATA_FORMS), s_d.form, s_d.prev)
             finally:
                 if old_xdg is None:
                     os.environ.pop("XDG_CONFIG_HOME", None)

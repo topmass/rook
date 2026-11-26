@@ -28,12 +28,16 @@ import time
 from uuid import uuid4
 import wave
 
+import start_limit  # Before Rook's own modules: on a Mac, a start that dies, even on an import error, counts.
+if __name__ == "__main__" and not sys.argv[1:2] or __name__ == "__main__" and not sys.argv[1].startswith("--check"):
+    start_limit.install()  # A real start, not a self-check. It does nothing on Linux.
+
 # The self-checks run on empty scratch folders, whatever the environment holds, so they never read or write the owner's
 # real state, data, config, cache, or runtime files. Set before the imports below, which read these paths.
 if __name__ == "__main__" and sys.argv[1:2] in (["--check-steps"], ["--check-restart"], ["--check-agent"],
                                                 ["--check-dark"], ["--check-timing"], ["--check-mailbox"],
                                                 ["--check-speech"], ["--check-journal"], ["--check-phone"],
-                                                ["--check-media"], ["--check-desktop"]):
+                                                ["--check-media"], ["--check-desktop"], ["--check-start"]):
     import tempfile as _check_tempfile
     _check_dir = "/tmp" if len(os.environ.get("TMPDIR", "")) > 40 else None
     CHECK_SCRATCH = _check_tempfile.TemporaryDirectory(prefix="rk-", dir=_check_dir)  # Removed at exit.
@@ -376,6 +380,10 @@ PRESENCE_SAVE_SECONDS = 30
 CUT_SECONDS = 600
 # An unprompted turn that waits this long for Rook to be idle or for a call to end gets a log row that says why.
 WAIT_LOG_SECONDS = 5
+# A plugin's hold command, such as a game's "in a fight" test, gets this long to answer, and holds a routine update
+# at most PLUGIN_HOLD_SECONDS, so a broken command never silences Rook.
+PLUGIN_HOLD_TIMEOUT = 1.0
+PLUGIN_HOLD_SECONDS = 5 * 60
 # relay.py daily-restart counts Rook as idle only after this long with no turn.
 IDLE_SECONDS = 600
 # A granted restart reservation expires after this long if no stop arrives, so Rook never stays deaf.
@@ -399,7 +407,8 @@ HELD_ITEM_VISIBLE_SECONDS = 5 * 60
 # A short duration task timer (no clock time) held this long past due announces briefly as late instead of running.
 SHORT_TIMER_SECONDS = 120
 SHORT_TIMER_STALE_SECONDS = 5 * 60
-HOLD_REASONS = {"away": f"{OWNER} is away", "busy": "Rook is busy", "microphone": "on a call", "video": "a video is playing"}
+HOLD_REASONS = {"away": f"{OWNER} is away", "busy": "Rook is busy", "microphone": "on a call", "video": "a video is playing",
+                "plugin": "a fight in a game"}
 
 
 # The overlay's form for a Bash command, by the program it starts. Only the key reaches the overlay, never the command.
@@ -2563,6 +2572,8 @@ class Companion:
         """Show an onboarding guide line or code on the overlay, or clear it with None. No overlay: nothing."""
         if self.overlay and self.overlay.returncode is None:
             send(self.overlay, {"guide": value})
+            return True
+        return False
 
     def phone_paired(self):
         """A device paired: the overlay drops its pairing code, and Rook says so when it is free."""
@@ -2834,6 +2845,7 @@ class Companion:
         workspace = Path(self.args.workspace)
         if not workspace.is_dir():
             workspace = Path.home()
+        self.harness.workspace = str(workspace)  # The agent's folder, for a harness on a system without /proc.
         try:
             self.agent = await asyncio.create_subprocess_exec(
                 *self.harness.command(prompt, servers, self.session, ROOT / "plugin", T3_DENIED),
@@ -2842,6 +2854,9 @@ class Companion:
             )
         except Exception as exc:
             if self.agent_name == "claude" and isinstance(exc, FileNotFoundError):
+                if self.fallback:  # The person chose another agent: its reason is the one to give.
+                    raise RuntimeError(f"{self.fallback.rstrip()} Claude Code, the fallback, is not installed "
+                                       "either.") from exc
                 raise RuntimeError("Claude Code is not installed. Install it, sign in with claude auth login, and "
                                    "start Rook again.") from exc
             if self.agent_name == "claude":
@@ -3250,6 +3265,11 @@ class Companion:
                 if self.phone and (self.phone.lines or self.phone.draft_timer) and not self.pending_turns:
                     self.phone.turn_ended()
                 answer = message.get("result") or "\n".join(message.get("errors") or [])
+                # A signed-out agent: the person hears how to sign in, and a typed request prints it.
+                signin = (message.get("is_error") and "/login" in answer and getattr(self, "agent_name", None) == "claude"
+                          and "Claude Code is not signed in. Run claude auth login in a terminal, then ask again.")
+                if signin:  # "Not logged in · Please run /login".
+                    answer = signin
                 if not message.get("is_error"):
                     answer = self.strip_pass(answer)
                 marked, answer = answer, unmarked(answer)
@@ -3286,9 +3306,10 @@ class Companion:
                     self.finish_turn_timing(completed)
                     continue
                 self.show(None, activity="")
-                if message.get("is_error"):
-                    if "/login" in answer and getattr(self, "agent_name", None) == "claude":  # "Not logged in · Please run /login".
-                        answer = "Claude Code is not signed in. Run claude auth login in a terminal, then ask again."
+                if signin and not (self.silenced_turn in completed or muted):
+                    self.last_reply = {"spoken": answer, "details": answer}
+                    self.speak()
+                elif message.get("is_error"):
                     self.show("error", details=answer or f"{self.harness.name} could not finish the request.")
                 elif answer and not passed(spoken_lead(answer)):  # PASS is silence.
                     self.last_reply = {"spoken": spoken_lead(marked), "details": answer}
@@ -4642,8 +4663,7 @@ class Companion:
                 return {"ok": False, "error": "A guide is JSON: an object, or null."}
             if value is not None and not isinstance(value, dict):
                 return {"ok": False, "error": "A guide is JSON: an object, or null."}
-            self.guide(value)
-            return {"ok": True}
+            return {"ok": True, "shown": self.guide(value)}
         if verb == "device" and arg.startswith("revoke "):
             if not (self.phone and self.phone.server):
                 return {"ok": False, "error": "The phone server is not running."}
@@ -5250,6 +5270,8 @@ class Companion:
         """Fill the talk key sets in place from the talk_keys setting, else --hold-key, so the key reader uses them at
         once. Return the names. An unknown name raises ValueError."""
         names = relay.settings.talk_keys_in_force(saved, getattr(self.args, "hold_key", None))[0]
+        if _desk.IS_MAC:  # RookHelper hears Right Option only, whatever key was saved.
+            names = ["RightAlt"]
         codes = {name: getattr(ecodes, "KEY_" + name.upper(), None) for name in names} if ecodes is not None else {}
         if bad := next((name for name, code in codes.items() if not isinstance(code, int)), None):
             raise ValueError(f"Unknown hold key {bad!r}. Use keys like RightCtrl,F15, or an empty value for none.")
@@ -5456,6 +5478,10 @@ class Companion:
             reload, self.overlay_reload = self.overlay_reload, None
             if not reload and not self.exit.is_set():
                 await asyncio.sleep(1)
+            if not reload and not self.exit.is_set() and getattr(self, "found_session", False) \
+                    and not _desk.wayland_alive():  # The session Rook found ended: a fresh start finds the next.
+                self.failure = "the desktop session Rook found has ended"
+                self.exit.set()
             if self.exit.is_set() or not (reload or self.child_died("overlay")):
                 return
             await self.start_overlay()
@@ -5577,6 +5603,8 @@ class Companion:
                 return
             except TimeoutError:
                 pass
+            if await asyncio.to_thread(_desk.find_session):
+                self.found_session = True
             caps = await asyncio.to_thread(_desk.desktop_capabilities, DESKTOP_TASK_TIMEOUT)
             state["hyprland"] = state["hyprland"] or caps["hyprland"]
             state["capture"] = state["capture"] or caps["capture"]
@@ -6058,6 +6086,24 @@ class Companion:
             self.show("result", details=self.last_reply["details"])
         else:
             self.show("hidden")
+
+    async def plugin_hold(self):
+        """True while an active plugin's hold command exits 0. A slow, missing or failing command never holds."""
+        for name in plugin_loader.hold_commands():
+            # ponytail: one relay start per hold command a second, only while an update waits.
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    _desk.python_exe(), str(ROOT / "desktop/relay.py"), name, stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            except OSError:
+                continue
+            try:
+                if await asyncio.wait_for(proc.wait(), PLUGIN_HOLD_TIMEOUT) == 0:
+                    return True
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        return False
 
     async def microphone_busy(self, timeout=None):
         """Return active call streams by the single call rule in desk.call_streams(), empty when none is in a call.
@@ -7026,6 +7072,12 @@ class Companion:
                 if self.speech_gap():  # A pause the owner can answer in, by design, so it gets no log row.
                     await asyncio.sleep(0.25)
                     continue
+                if (not urgent and event != "timer" and time.monotonic() - started < PLUGIN_HOLD_SECONDS
+                        and await self.plugin_hold()):
+                    waiting("plugin")
+                    note_hold("plugin")
+                    await asyncio.sleep(1)
+                    continue
                 # Rook speaks unprompted only when no real call holds the microphone.
                 # A timed-out or failed read counts as no call for timers, and as a call for every other event.
                 callers = await self.microphone_busy(MEDIA_MIC_SECONDS)
@@ -7443,9 +7495,18 @@ class Companion:
                 hint = f"Hold {names} to talk, or tap it to start and tap it again to send. "
             hint += f"Super+{letter.upper()}" + (f" or {self.args.key.upper()}" if key else "")
             hint += " starts a recording, and a second press sends it. Press and say nothing to silence Rook."
+        elif _desk.IS_MAC and self.use_keys:  # RookHelper reads the key; the names are what talk_keys reports.
+            saved = relay.read_settings()[0]
+            self.arm_talk_keys(saved)
+            hint = "Hold Right Option to talk, or tap it to start and tap it again to send."
+            if (wanted := relay.settings.talk_keys_in_force(saved, self.args.hold_key)[0]) != ["RightAlt"]:
+                hint += f" The saved talk key {', '.join(wanted) or 'none'} does not work on a Mac."
         else:
             hint = "Send requests through relay.py ask or the phone app."
         self._ready_hint = hint
+        # A service without the session's variables finds them now, or later in the desktop start task. Set once, at
+        # start only: when that session ends, the overlay stop below ends Rook, so the next start finds the next one.
+        self.found_session = bool(_desk.find_session())
         start_state = None
         if self.use_overlay and self.overlay_explicit is True:
             await self.start_overlay()
@@ -7656,7 +7717,16 @@ class Companion:
             scan()
             if not devices:
                 self.log("no_keyboard")
-                print("Rook could not read a keyboard yet. Check AirType's keyboard permissions.", file=sys.stderr)
+                import grp
+
+                def group(gid):
+                    try:
+                        return grp.getgrgid(gid).gr_name
+                    except KeyError:  # A group id with no name.
+                        return None
+                joined = "input" in {group(gid) for gid in os.getgroups()}
+                print("Rook could not read a keyboard yet." + ("" if joined else " The talk key needs the input group: "
+                      "run sudo usermod -aG input \"$USER\", then log out and in again."), file=sys.stderr)
             watcher = self.loop.create_task(watch_devices())
             key_poll = self.loop.create_task(poll_keys())
         for signum in (signal.SIGTERM, signal.SIGINT):
@@ -7701,6 +7771,8 @@ class Companion:
             self.keep("desktop start", lambda: self.watch_desktop_start(start_state), optional=True)
         self.log("service_started", agent=self.agent_name, model=self.harness.model, effort=self.harness.effort)
         print(f"Rook is ready. {hint}", flush=True)
+        if _desk.IS_MAC:
+            start_limit.cleared()  # A good start: the failed ones before it no longer count.
         try:
             await self.exit.wait()
         finally:
@@ -18960,6 +19032,206 @@ def check_desktop():
     print("Desktop capabilities: all checks passed.")
 
 
+START_SITE = '''"""The start check's stand-ins, loaded first by Python: no keyboard, and a trap on the live phone port."""
+import socket
+
+PORT, LOG = 47326, __file__.rsplit("/", 1)[0] + "/trap.log"
+_bind, _connect, _connect_ex = socket.socket.bind, socket.socket.connect, socket.socket.connect_ex
+
+
+def _trapped(verb, address):
+    if isinstance(address, tuple) and len(address) >= 2 and address[1] == PORT:
+        with open(LOG, "a") as log:
+            log.write(f"{verb} {address[0]}:{PORT}\\n")
+        raise PermissionError(f"the start check refuses port {PORT}")
+
+
+def bind(self, address):
+    _trapped("bind", address)
+    return _bind(self, address)
+
+
+def connect(self, address):
+    _trapped("connect", address)
+    return _connect(self, address)
+
+
+def connect_ex(self, address):
+    _trapped("connect", address)
+    return _connect_ex(self, address)
+
+
+socket.socket.bind, socket.socket.connect, socket.socket.connect_ex = bind, connect, connect_ex
+try:
+    import evdev
+    evdev.list_devices = lambda *args, **kwargs: []
+except ImportError:
+    pass
+
+import os, sys, time
+# A stand-in overlay for the session cases: it stays up until the check stops it once.
+if os.environ.get("ROOK_START_OVERLAY") and any(a.endswith("overlay.py") for a in getattr(sys, "orig_argv", sys.argv)):
+    while not os.path.exists(os.environ["ROOK_START_OVERLAY"]):
+        time.sleep(0.1)
+    os.unlink(os.environ["ROOK_START_OVERLAY"])  # One stop: an overlay started again stays up.
+    os._exit(1)
+'''
+# A stand-in Claude Code: it answers every turn with PASS, which Rook keeps silent, and reaches no network.
+START_AGENT = '''import json, sys
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    if message.get("type") == "user":
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "PASS",
+                          "user_message_uuids": [message.get("uuid")], "terminal_reason": "completed"}), flush=True)
+'''
+START_STUBS = ("t3", "ssh", "tailscale", "systemctl", "gh", "herdr", "codex", "agy", "pi", "grim", "hyprctl",
+               "notify-send", "paplay", "pw-play", "pw-cat", "pw-record", "arecord", "parecord", "pactl", "wpctl",
+               "playerctl")
+
+
+def check_start(tree=ROOT):
+    """The real start, end to end: desktop/rook.py of tree runs as a child, through main(), Companion.__init__ and
+    Companion.run(), until it prints "Rook is ready". Then it gets SIGTERM and must stop cleanly. Stand-ins: an agent
+    that answers PASS, refusing programs for T3, the desktop and the sound, no keyboard, no voice runtime, no display,
+    and a trap on the phone port. Every folder is scratch. Run it with Rook's Python:
+    ~/.local/share/rook/venv/bin/python desktop/rook.py --check-start [TREE]"""
+    scratch = Path(CHECK_SCRATCH.name)
+    home, stubs, site = scratch / "home", scratch / "bin", scratch / "site"
+    for folder in (home, stubs, site, Path(os.environ["XDG_STATE_HOME"]), Path(os.environ["XDG_CONFIG_HOME"])):
+        folder.mkdir(parents=True, exist_ok=True)
+    (site / "sitecustomize.py").write_text(START_SITE)
+    (stubs / "claude-agent.py").write_text(START_AGENT)
+    (stubs / "claude").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {stubs}/claude-agent.py\n")
+    for name in START_STUBS:
+        (stubs / name).write_text(f"#!/bin/sh\necho \"{name} $*\" >> {stubs}/calls.log\nexit 97\n")
+    voice = Path(os.environ["XDG_DATA_HOME"]) / "rook/voice-phonon/bin/python"  # A silent speech worker stand-in.
+    voice.parent.mkdir(parents=True, exist_ok=True)
+    voice.write_text("#!/bin/sh\nexec cat > /dev/null\n")
+    voice.chmod(0o755)
+    for path in stubs.iterdir():
+        path.chmod(0o755)
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "T3CODE_THREAD_ID", "ROOK_AGENT",
+                          "DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PIPEWIRE_REMOTE", "PYTHONPATH")}
+    env.update(HOME=str(home), PATH=f"{stubs}:{env.get('PATH', '/usr/bin')}", PYTHONPATH=str(site),
+               CLAUDE_CONFIG_DIR=str(scratch / "claude"), HF_HUB_OFFLINE="1", ROOK_DISABLE_MEDIA="1",
+               GST_PLUGIN_PATH_1_0=str(site), GST_PLUGIN_SYSTEM_PATH_1_0=str(site), PYTHONUNBUFFERED="1")
+    out, err = scratch / "stdout.txt", scratch / "stderr.txt"
+    started = time.monotonic()
+    with open(out, "w") as stdout, open(err, "w") as stderr:
+        child = subprocess.Popen([sys.executable, str(tree / "desktop/rook.py"), "--workspace", str(home)],
+                                 cwd=str(home), env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+    ready = None
+    try:
+        while time.monotonic() - started < 60 and child.poll() is None:
+            if "Rook is ready" in out.read_text():
+                ready = time.monotonic() - started
+                break
+            time.sleep(0.1)
+        second = None
+        if ready is not None:  # A second start beside the first must say so and step aside. It also gives the tasks
+            # that fail at once time to fail.
+            try:
+                second = subprocess.run([sys.executable, str(tree / "desktop/rook.py"), "--workspace", str(home)],
+                                        cwd=str(home), env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=20)
+            except subprocess.TimeoutExpired as running:  # It ran on as a second Rook: run() killed it.
+                second = subprocess.CompletedProcess(running.cmd, None, str(running.stdout or ""), "")
+            time.sleep(max(0.0, 3 - (time.monotonic() - started - ready)))
+        alive = child.poll() is None
+        if alive:
+            child.send_signal(signal.SIGTERM)
+        code = child.wait(25)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    output = out.read_text() + err.read_text()
+    turns = Path(os.environ["XDG_STATE_HOME"]) / "rook/turns.jsonl"
+    rows = [json.loads(line) for line in (turns.read_text().splitlines() if turns.exists() else []) if line.strip()]
+    events = [row.get("event") for row in rows]
+    calls = (stubs / "calls.log").read_text() if (stubs / "calls.log").exists() else ""
+    # Reads that a start makes on any machine (gh, hyprctl, t3) are refused and allowed. These must never run at start.
+    calls = "; ".join(line for line in calls.splitlines() if line.split(" ", 1)[0] not in ("gh", "hyprctl", "t3"))
+    trap = (site / "trap.log").read_text() if (site / "trap.log").exists() else ""
+    problems = [problem for problem, bad in (
+        (f"no \"Rook is ready\" within 60 s (exit {child.returncode})", ready is None),
+        ("Rook stopped before its SIGTERM", ready is not None and not alive),
+        (f"a second start did not step aside: exit {second and second.returncode}, "
+         f"{(second.stdout + second.stderr)[-300:] if second else ''!r}",
+         second is not None and (second.returncode != 0 or second.stdout.strip() != "Rook is already running.")),
+        (f"the stop exited {code}, not 0", alive and code != 0),
+        ("a Traceback", "Traceback" in output),
+        ("a long-lived task failed", "task_failed" in events or "part_off" in events),
+        ("no service_started row", "service_started" not in events),
+        (f"a refusing program ran: {calls.strip()}", bool(calls)),
+        (f"a connection to port 47326: {trap.strip()}", "connect" in trap),
+    ) if bad]
+    # A start that cannot run: Codex chosen, and neither Codex nor Claude Code anywhere on PATH. It must give Codex's
+    # reason, exit non-zero, and leave no child transport behind ("Event loop is closed").
+    bare = scratch / "bare"
+    bare.mkdir()
+    for path in stubs.iterdir():
+        if path.name not in ("claude", "codex", "calls.log"):
+            (bare / path.name).symlink_to(path)
+    settings_file = Path(os.environ["XDG_CONFIG_HOME"]) / "rook/settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings_file.write_text('{"agent": "codex"}\n')
+    failed = subprocess.run([sys.executable, str(tree / "desktop/rook.py"), "--workspace", str(home)], cwd=str(home),
+                            env={**env, "PATH": f"{bare}:/usr/bin"}, stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, timeout=60)
+    settings_file.unlink()
+    said = failed.stdout + failed.stderr
+    # A desktop session Rook found itself: when it ends and the overlay stops, Rook exits with a failure, so the service
+    # starts it afresh for the next session. A session the service inherited never takes that path.
+    wayland, flag = Path(os.environ["XDG_RUNTIME_DIR"]) / "wayland-1", scratch / "overlay-stop"
+    for inherited in (False, True):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(wayland))
+        listener.listen()
+        with open(out, "w") as stdout, open(err, "w") as stderr:
+            child = subprocess.Popen([sys.executable, str(tree / "desktop/rook.py"), "--workspace", str(home),
+                                      "--overlay"], cwd=str(home), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                     env={**env, "ROOK_START_OVERLAY": str(flag),
+                                          **({"WAYLAND_DISPLAY": wayland.name} if inherited else {})})
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and child.poll() is None and "Rook is ready" not in out.read_text():
+            time.sleep(0.1)
+        listener.close()
+        wayland.unlink()  # The session ends...
+        flag.touch()  # ...and its overlay stops.
+        try:
+            code = child.wait(8)
+        except subprocess.TimeoutExpired:
+            code = None
+            child.send_signal(signal.SIGTERM)
+            child.wait(25)
+        flag.unlink(missing_ok=True)
+        ended = "the desktop session Rook found has ended" in out.read_text() + err.read_text()
+        if inherited and (ended or code is not None):
+            problems.append(f"an inherited session's end stopped Rook (exit {code})")
+        if not inherited and not (ended and code == 1):
+            problems.append(f"a discovered session's end did not stop Rook with a failure (exit {code})")
+    for problem, bad in (
+            (f"a start with no agent exited {failed.returncode}", failed.returncode in (0, None)),
+            ("a start with no agent did not give Codex's reason", "Codex could not start" not in said
+             or "the fallback, is not installed either" not in said),
+            ("a failed start left a transport open (Event loop is closed)", "Event loop is closed" in said),
+            ("a start on this system wrote the Mac start-failure record", not _desk.IS_MAC
+             and (Path(os.environ["XDG_STATE_HOME"]) / "rook/start-failures.json").exists())):
+        if bad:
+            problems.append(problem)
+    if problems:
+        print("Start check FAILED: " + "; ".join(problems) + ".\n--- child output ---\n" + output[-3000:]
+              + "\n--- failed start ---\n" + said[-1500:])
+        sys.exit(1)
+    print(f"Start check: ready in {ready:.1f} s, stopped cleanly, a second start stepped aside, and a start with no "
+          f"agent gave Codex's reason. All checks passed.")
+
+
 def main():
     if sys.argv[1:2] == ["--check-steps"]:
         return check_steps()
@@ -18985,6 +19257,8 @@ def main():
         return check_media()
     if sys.argv[1:2] == ["--check-desktop"]:
         return check_desktop()
+    if sys.argv[1:2] == ["--check-start"]:
+        return check_start(Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key", default="",
                         help="Press this key to start talking, and again to send. An empty value means none.")
@@ -19015,16 +19289,39 @@ def main():
     args = parser.parse_args()
     if args.wow and not (ROOT / "wow/game.py").is_file():
         sys.exit("World of Warcraft mode (--wow) is not installed in this copy of Rook.")
+    # One Rook at a time: a second would take the socket, and delete it when it stops. The kernel drops the lock when
+    # this process ends, a crash included, and children never inherit it. Exit 0, so systemd and launchd let it be.
+    import fcntl
+    _desk.ensure_dir(INBOX.parent)
+    single = open(INBOX.with_name("rook.lock"), "a")  # Held open until this process ends.
+    try:
+        fcntl.flock(single, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Rook is already running.", flush=True)
+        return
+    try:  # A broken settings file reads as empty everywhere, so say once why the owner's settings are not in force.
+        relay.settings.read_settings(strict=True)
+    except (OSError, ValueError) as error:
+        print(f"rook: {relay.settings.CONFIG} is not readable ({type(error).__name__}: {str(error)[:120]}), so Rook "
+              "runs on its defaults until it is fixed.", file=sys.stderr, flush=True)
 
     async def run():
         companion = Companion(args)
-        await companion.run()
+        try:
+            await companion.run()
+        except BaseException:  # A start that failed: end the children while the loop runs, so no transport is left.
+            await asyncio.gather(*(companion.stop_child(process) for process in
+                                   (companion.overlay, companion.voice, companion.agent) if process),
+                                 return_exceptions=True)
+            raise
         return companion.failure
 
     # A clean stop exits 0. A child that keeps dying, or a crash, exits non-zero, so systemd restarts Rook.
     failure = asyncio.run(run())
     if failure:
         print(f"Rook stopped: {failure}", file=sys.stderr)
+        if _desk.IS_MAC:
+            start_limit.failed()  # The fifth failure in 300 s notifies once and exits 0, so launchd stops.
     _desk.exit_process(1 if failure else 0)
 
 

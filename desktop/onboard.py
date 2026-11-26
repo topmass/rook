@@ -463,13 +463,16 @@ def shared_agents_command(argv):
     print("\n".join(lines))
 
 
-def build_thread_line():
-    """The scan's build thread line: the model to recommend from the agents installed here."""
+def build_thread_line(t3=True):
+    """The scan's build thread line: the model to recommend from the agents installed here. A build thread runs in
+    T3 Code, so without it there is nothing to offer."""
     have = [agent for agent, (command, *_) in BUILDERS.items() if shutil.which(command)]
     helpers = ("You can change which models its helpers use any time by telling me, for good or just for one job, "
                "and I'll remember it.")
     if not have:
         return "Build thread: no Claude Code, Antigravity or Codex is here to run one. Give --builder skip."
+    if not t3:
+        return "Build thread: it needs T3 Code, which is not here. Ask nothing, and give --builder skip."
     picks = [agent for agent in ("claude", "antigravity") if agent in have] or have
     if len(picks) > 1:
         return ("Build thread: Claude Code and Antigravity are both here. Say: \"You have Claude Code and Antigravity, "
@@ -510,18 +513,22 @@ def onboard_scan(as_tool=None):
     agent = saved.get("agent", "claude")
     print(f"System: {platform.system()}. Rook's agent: {AGENT_NAMES.get(agent, agent)}.")
     keys = settings.talk_keys_in_force(saved, settings.HOLD_KEYS)[0]
+    if desk.IS_MAC and keys != ["RightAlt"]:  # RookHelper hears Right Option only.
+        print(f"Talk keys saved: {', '.join(keys) or 'none'}, which do not work on a Mac. Say once: \"The talk key you "
+              "saved doesn't work on a Mac, so I listen for Right Option.\" The apply sets RightAlt.")
+        keys = ["RightAlt"]
     print(f"Talk keys now: {', '.join(keys) or 'none'}.")
-    name = None
+    name, shown = None, False
     if keys:  # The overlay shows the key until Rook listens. No overlay: nothing.
         name = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", keys[0]).replace("Ctrl", "Control")
         if platform.system() == "Darwin":
             name = name.replace("Alt", "Option").replace("Meta", "Command")
-        relay.guide({"text": f"Hold {name} to answer", "until": "listening"})
+        shown = relay.guide({"text": f"Hold {name} to answer", "until": "listening"})
     print("Hello. Say: \"Hi, I'm Rook. Well, that's my name, but you can call me whatever you want. I'm going to "
           "live on your computer and work alongside you, so let's take a few minutes to get to know each other. "
           "Anything we set up now, you can change later just by asking."
           + (f" When you want to talk to me, hold {name} while you speak, or tap it once to start and again to stop."
-             if name else "") + (" It's written under me on screen." if name and platform.system() != "Darwin" else "")
+             if name else "") + (" It's written under me on screen." if shown and platform.system() != "Darwin" else "")
           + "\"")
     # Each part's words for the person, so the skill says them as written.
     mode = saved.get("permission_mode")
@@ -545,7 +552,9 @@ def onboard_scan(as_tool=None):
         print(f"Model: now {saved.get('agent_model') or 'the agent default'}. Say: \"I think best on {pick[2]} at "
               f"{pick[1]} effort, so that's what I'd recommend.\" Ask: \"Shall I use it?\" On yes, give --model "
               f"{pick[0]} --effort {pick[1]}.")
-    # Window capture needs the platform's support and Hyprland's window list.
+    # Window capture needs the platform's support and Hyprland's window list. Rook's agent may have started before the
+    # session's variables reached Rook, so the scan looks for the session itself.
+    desk.find_session()
     capture = desk.PLATFORM.supports_capture and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
     goes = ("It goes only to Claude, with your words, and I keep no copy on your computer." if agent == "claude" else
             "It goes only to the model Pi runs on, with your words, and I keep no copy on your computer."
@@ -562,17 +571,20 @@ def onboard_scan(as_tool=None):
     if memory.is_shared():
         print("Memory: the shared memory system is installed here. Say so briefly, and give --memory rook.")
     else:
-        tidy, claude = agent in TIDY_AGENTS, bool(shutil.which("claude"))
+        tidy, claude, timers = agent in TIDY_AGENTS, bool(shutil.which("claude")), bool(shutil.which("systemctl"))
         print("Memory: Rook's own memory. " + ("Its nightly tidy runs with this agent. " if tidy else
                                                f"Its nightly tidy does not run with {AGENT_NAMES.get(agent, agent)} "
                                                "yet: notes are saved and loaded, not tidied. ")
-              + ("The shared system for all Claude Code projects can be installed." if claude
+              + ("The shared system for all Claude Code projects can be installed." if claude and timers
+                 else "The shared system needs systemd for its nightly tidy, and this computer has none." if claude
                  else "The shared system needs Claude Code, which is not installed.") + " Say: \""
               + ("Each night, a dreaming run tidies and repairs what I learned that day. It uses your own model quota. "
                  if tidy else "")
-              + ("The shared version also switches off Claude Code's own automatic memory, so only one memory keeps notes.\"" if claude
+              + ("The shared version also switches off Claude Code's own automatic memory, so only one memory keeps notes.\"" if claude and timers
+                 else "The shared version isn't available on this computer yet, so for now my memory is just mine.\" "
+                      "Give --memory rook." if claude
                  else "The shared version needs Claude Code, so for now my memory is just mine.\" Give --memory rook."))
-    print(build_thread_line())
+    print(build_thread_line(as_tool == "t3" if as_tool else bool(shutil.which("t3"))))
     if as_tool:
         print(f"Rehearsal stand-in for {as_tool}, not this machine:")
         print("\n".join(STAND_INS[as_tool]))
@@ -619,17 +631,20 @@ def onboard_scan(as_tool=None):
     lines, can = shared_agents(dry=True)
     links = [line for line in lines if " linked" in line or "left" in line]
     linked = bool(links) and all(line.endswith("already linked.") for line in links)  # No agent shares nothing.
+    agents_here = sum((Path.home() / agent[1]).is_dir() for agent in SHARED_AGENTS)
     print("Shared agent setup: " + (
         "no coding agent is installed yet. Say: \"You have no coding agents installed yet, so there's nothing to share.\" "
         "Give --shared-agents no."
-        if not any((Path.home() / agent[1]).is_dir() for agent in SHARED_AGENTS) else
+        if not agents_here else
+        "only one coding agent is here, so there is nothing to share yet. Ask nothing, and give --shared-agents no."
+        if agents_here == 1 else
         "you already share one setup. Say: \"You already share one setup across your coding agents, just as I'd "
         "recommend.\" Give --shared-agents no." if not can and linked and lines else
         "can be linked safely. Say: \"One more good habit: one shared instruction file and one shared skills folder "
         "for all your coding agents, so they all follow the same rules.\"" if can else
         "nothing can be linked safely. Say: \"Your coding agents each keep their own setup, so I'll leave them as they "
         "are.\" Give --shared-agents no.")
-          + "".join(f"\n  {line}" for line in lines))
+          + ("".join(f"\n  {line}" for line in lines) if agents_here > 1 else ""))
 
 
 TOUR = (  # The optional tour after setup: one sentence and one thing to try per feature, or None.
@@ -685,11 +700,15 @@ def onboard_command(argv):
         sys.exit(f"{pronouns} are not pronouns Rook knows. Choose {', '.join(settings.OWNER_PRONOUNS)}.")
     # Left out, the talk keys and the permission mode keep what is saved (rook included), else the defaults.
     keys = settings.talk_keys_in_force(saved, settings.HOLD_KEYS)[0] if choices["key"] is None else None  # "Keep it".
+    if desk.IS_MAC and keys is not None:
+        keys = ["RightAlt"]  # On a Mac, "keep it" keeps the only key RookHelper hears.
     wanted = [TALK_KEYS[0]] if choices["key"] is None else [k.strip() for k in choices["key"].split(",") if k.strip()]
     key = [next((k for k in TALK_KEYS if fold(k) == fold(name)), None) for name in wanted]  # Several keys: a comma list.
     if not key or None in key:
         sys.exit(f"{choices['key']} is not a talk key Rook offers. Choose {', '.join(TALK_KEYS)}.")
     key = list(dict.fromkeys(key))
+    if desk.IS_MAC and choices["key"] is not None and key != ["RightAlt"]:  # RookHelper hears Right Option only.
+        sys.exit("On a Mac, Rook hears only Right Option for now, so give --key RightAlt or leave --key out.")
     mode = (saved.get("permission_mode", settings.PERMISSION_MODE) if choices["permissions"] is None
             else choices["permissions"].lower())
     if mode not in PERMISSION_MODES and not (choices["permissions"] is None and mode in settings.PERMISSION_MODES):

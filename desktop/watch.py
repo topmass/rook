@@ -10,6 +10,7 @@ relay.py can use it too.
 
 import asyncio
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -42,6 +43,9 @@ SHOW_SECONDS = 25  # One t3 thread show, local or over SSH, may take this long b
 KEEP_SECONDS = 30 * 60  # A thread that finished with nothing pending is watched this much longer.
 QUIET_SECONDS = 40 * 60  # A busy thread with no new item this long gets a silent "quiet since" mark.
 UNREACHABLE_SECONDS = 2 * 3600  # A thread that cannot be read this long is dropped quietly.
+# With thread_milestones on, a busy thread's new "For Rook:" messages reach the owner at most this often. The ones in
+# between join the next.
+MILESTONE_SECONDS = 10 * 60
 BUSY = {"preparing", "queued", "starting", "running"}
 STOPPED = {"failed", "interrupted", "cancelled", "rolled_back"}
 OUTCOMES = {"finished": "finished its turn", "needs": f"is waiting for {OWNER} to answer a question or approve "
@@ -259,6 +263,7 @@ PROOF_LINE = re.compile(r"^[\s>*_-]*(" + "|".join(PROOF) + r")[*_]*\s*:[*_]*[ \t
 # The first words of news that needs the owner, which a batch puts first.
 DECISION = "A decision is needed: "
 ANSWER = f"An answer from {OWNER} is needed."
+MILESTONE = "A milestone, not a finish: "
 MAYBE = f"A question may still need {OWNER}."
 
 
@@ -298,6 +303,13 @@ def needs_owner(text):
 
 # The two lines as saved: with the owner token, or with a name, as messages saved before tokens hold them.
 NEEDS_LINE = re.compile(r"An answer from (?:⟦owner⟧|[^\n]{1,40}?) is needed\.|A question may still need (?:⟦owner⟧|[^\n]{1,40}?)\.")
+
+
+def message_key(message):
+    """A message's id. t3 thread show gives none, so the message's run and a hash of its words stand in."""
+    if message.get("id"):
+        return str(message["id"])
+    return f"{message.get('runId')}:{hashlib.sha1((message.get('text') or '').encode()).hexdigest()[:12]}"
 
 
 def last_user(messages):
@@ -406,6 +418,7 @@ class Watcher:
         self.wake = asyncio.Event()
         self.work_error = None  # The last error from the work list, logged once.
         self.machines_error_logged = None  # The last machines.json warning logged once.
+        self.milestones = False  # The thread_milestones setting, read from the file at each poll.
 
     def _check_machines_error(self):
         err = machines_error()
@@ -641,6 +654,7 @@ class Watcher:
                 self.keep_work(work.thread_quiet, *key, entry["quiet_since"])
             elif asked:  # The child runs again after its question, so the parent's wait on it ends.
                 self.keep_work(work.thread_news, *parent[:2], "busy", None, None)
+            self.milestone(entry, thread, detail.get("messages"), now)
             return
         entry["quiet_since"] = None
         messages, missing = detail.get("messages"), "none"
@@ -719,10 +733,38 @@ class Watcher:
             if now - entry["finished_at"] > KEEP_SECONDS and not any(q[:2] == key for q in self.queued):
                 del self.entries[key]
 
+    def milestone(self, entry, thread, messages, now):
+        """Debug mode, thread_milestones on: tell a busy thread's new "For Rook:" messages from Rook's runs, a waiting
+        thread's or those of a batch's ended runs, at most once every MILESTONE_SECONDS per thread. The ones between
+        join the next. A milestone is routine news that Rook may pass over. Off, nothing here runs."""
+        if not self.milestones or now - entry.get("milestone_at", 0) < MILESTONE_SECONDS:
+            return
+        active = None if thread.get("status") == "waiting" else thread.get("activeRunId")
+        seen = entry.get("milestones", [])
+        # ponytail: only the thread's last few messages are read, so one that scrolls out while it waits is lost.
+        fresh = [m for m in messages or () if m.get("role") == "assistant" and m.get("runId") != active
+                 and "for rook:" in (m.get("text") or "").lower() and (ordinal(m.get("runId")) or 0) >= entry["since"]
+                 and message_key(m) not in seen]
+        if not fresh:
+            return
+        entry["milestones"] = (seen + [message_key(m) for m in fresh])[-20:]
+        entry["milestone_at"] = now
+        name = f"The thread \"{entry['title'] or entry['thread']}\" on {entry['machine']}"
+        said = "\n\n".join(last_words([m]) for m in fresh)
+        text = (f"{MILESTONE}{name} is still at work and posted "
+                + ("a milestone" if len(fresh) == 1 else f"{len(fresh)} milestones") + f":\n{said}\n" + settings.render(
+                    f"Tell {OWNER} in a sentence or two only when it is news {pn('he wants', 'they want')}. Otherwise "
+                    "answer PASS. Do not act on it as new work."))
+        source = {"machine": entry["machine"], "thread": entry["thread"], "run": thread.get("latestRunId"),
+                  "title": entry["title"], "outcome": "posted a milestone", "report": said}
+        self.held.append((text, lambda: None, source))
+        self.log("watch_milestone", thread=entry["thread"], machine=entry["machine"], count=len(fresh))
+
     async def poll(self):
         """Read every watched thread once, and announce each change once. Machines are read side by side, so a
         machine that does not answer never delays another; threads on one machine are read in turn."""
         now = time.time()
+        self.milestones = settings.thread_milestones_in_force(settings.read_settings()[0])[0] == "on"
         by_machine = {}
         for key, entry in list(self.entries.items()):
             by_machine.setdefault(entry["machine"], []).append((key, entry))
@@ -1061,7 +1103,7 @@ def _check():
     assert needs_owner(f"{ANSWER}\nWhich file?") and needs_owner(f"{MAYBE} x") and not needs_owner("Finished.")
 
     global MACHINES, _MACHINES_WARNING, _LAST_MACHINES_ERROR
-    saved_machines = MACHINES
+    saved_machines, saved_config = MACHINES, settings.CONFIG
     saved_env = {k: os.environ.get(k) for k in (
         "HOME", "PATH", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")}
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="rkw-") as folder:
@@ -1090,6 +1132,7 @@ def _check():
         empty_machines.write_text("{}\n")
         MACHINES = empty_machines
         _MACHINES_WARNING = _LAST_MACHINES_ERROR = None
+        settings.CONFIG = cfg / "rook/settings.json"  # The poll reads thread_milestones from here, never the owner's file.
 
         t3_replies = base / "t3-replies.json"
         t3_calls = base / "t3-calls.jsonl"
@@ -1259,6 +1302,86 @@ def _check():
             await watcher.poll()
             assert len(announced) == 1 and announced[0][2]["machine"] == "host-a", announced
             assert ("host-b", tid_b) in watcher.entries and watcher.entries[("host-b", tid_b)]["failed_since"] is not None
+            await milestone_check()
+
+        async def milestone_check():
+            """thread_milestones: a waiting thread's new "For Rook:" message is told once when on, at most once per
+            MILESTONE_SECONDS, and never when off. Finishes and questions are told the same in both modes."""
+            announced, settings_file = [], cfg / "rook/settings.json"
+            watcher = Watcher(state / "rook/milestones.json", lambda text, done, source=None: announced.append(
+                (text, source)), lambda event, **fields: None)
+            tid = "mcp:cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+            def mode(value):
+                settings_file.write_text(json.dumps({"thread_milestones": value}))
+
+            def reply(said, status="waiting", active=None, pending=0, latest=5):
+                run = f"run:thread:{tid}:ordinal:"
+                set_replies({tid: {"rc": 0, "data": {
+                    "thread": {"id": tid, "title": "Long batch", "status": status, "activeRunId": active and run + str(active),
+                               "latestRunId": run + str(latest), "pendingRequestCount": pending, "itemCount": len(said)},
+                    "messages": [{"role": "assistant", "runId": run + str(n), "text": text} for n, text in said]}}})
+
+            async def news():
+                announced.clear()
+                await watcher.poll()
+                return [text for text, _ in announced]
+            old = [(4, "For Rook: From before Rook's send.")]
+            watcher.add(tid, machine="host-a", title="Long batch", since=5, delivery="started")
+            # Off, the default: a waiting thread stays silent, and its watch entry gains nothing.
+            settings_file.unlink(missing_ok=True)
+            reply(old + [(5, "For Rook: Phase one merged.")])
+            assert await news() == []
+            entry = watcher.entries[("host-a", tid)]
+            assert not {"milestones", "milestone_at"} & set(entry), entry
+            # On: a brand-new message from Rook's run is told once, as a milestone Rook may pass over.
+            mode("on")
+            reply(old + [(5, "For Rook: Phase one merged.\nTested: unit checks")])
+            told = await news()
+            assert len(told) == 1 and told[0].startswith(MILESTONE) and "Phase one merged." in told[0], told
+            assert "Tested: unit checks" in told[0] and "PASS" in told[0] and "From before" not in told[0], told
+            assert not needs_owner(told[0]), told
+            assert await news() == []
+            # Within MILESTONE_SECONDS, new ones wait, and join the next.
+            reply([(5, "For Rook: Phase one merged.\nTested: unit checks"), (5, "For Rook: Phase three merged.")])
+            assert await news() == []
+            reply([(5, "For Rook: Phase three merged."), (5, "For Rook: Phase four merged."),
+                   (5, "Plain progress, not for Rook.")])
+            assert await news() == []
+            watcher.entries[("host-a", tid)]["milestone_at"] -= MILESTONE_SECONDS
+            told = await news()
+            assert len(told) == 1 and "2 milestones" in told[0] and "Phase three" in told[0] and "Phase four" in told[0], told
+            # Between runs of a batch: an ended run's message counts, the running run's message does not.
+            watcher.entries[("host-a", tid)]["milestone_at"] -= MILESTONE_SECONDS
+            reply([(5, "For Rook: Run five done."), (6, "For Rook: Run six half done.")], "running", active=6, latest=6)
+            told = await news()
+            assert len(told) == 1 and "Run five done." in told[0] and "Run six" not in told[0], told
+            # Off again: silent.
+            mode("off")
+            watcher.entries[("host-a", tid)]["milestone_at"] -= MILESTONE_SECONDS
+            reply([(6, "For Rook: Phase five merged.")])
+            assert await news() == []
+            # A finish and a question read the same in both modes. Off, a waiting thread's news and watch entry match a
+            # watcher with no milestone code at all.
+            outcomes = {}
+            for value in ("none", "off", "on"):
+                mode("off" if value == "none" else value)
+                watcher.milestone = (lambda *args: None) if value == "none" else Watcher.milestone.__get__(watcher)
+                watcher.entries.clear()
+                watcher.queued.clear()
+                watcher.add(tid, machine="host-a", title="Long batch", since=5, delivery="started")
+                reply([(5, "For Rook: Phase one merged.")])
+                waiting = await news()
+                entry = {k: v for k, v in watcher.entries[("host-a", tid)].items() if k not in ("watched_at", "active_at")}
+                reply([(5, "For Rook: Asking.")], "running", active=5, pending=1)
+                asked = await news()
+                reply([(5, "For Rook: All phases merged.")], "completed")
+                finished = await news()
+                outcomes[value] = (waiting, entry, asked, finished)
+                assert len(asked) == 1 and needs_owner(asked[0]) and len(finished) == 1, outcomes
+                assert "finished its turn" in finished[0] and not finished[0].startswith(MILESTONE), finished
+            assert outcomes["none"] == outcomes["off"], outcomes
+            assert outcomes["off"][2:] == outcomes["on"][2:] and outcomes["on"][0][0].startswith(MILESTONE), outcomes
 
         def roster_check():
             """The roster: Rook's own calls change it at once, a refresh picks up what changed outside Rook, the
@@ -1424,7 +1547,7 @@ def _check():
             asyncio.run(run())
             roster_check()
         finally:
-            MACHINES = saved_machines
+            MACHINES, settings.CONFIG = saved_machines, saved_config
             _MACHINES_WARNING = _LAST_MACHINES_ERROR = None
             for k, v in saved_env.items():
                 if v is None:

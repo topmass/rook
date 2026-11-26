@@ -25,6 +25,7 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `smart_turn` | Smart Turn v3.2 mid-thought pause detection during `listen_after`. It can send only a request shorter than 15 seconds; a longer one sends after 4.5 seconds of quiet | `off` (the default) or `on` |
 | `smart_turn_threshold` | How sure Smart Turn must be before ending a turn; higher waits longer | `0.1` to `0.95`. Default is `0.75` |
 | `speak_thoughts` | Debug mode: read aloud extra thinking summaries while working, such as Antigravity's live thoughts and short beats between tool calls. Wordy, so keep it off for normal use; turn it on when ⟦owner⟧ wants to debug or is curious | `off` (the default), `beats`, `thoughts`, or `both` |
+| `thread_milestones` | Debug mode: tell ⟦owner⟧ a thread's progress notes while it still waits on its subagents, at most every 10 minutes a thread. It applies within a minute | `off` (the default) or `on` |
 | `recording_minutes` | Longest time one recording can run before it stops and sends | 1 to 30 minutes. Default is 10 |
 | `agent` | The main agent you run on | `claude` (Claude Code, the default), `antigravity` (Gemini), `codex` (Codex), or `pi` (Pi) |
 | `agent_model` | The model of that agent. Unset means the agent's own default | A model id of that agent, such as `gemini-4-neon` or `gpt-6.2-sol`, or `default` |

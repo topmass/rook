@@ -1,61 +1,5 @@
 # Theme packs
 
-> **Checkpoint 10: one new state.** `write`: Rook edits or writes a file (the overlay's `Edit`, `Write` and
-> `NotebookEdit` activities, which Devs already shows as its `quill` form). Nova shows `quill`, a plasma fountain pen
-> writing a looping line. For the desktop player: `map_overlay_state` returns `"write"` for those three activities,
-> and the fallback in `FlipbookPresence.set_state` covers every state a pack lacks, not only `find` (a pack with no
-> `write` shows thinking). No field changed.
->
-> **Checkpoint 9: one new state.** `find`: Rook searches for a file or text on the computer, or sets a waypoint in
-> the game. Nova shows `find`, a crystal pylon that pings the ground. Devs shows its `prism` (its manifest gains
-> `"find": "prism"` on the desktop branch, where the state is wired). No field changed.
->
-> **Checkpoint 7: one new state, one new manifest field, and anchors.**
-> - New state `search`: web search and web fetch (the overlay's `WebSearch` and `WebFetch` activities). Nova shows its
->   globe there, now with a turning dashed ring, a scan line and an orbiting spark; Devs shows `globe`. A state a pack
->   lacks falls back to `thinking`.
-> - Nova's `speak` is new (checkpoint 8 replaced the checkpoint 7 mouth): a speech bubble of plasma, with layers
->   `main` (the bubble; `scale` 0.96 to 1.05), `glow` (its inner light; `opacity` 0 to 1 and the same `scale`) and
->   `wave` (a standing sound wave baked at full height; `stretch` 0.1 to 1, `opacity` 0.55 to 1, the same `scale`).
->   Every layer follows the `out` level, so a loud syllable is a tall, bright wave and a pause is a flat line. The
->   ranges suit the desktop's level, `min(1, level) ** 0.55`. The old speaking globe is now `search`.
-> - `base` (new, user packs only): a pack in Rook's own themes folder may name a built-in theme it builds on. See
->   "User packs" below.
-> - Anchors: the rest icon, and anything braided from it (an icon whose `intro.from` is rest, and that intro), sits at
->   the host's rest anchor; every other icon sits at the centre; each fades where it is. Nothing slides between them.
-> - Transitional one-shots now play at 60 fps: `flash` is 20 frames and `dispatch_in` 18 frames, both at 60 fps.
->   Loops stay on twos (12 fps): that is their character. Read `frames` and `fps` from each icon's JSON.
->
-> **Checkpoint 6 (the dispatch): `send` now means the dispatch, and four fields are new.**
-> - `states.send` is `"dispatch"` in Nova. The cascade stays in the pack for other uses; no state names it.
-> - `icons.<icon>.intro`: `{"icon": <one-shot>, "from": <icon>}`. Changing from `from` to this icon plays the
->   one-shot first (Nova: `dispatch_in`, the rest tube braiding itself), then hands over to this icon's first frame
->   with no crossfade; changing back to `from` plays the one-shot backwards. See "Intros" below.
-> - `icons.<icon>.tips`: `{<layer>: {"at": [x, y], "side": 1 or -1}}`. A tip layer is shown only while its side is
->   sending, at the sending level (0 to 1); `at` is the point in the cell where that side's strands start.
-> - `icons.<icon>.sprite: true`: a small icon a player draws along a path, turned to the path's tangent (its art
->   points along +x). Nova's `strand_head` is the head of a send's strand.
-> - One-shots (`loop: false`) are now baked with t from 0 to 1 inclusive, so their last frame is exactly their end.
->
-> **Checkpoint 5: two optional fields added to `transition`.** `flash_at` (seconds after the change when the flash
-> starts; default 0) and `flash_scale` (the flash's size against the icon's; default 1). The crossfade now eases in
-> and out (cubic), not out only. Nova: `seconds` 0.45, `flash_at` 0.08, `flash_scale` 0.8. Nova's star and synapse
-> are now 36 frames and the board 48; read `frames` from each icon's JSON.
->
-> **Checkpoint 4: no field changed.** Nova's rook is now 60 frames (one full turn per 5 s loop) and the flash 8
-> frames at 24 fps; read `frames` and `fps` from each icon's JSON, never assume them. Every cell's outer band
-> (beyond 86% of its half-width from the centre, on either axis) is now empty by rule: `bake.py` fails if anything
-> shows there, so a player may crop or pack cells without a visible edge.
->
-> **Changed at checkpoint 3 (format stays 1, the fields below are current):**
-> - Atlases may be WebP (`"image": "baked/<icon>.webp"`); Nova's are WebP now, at 256 px cells. GdkPixbuf
->   reads WebP and AVIF, and so does every browser.
-> - Voice reactions moved from `states` into each icon's own `voice` entry, and gained `stretch` (height only).
-> - A state names the level that drives it: `"level": "in"` (the owner's voice) or `"out"` (Rook's own speech).
-> - A state may take a `cycle` of icons, the next one each time the state begins (listening: orb, then helix).
-> - An icon may have a `label` place, where the player draws text (the thread a send goes to).
-> - Thinking's `turn` is 3 seconds in Nova.
-
 A theme is a folder, `themes/<name>/`, with a `manifest.json`. One presence plays any pack through the same
 states, so Rook can switch themes without engine changes. `presence.js` is the reference player.
 
@@ -69,8 +13,8 @@ states, so Rook can switch themes without engine changes. `presence.js` is the r
   - A **flipbook** icon has `src` (a GLSL file, see `prelude.glsl`), and optionally `frames` (24), `fps` (12),
     `layers` (`["main"]`), `pivot` ([0.5, 0.5]), `loop` (true), `cell`, `format` (`png` or `webp`) and `quality`.
     The bake adds `image`, `grid`, `bbox` and `alpha`.
-  - A **points** icon has `form` (a point set: a form name the dust engine knows, or a JSON file of `[x, y, z, w]`
-    rows), or `cycle` (a list of forms taken in turn), and optionally `spin` (radians per second about the
+  - A **points** icon has `form` (a form name the dust engine knows, or in a user pack a dust form file, see
+    "User packs"), or `cycle` (a list of forms taken in turn), and optionally `spin` (radians per second about the
     vertical axis).
   - `think: true` puts an icon in the thinking rotation.
   - `voice`: how the icon reacts to a level, used only while its state has a `level`. For flipbooks, one entry per
@@ -126,8 +70,8 @@ theirs. Thread names keep the words before a colon, or else whole words up to 22
 A baked atlas is a PNG or WebP with straight alpha, cells in rows, layer by layer, frame by frame: cell `k` is
 `layer * frames + frame`, at column `k % grid[0]`, row `k // grid[0]`. A GL player uploads it premultiplied
 (`UNPACK_PREMULTIPLY_ALPHA` or one multiply at load) and blends with `ONE, ONE_MINUS_SRC_ALPHA`. Every loop's last
-frame leads into its first; `bake.py --seam` proves it. Nothing shows in a cell's outer band (see the top); every
-bake checks it.
+frame leads into its first; `bake.py --seam` proves it. Nothing shows in a cell's outer band, beyond 86% of its
+half-width from the centre on either axis; every bake checks it.
 
 ## Transitions at the display's rate
 
@@ -135,44 +79,30 @@ Everything transitional is smooth at the display's rate. A player computes the c
 clock on every display frame (cubic ease in and out over `transition.seconds`), and plays the one-shots (`flash`,
 intros) from their 60 fps atlases. Nothing transitional moves position. `presence.js` is the reference.
 
-## What the desktop player on main must change (for the dust builder)
-
-1. **Anchors, which end the infinity sliding from the top down to the middle.** Today `_draw_flipbook_gl` (and the
-   Cairo path in `Scene.draw`) moves every quad to the rest height while `scene.home`, so when `home` flips, the
-   fading rest loop drops 164 px. Instead, `FlipbookPresence.draw_list(now, level, rest_dy)` tags each quad with `dy`:
-   `rest_dy` for the rest icon, any icon whose `intro.from` is the rest icon, and that intro; 0 for every other
-   icon. The overlay passes `rest_dy = scene.rest_pad - scene.lift - ORB / 2` when `scene.lift > 0`, else 0, and
-   draws each quad at `centre_y + q["dy"]`, instead of choosing one `cy_draw` for all quads.
-2. **The flash's blend.** Draw it premultiplied over (`BlendFunc(1, 0x0303)`; Cairo `OPERATOR_OVER`), not additive:
-   Nova's flash has ink edges that must darken, and additive blending washes it out on a light desktop.
-3. **The frame rate during a change.** In `_pace`, before the rest checks, return `1000 / TICK_MS` while
-   `scene.flipbook.changing(now)` is true: the previous icon is set and `now - cur_at` is under the longer of
-   `transition.seconds` and `flash_at` plus the flash's duration, or an intro is playing. Otherwise a leftover
-   `rest_idx` can hold a Nova change to 30 fps.
-4. **The `search` state.** In `map_overlay_state`, return `"search"` when the activity is `WebSearch` or `WebFetch`.
-   In `FlipbookPresence.pick`, a state missing from the pack's `states` falls back to `"thinking"`.
-5. **Intros, tips and the dispatch** as in checkpoint 6 (`dispatch_in` braids the rest loop; see "Intros").
-6. **User packs.** `list_packs` also lists the packs in Rook's own themes folder (`$XDG_CONFIG_HOME/rook/themes`,
-   by default under `.config` in the home folder), so `relay.py set theme <name>` accepts them. `load_pack` loads a
-   pack with `base` by loading the base (a repo theme) first, then laying the user's `icons` and `states` over it
-   (the user's entries win), and keeping the base's `palette` unless the user gives one. It resolves each icon's
-   `_image_path` against the folder that icon came from. A user icon with `think: true` joins the thinking rotation.
-
 ## User packs
 
-Rook makes its own icons and themes with `themes/forge/forge.py` (the `forge` skill, `skills/forge`), and
-never edits the repo. Its packs live in `$XDG_CONFIG_HOME/rook/themes/<name>/`: a `manifest.json` with
-`"base": "nova"` (or another built-in theme), `icons/<icon>.glsl`, and the bake's `baked/`, `pack.js` and
-`previews/`. `bake.py` finds a theme in the repo first, then in that folder, and compiles a user pack's shaders with
-its base's `common.glsl`.
+Rook makes its own icons and themes with `themes/forge/forge.py` (the `forge` skill, `skills/forge`, through
+`relay.py forge`), and never edits the repo. Its packs live in `$XDG_CONFIG_HOME/rook/themes/<name>/`, and `relay.py
+set theme <name>` accepts them. A user pack names a built-in theme as its `base`. The loader lays the user's `icons`
+and `states` over the base's (the user's entries win) and keeps the base's `palette` unless the user gives one.
 
-To register the forge skill:
-- **Claude Code:** add `relay.py forge`, which runs `themes/forge/forge.py` with the same arguments and standard
-  input. The skill's `allowed-tools` line already names it. Add one line to Rook's prompt in `rook.py`: "To design a
-  new icon or theme, use the rook:forge skill."
-- **Antigravity:** add `"forge "` to `RELAY_SKILLS` in `desktop/agy_harness.py`. Its `check()` asserts that the list
-  equals the skills' `allowed-tools` lines, so the check fails until it is added. `antigravity_home.skills()` renders
-  `skills/forge` with no text changes.
+**Devs (the default): dust forms.** The manifest has `"kind": "points"` and `"base": "devs"`. Each icon is `{"form":
+"forms/<icon>.json", "spin": 0.45, "think": true}`, and the form file is a JSON list of exactly 640 `[x, y, z]`
+rows: one grain each, in logical pixels from the presence's centre, x right, y down, z towards the eye, each within
+62 (the 124 px form box). The rows are the form's rest pose. The engine sways it about the vertical axis, at most
+0.3 radians either way (`DATA_SWAY` in `desktop/overlay.py`), so a flat form never turns edge-on; `spin`, from -2 to
+2, sets the sway's pace in radians per second. The built-in tilt and depth shading apply, and the springs fly the
+grains in from the resting loop and back. The colour, the grain look and the grain count are Rook's own. A pack's
+dust forms, at most 4, come first in the thinking rotation, right after the rook, and Devs' own thinking forms
+follow; they take no other state. A form file that is missing, over 64 KB, outside the pack folder, not JSON, or not
+640 rows of three plain numbers inside the box is refused in one sentence on the overlay's log, and thinking keeps
+the built-in forms. `forge.py new` makes flat rows (z 0) from a render-tool scene, or takes rows written by hand; a
+new pack's `--base` (devs by default) decides the kind, and an icon whose kind does not match its pack is refused.
+`forge.py bake` renders a still and a 10.5 s loop with `dust_preview.py`, offscreen, in about 5 seconds.
+
+**Nova (second choice): shader icons.** The manifest has `"kind": "flipbook"` and `"base": "nova"`,
+`icons/<icon>.glsl`, and the bake's `baked/`, `pack.js` and `previews/`. `bake.py` finds a theme in the repo first,
+then in that folder, and compiles a user pack's shaders with its base's `common.glsl`.
 
 ## Intros
 
@@ -209,27 +139,3 @@ A change into an icon with an `intro`, from the intro's `from` icon, runs in thr
 - **The phone layout** (one column under the presence) is in the spec but not built in `presence.js` yet.
 
 `Presence.send`, `Presence.sendOutcome` and `Presence.drawDispatch` in `presence.js` are the reference.
-
-## What the dust engine must provide for a points pack
-
-1. A lookup from a form name, or a points file, to N points with weights: `_form_points` already does this.
-2. One call to play an icon, `play(icon, params)`, taking the same `spin`, `voice` and `cycle` fields.
-3. The state names above, resolved through the pack's `states` instead of `FORM_FOR_STATE`.
-4. The thinking rule from the pack (`rook`, `turn`, the `think` icons) instead of the fixed lattice and rook pair.
-
-## A desktop GL player for flipbooks
-
-1. Load the pack's manifest and each atlas on first use (GdkPixbuf reads PNG and WebP); upload premultiplied,
-   linear filtering, clamp to edge.
-2. Keep only the current, the previous and the flash atlas on the GPU; free the rest.
-3. Each frame, draw one quad per live layer (more during a change, plus the flash).
-4. The vertex shader scales the quad about the pivot (`scale`, and `stretch` on height); the fragment shader picks
-   the cell from a frame uniform.
-5. Frame index: `floor(seconds * fps) % frames`, from the time the icon started; a one-shot holds its last frame.
-6. Voice: per layer, opacity, scale and stretch from the level, when the state has a `level`.
-7. Changes: ease in and out over `seconds`; the old icon fades and shrinks, the new one grows; play the flash on
-   top once, from `flash_at`, at `flash_scale`.
-8. Thinking and cycles: the same rules as `Presence.pick` in `presence.js`. Keep the old icon until the new
-   atlas has loaded.
-9. Labels: draw the text at the icon's `label` place, as above (Cairo on the desktop is fine).
-10. The cost is one texture fetch per pixel of a 140 px quad, far below the dust's compute pass.

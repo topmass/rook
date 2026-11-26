@@ -1248,7 +1248,9 @@ def capture_hook_section(tree: Path, scratch_env: ScratchProfileEnv, replacement
             try:
                 parsed = json.loads(stdout)
                 entry["decision"] = parsed.get("decision")
-                entry["reason"] = normalise_text(str(parsed.get("reason", "")), replacements)
+                # The command guard's one-time approval code changes on every run.
+                entry["reason"] = re.sub(r"allow-once \d+", "allow-once <code>",
+                                         normalise_text(str(parsed.get("reason", "")), replacements))
             except ValueError:
                 entry["decision"] = None
                 entry["stdout"] = normalise_text(stdout, replacements)

@@ -80,6 +80,8 @@ PACMAN_PACKAGES=(
   portaudio
   libsndfile
   uv
+  python-dbus
+  noto-fonts
 )
 
 OPTIONAL_VIDEO_PACKAGES=(
@@ -129,7 +131,7 @@ Options:
   --voice TIER               Voice tier: small or medium (default: small). Medium needs an NVIDIA card
                              and installs its own user unit; other computers keep the small voice.
   --voice-model yes|no       Whether to download the small voice model (about 65 MB).
-  --recogniser yes|no        Whether to download the speech recogniser model (about 490 MB).
+  --recogniser yes|no        Whether to download the speech recogniser model (about 480 MB, 490 MB for multi).
   --recogniser-model en|multi  Speech recogniser: en, Parakeet English (default), or multi, Parakeet in
                              25 European languages.
   --service yes|no           Whether to install and enable systemd user units (on a Mac: Rook.app and its launchd agent).
@@ -374,6 +376,8 @@ if [ "$VOICE" = "medium" ] && ! MEDIUM_WHY="$(sh "$SCRIPT_DIR/medium-voice.sh" -
   say "$MEDIUM_WHY"
   VOICE="small"
 fi
+STEPS=7
+[ "$VOICE" != "medium" ] || STEPS=8  # The medium voice is a step of its own.
 
 if [ -n "$FROM_CACHE" ]; then
   require_abs_path "--from-cache" "$FROM_CACHE"
@@ -474,6 +478,24 @@ for entry in data.get("entries") or []:
             Path(sys.argv[3]).write_text(json.dumps(entry))
             sys.exit(0)
 sys.exit(1)
+PY
+}
+
+unit_is_owned() {
+  local target="$1"
+  local tmp_old="$DL_TMP/unit-check-old.json"
+  [ ! -L "$target" ] && [ -f "$target" ] || return 1
+  manifest_get_entry_to_file "$target" "$tmp_old" || return 1
+  python3 - "$target" "$tmp_old" <<'PY' >/dev/null 2>&1
+import hashlib, json, sys
+from pathlib import Path
+target, old_path = Path(sys.argv[1]), Path(sys.argv[2])
+entry = json.loads(old_path.read_text())
+rec_sha = entry.get("sha256")
+if not isinstance(rec_sha, str) or len(rec_sha) != 64:
+    sys.exit(1)
+actual_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+sys.exit(0 if actual_sha == rec_sha else 1)
 PY
 }
 
@@ -1124,7 +1146,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: Check the system (read-only; must write nothing on --dry-run)
 # ---------------------------------------------------------------------------
-step "[1/7] Checking system requirements"
+step "[1/$STEPS] Checking system requirements"
 
 SYS_MISSING=()
 
@@ -1231,6 +1253,7 @@ except Exception as exc:
     print(f"FAIL:{exc}")
 PY
 )"
+  GL_INFO="$(printf '%s\n' "$GL_INFO" | tail -n 1)"  # The probe's own line; drivers print warnings before it.
   if [[ "$GL_INFO" == OK:* ]]; then
     say "  OK: GPU supports OpenGL 4.4 Core (${GL_INFO#OK:})."
     case "${GL_INFO,,}" in
@@ -1267,7 +1290,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 2: System packages (print one pacman line, never run sudo)
 # ---------------------------------------------------------------------------
-step "[2/7] Checking system packages"
+step "[2/$STEPS] Checking system packages"
 
 if [ "$IS_MAC" -eq 1 ]; then
   say "  OK: A Mac needs no system packages. uv brings Python, and the wheels bring PortAudio and libsndfile."
@@ -1332,7 +1355,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Install Rook checkout at $PREFIX (stage, record before rename, rename)
 # ---------------------------------------------------------------------------
-step "[3/7] Installing Rook into $PREFIX"
+step "[3/$STEPS] Installing Rook into $PREFIX"
 
 PREFIX_EXISTED=0
 if [ -e "$PREFIX" ] || [ -L "$PREFIX" ]; then
@@ -1415,10 +1438,12 @@ REQ_VOICE="$PREFIX/install/requirements-voice$REQ_SUFFIX.txt"
 # ---------------------------------------------------------------------------
 # Step 4: Python environments with uv (staged atomically, recorded once from stage)
 # ---------------------------------------------------------------------------
-step "[4/7] Creating Python environments with uv"
+step "[4/$STEPS] Creating Python environments with uv"
 
 UV_BIN="$(command -v uv || true)"
-[ -n "$UV_BIN" ] || [ "$DRY_RUN" -eq 1 ] || die "uv is not on PATH." "Install uv with: sudo pacman -S --needed uv"
+UV_FIX="sudo pacman -S --needed uv"
+[ "$IS_MAC" -eq 0 ] || UV_FIX="curl -LsSf https://astral.sh/uv/install.sh | sh, then open a new terminal"
+[ -n "$UV_BIN" ] || [ "$DRY_RUN" -eq 1 ] || die "uv is not on PATH." "Install uv with: $UV_FIX"
 
 UV_COMMON_ARGS=()
 UV_VENV_ARGS=()
@@ -1607,7 +1632,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 5: Speech models (explicit choices, pinned revisions, SHA256 + size checks, disk TMPDIR)
 # ---------------------------------------------------------------------------
-step "[5/7] Setting up speech models"
+step "[5/$STEPS] Setting up speech models"
 
 INCOMPLETE_REASONS=()
 HF_HUB_DIR="$XDG_CACHE_HOME/huggingface/hub"
@@ -1798,7 +1823,11 @@ AIRTYPE_MODELS_DIR="$XDG_CACHE_HOME/airtype/models"
 if [ "$DRY_RUN" -eq 1 ]; then
   say "  Recogniser model: $ASR_NAME (--recogniser-model $RECOGNISER_MODEL)."
   say "  Official source:  github.com/k2-fsa/sherpa-onnx or Hugging Face (per AirType registry)."
-  say "  Download size:    about 490 MB download (about 670 MB on disk)."
+  if [ "$RECOGNISER_MODEL" = multi ]; then
+    say "  Download size:    about 490 MB download (about 670 MB on disk)."
+  else
+    say "  Download size:    about 480 MB download (about 660 MB on disk)."
+  fi
   say "  Would check --recogniser (${RECOGNISER_CHOICE:-ask}) and fetch into $AIRTYPE_MODELS_DIR using disk TMPDIR."
 else
   ASR_META=()  # A read loop, not mapfile, which bash 3.2 on macOS lacks.
@@ -1865,7 +1894,7 @@ PY
       else
         say "  Downloading recogniser model (using disk temp dir $DL_TMP, never /tmp)..."
         TMPDIR="$DL_TMP" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
-          "$ROOK_VENV/bin/python" -c "import sys; from airtype.asr import ensure_model_download; from airtype.registry import MODEL_REGISTRY; ensure_model_download(MODEL_REGISTRY[sys.argv[1]], progress=True)" "$ASR_NAME" \
+          "$ROOK_VENV/bin/python" -c "import sys; from airtype.asr import ensure_model_download; from airtype.registry import MODEL_REGISTRY; ensure_model_download(MODEL_REGISTRY[sys.argv[1]], progress=sys.stderr.isatty())" "$ASR_NAME" \
           || die "Could not download the speech recogniser model ($ASR_NAME)." "Check your internet connection and re-run install/install.sh."
       fi
       XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
@@ -1884,7 +1913,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 6: Config folder with default settings (preserve symlinks, never overwrite bad JSON)
 # ---------------------------------------------------------------------------
-step "[6/7] Setting up config folder at $CONFIG_DIR"
+step "[6/$STEPS] Setting up config folder at $CONFIG_DIR"
 
 SETTINGS_FILE="$CONFIG_DIR/settings.json"
 SKILLS_DIR="$CONFIG_DIR/skills"
@@ -2011,6 +2040,7 @@ PY
 fi
 
 if [ "$VOICE" = "medium" ]; then
+  step "[7/$STEPS] Installing the medium voice (optional)"
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  Would install the medium voice in $MEDIUM_DIR with $PREFIX/install/medium-voice.sh (about 3.3 GB)."
   else
@@ -2020,31 +2050,94 @@ if [ "$VOICE" = "medium" ]; then
       printf '{"installed_files": [], "installed_dirs": []}' >"$DL_TMP/medium-voice-meta.json"
       manifest_record_entry "$MEDIUM_DIR" "dir" "medium_voice" "$DL_TMP/medium-voice-meta.json"
     fi
-    # On a Mac the voice runs as its own launchd agent. Uninstall removes it when this installer made it.
-    MEDIUM_PLIST="$HOME/Library/LaunchAgents/com.rook.medium-voice.plist"
-    MEDIUM_PLIST_OURS=0
-    if [ "$IS_MAC" -eq 1 ] && { [ ! -e "$MEDIUM_PLIST" ] || prior_manifest_created "$MEDIUM_PLIST"; }; then
-      MEDIUM_PLIST_OURS=1
+    # A medium voice that an earlier run installed and that worked keeps running and stays selected if this run fails.
+    MEDIUM_WORKED=0
+    if manifest_get_entry_to_file "$MEDIUM_DIR" "$DL_TMP/medium-voice-old.json" \
+        && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("working") is True else 1)' \
+          "$DL_TMP/medium-voice-old.json"; then
+      MEDIUM_WORKED=1
     fi
-    # On a Mac, the voice's launchd agent starts now only when the login service is chosen.
+    # On a Mac the voice runs as its own launchd agent. This installer owns its plist only when it wrote it,
+    # proven by the recorded hash. Any other plist there is left untouched, and so is the medium voice.
+    MEDIUM_LABEL="${ROOK_MEDIUM_LABEL:-com.rook.medium-voice}"
+    MEDIUM_PLIST="$HOME/Library/LaunchAgents/$MEDIUM_LABEL.plist"
+    MEDIUM_PLIST_OURS=0
+    MEDIUM_SKIP=0
+    if [ "$IS_MAC" -eq 1 ]; then
+      if { [ ! -e "$MEDIUM_PLIST" ] && [ ! -L "$MEDIUM_PLIST" ]; } || unit_is_owned "$MEDIUM_PLIST"; then
+        MEDIUM_PLIST_OURS=1
+      else
+        MEDIUM_SKIP=1
+        say "  Kept $MEDIUM_PLIST as it is, because this installer did not write it, so the medium voice is left as it is."
+      fi
+    fi
+    # On a Mac, the voice's launchd agent starts now only when the login service is chosen. It is written first,
+    # recorded with its hash, and only then loaded, so an interrupted run still owns the job it may leave loaded.
     MEDIUM_FLAG=""
     if [ "$SERVICE_CHOICE" = "no" ] || { [ "$SERVICE_CHOICE" != "yes" ] && [ "$ASSUME_YES" -ne 1 ]; }; then
       MEDIUM_FLAG="--no-start"
+    elif [ "$IS_MAC" -eq 1 ]; then
+      MEDIUM_FLAG="--then-start"
     fi
-    ROOK_PYTHON="$ROOK_VENV/bin/python" sh "$PREFIX/install/medium-voice.sh" $MEDIUM_FLAG \
-      || die "The medium voice did not install." "Re-run install/install.sh, or use --voice small."
-    if [ "$MEDIUM_PLIST_OURS" -eq 1 ] && [ -f "$MEDIUM_PLIST" ] && [ ! -L "$MEDIUM_PLIST" ]; then
-      python3 -c 'import hashlib,json,sys; print(json.dumps({"sha256": hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()}))' \
-        "$MEDIUM_PLIST" >"$DL_TMP/medium-plist-meta.json"
-      manifest_record_entry "$MEDIUM_PLIST" "unit" "launchd_plist" "$DL_TMP/medium-plist-meta.json"
-    fi
-    if prior_manifest_created "$MEDIUM_DIR"; then
-      snapshot_venv_to_file "$MEDIUM_DIR" "$DL_TMP/medium-voice-meta.json" "medium-voice"
-      manifest_record_entry "$MEDIUM_DIR" "dir" "medium_voice" "$DL_TMP/medium-voice-meta.json"
+    if [ "$IS_MAC" -eq 1 ]; then
+      MEDIUM_LOG="$HOME/Library/Logs/rook-medium-voice-install.log"
     else
-      manifest_record_kept "$MEDIUM_DIR" "medium_voice" "pre-existing folder kept untouched by uninstall"
+      MEDIUM_LOG="$STATE_DIR/medium-voice-install.log"
     fi
-    say "  OK: Medium voice installed in $MEDIUM_DIR."
+    mkdir -p "$(dirname "$MEDIUM_LOG")"
+    # The medium voice is optional: when it fails, Rook keeps its small voice and the install goes on.
+    MEDIUM_OK=1
+    MEDIUM_STARTED=0
+    # Record the folder's files: once its install has run, so uninstall removes them even after an interrupted
+    # start, and again at the end. WORKING 1 marks a voice that finished an install.
+    record_medium_dir() {
+      if prior_manifest_created "$MEDIUM_DIR"; then
+        snapshot_venv_to_file "$MEDIUM_DIR" "$DL_TMP/medium-voice-meta.json" "medium-voice"
+        if [ "$1" -eq 1 ]; then
+          python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["working"]=True; json.dump(d,open(p,"w"))' \
+            "$DL_TMP/medium-voice-meta.json"
+        fi
+        manifest_record_entry "$MEDIUM_DIR" "dir" "medium_voice" "$DL_TMP/medium-voice-meta.json"
+      else
+        manifest_record_kept "$MEDIUM_DIR" "medium_voice" "pre-existing folder kept untouched by uninstall"
+      fi
+    }
+    if [ "$MEDIUM_SKIP" -eq 0 ]; then
+      ROOK_PYTHON="$ROOK_VENV/bin/python" sh "$PREFIX/install/medium-voice.sh" $MEDIUM_FLAG 2>"$MEDIUM_LOG" \
+        || MEDIUM_OK=0
+      if [ "$MEDIUM_PLIST_OURS" -eq 1 ] && [ -f "$MEDIUM_PLIST" ] && [ ! -L "$MEDIUM_PLIST" ]; then
+        python3 -c 'import hashlib,json,sys; print(json.dumps({"sha256": hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()}))' \
+          "$MEDIUM_PLIST" >"$DL_TMP/medium-plist-meta.json"
+        manifest_record_entry "$MEDIUM_PLIST" "unit" "launchd_plist" "$DL_TMP/medium-plist-meta.json"
+      fi
+      if [ "$MEDIUM_OK" -eq 1 ] && [ "$MEDIUM_FLAG" = "--then-start" ]; then
+        record_medium_dir "$MEDIUM_WORKED"
+        MEDIUM_STARTED=1
+        ROOK_PYTHON="$ROOK_VENV/bin/python" sh "$PREFIX/install/medium-voice.sh" --start-only 2>>"$MEDIUM_LOG" \
+          || MEDIUM_OK=0
+      fi
+    fi
+    if [ "$MEDIUM_OK" -eq 0 ]; then
+      MEDIUM_WHY="$(grep -v '^[[:space:]]*$' "$MEDIUM_LOG" 2>/dev/null | tail -n 1 || true)"
+      MEDIUM_WHY="${MEDIUM_WHY:-medium-voice.sh stopped without saying why}"
+      if [ "$MEDIUM_STARTED" -eq 1 ]; then
+        launchctl bootout "gui/$(id -u)/$MEDIUM_LABEL" >/dev/null 2>&1 || true  # This run loaded it: no job left restarting.
+      fi
+      if [ "$MEDIUM_WORKED" -eq 1 ] && [ "$MEDIUM_STARTED" -eq 0 ]; then
+        say "  Warning: The medium voice did not update ($MEDIUM_WHY). The medium voice from before keeps running. Details: $MEDIUM_LOG"
+      else
+        "$ROOK_VENV/bin/python" "$PREFIX/desktop/relay.py" set voice_engine small >/dev/null 2>&1 || true
+        VOICE="small"
+        say "  Warning: The medium voice did not install ($MEDIUM_WHY). Rook keeps its small voice. Details: $MEDIUM_LOG. To try again later, run install/install.sh with --voice medium."
+      fi
+    fi
+    # "working": this voice finished an install, so a later failed update leaves it running and selected.
+    if { [ "$MEDIUM_OK" -eq 1 ] && [ "$MEDIUM_SKIP" -eq 0 ]; } || { [ "$MEDIUM_WORKED" -eq 1 ] && [ "$VOICE" = "medium" ]; }; then
+      record_medium_dir 1
+    else
+      record_medium_dir 0
+    fi
+    [ "$MEDIUM_OK" -eq 0 ] || [ "$MEDIUM_SKIP" -eq 1 ] || say "  OK: Medium voice installed in $MEDIUM_DIR."
   fi
 fi
 
@@ -2078,9 +2171,9 @@ fi
 # Step 7: Systemd user service units (ask first, never overwrite foreign units, systemd quoting)
 # ---------------------------------------------------------------------------
 if [ "$IS_MAC" -eq 1 ]; then
-  step "[7/7] Installing Rook.app and its launchd agent"
+  step "[$STEPS/$STEPS] Installing Rook.app and its launchd agent"
 else
-  step "[7/7] Installing systemd user service units"
+  step "[$STEPS/$STEPS] Installing systemd user service units"
 fi
 
 systemd_quote_arg() {
@@ -2139,24 +2232,6 @@ except BaseException:
     tmp.unlink(missing_ok=True)
     raise
 ' "$src" "$dst"
-}
-
-unit_is_owned() {
-  local target="$1"
-  local tmp_old="$DL_TMP/unit-check-old.json"
-  [ ! -L "$target" ] && [ -f "$target" ] || return 1
-  manifest_get_entry_to_file "$target" "$tmp_old" || return 1
-  python3 - "$target" "$tmp_old" <<'PY' >/dev/null 2>&1
-import hashlib, json, sys
-from pathlib import Path
-target, old_path = Path(sys.argv[1]), Path(sys.argv[2])
-entry = json.loads(old_path.read_text())
-rec_sha = entry.get("sha256")
-if not isinstance(rec_sha, str) or len(rec_sha) != 64:
-    sys.exit(1)
-actual_sha = hashlib.sha256(target.read_bytes()).hexdigest()
-sys.exit(0 if actual_sha == rec_sha else 1)
-PY
 }
 
 unit_can_install() {
@@ -2392,6 +2467,37 @@ elif decide_yes_no "--service" "$SERVICE_CHOICE" "  Install and enable Rook's sy
   Q_ROOK_SCRIPT="$(systemd_quote_arg "$PREFIX/desktop/rook.py")"
   Q_RELAY_SCRIPT="$(systemd_quote_arg "$PREFIX/desktop/relay.py")"
 
+  # The service must find the agent this shell finds. Claude Code's own installer uses ~/.local/bin, which a plain
+  # systemd user manager does not search. Only a folder the manager's PATH lacks adds a PATH line, so a session that
+  # already gives the manager its PATH (uwsm on Omarchy) gets the same unit as before.
+  UNIT_PATH_LINE=""
+  MANAGER_PATH="$("$SYSTEMCTL_BIN" --user show-environment 2>/dev/null | sed -n 's/^PATH=//p' | head -n 1)" || MANAGER_PATH=""
+  if [ -n "$MANAGER_PATH" ]; then
+    SERVICE_PATH="$MANAGER_PATH"
+    case "$AGENT" in antigravity) AGENT_CMD=agy ;; *) AGENT_CMD="$AGENT" ;; esac
+    for cmd in claude "$AGENT_CMD"; do  # Claude Code too: Rook falls back to it when the chosen agent cannot start.
+      found="$(command -v "$cmd" 2>/dev/null || true)"
+      case "$found" in
+        /*) dir="$(dirname "$found")"
+            case ":$SERVICE_PATH:" in *":$dir:"*) ;; *) SERVICE_PATH="$dir:$SERVICE_PATH" ;; esac ;;
+      esac
+    done
+    if [ "$SERVICE_PATH" != "$MANAGER_PATH" ]; then
+      UNIT_PATH_LINE=$'\n'"Environment=\"PATH=$(systemd_escape_wd "$SERVICE_PATH")\""
+      say "  The service gets PATH=$SERVICE_PATH, so it finds the agent at $(command -v "$AGENT_CMD" 2>/dev/null || command -v claude)."
+    fi
+  fi
+
+  # Rook starts with the graphical session where one is run as a systemd target (uwsm, as on Omarchy). Plain
+  # Hyprland never starts that target, so there Rook starts with the user's systemd and waits for the desktop.
+  UNIT_SESSION=$'\n'"PartOf=graphical-session.target"$'\n'"After=graphical-session.target"
+  UNIT_TARGET="graphical-session.target"
+  if ! "$SYSTEMCTL_BIN" --user is-active --quiet graphical-session.target 2>/dev/null && ! command -v uwsm >/dev/null 2>&1; then
+    UNIT_SESSION="" UNIT_TARGET="default.target"
+    say "  No graphical-session.target here, so Rook starts at login and finds the desktop when it appears."
+  fi
+
+  OLD_TARGET="$(sed -n 's/^WantedBy=//p' "$UNIT_ROOK" 2>/dev/null | head -n 1)" || OLD_TARGET=""
   ROOK_OWNED=0
   ROOK_WRITTEN=0
   TIMER_WRITTEN=0
@@ -2399,9 +2505,7 @@ elif decide_yes_no "--service" "$SERVICE_CHOICE" "  Install and enable Rook's sy
   if install_unit_file "$UNIT_ROOK" "rook.service" <<EOF
 $UNIT_MARKER
 [Unit]
-Description=Rook desktop voice assistant
-PartOf=graphical-session.target
-After=graphical-session.target
+Description=Rook desktop voice assistant$UNIT_SESSION
 StartLimitIntervalSec=300
 StartLimitBurst=5
 OnFailure=rook-failed.service
@@ -2415,10 +2519,10 @@ RestartSec=5
 RestartMode=direct
 TimeoutStopSec=20
 Environment=XDG_RUNTIME_DIR=%t
-Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUNBUFFERED=1$UNIT_PATH_LINE
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=$UNIT_TARGET
 EOF
   then
     ROOK_OWNED=1
@@ -2535,6 +2639,9 @@ EOF
 
   if [ "$ROOK_OWNED" -eq 1 ]; then
     if [ "$ROOK_WRITTEN" -eq 1 ]; then
+      if [ -n "$OLD_TARGET" ] && [ "$OLD_TARGET" != "$UNIT_TARGET" ]; then
+        run_cmd "$SYSTEMCTL_BIN" --user disable rook.service  # Its link under the old target goes first.
+      fi
       run_cmd "$SYSTEMCTL_BIN" --user enable rook.service
       "$SYSTEMCTL_BIN" --user is-enabled rook.service >/dev/null 2>&1 \
         || die "rook.service failed to enable in systemd." "Check systemctl --user status rook.service."
@@ -2615,7 +2722,8 @@ fi
 
 say "Rook install complete."
 if [ "$INSTALL_SERVICE" -eq 1 ] && [ "$IS_MAC" -eq 1 ]; then
-  say "Start Rook with: launchctl bootstrap gui/$(id -u) $(printf '%q' "$MAC_PLIST")"
+  # install/get.sh starts Rook itself right after this. kickstart restarts a loaded job; bootstrap loads and starts one.
+  [ -n "${ROOK_GET_STARTS_ROOK:-}" ] || say "Start Rook with: launchctl kickstart -k gui/$(id -u)/$LAUNCHD_LABEL || launchctl bootstrap gui/$(id -u) $(printf '%q' "$MAC_PLIST")"
   say "Watch logs with: tail -f ~/Library/Logs/rook.err.log"
 elif [ "$INSTALL_SERVICE" -eq 1 ]; then
   say "Start Rook with: systemctl --user start rook.service"

@@ -290,8 +290,8 @@ def theme_now():
 
 
 def guide(value):
-    """Show an onboarding guide on Rook's overlay, or clear it with None. Without a running Rook, nothing."""
-    ask_rook("guide", json.dumps(value), wait=2)
+    """Show an onboarding guide on Rook's overlay, or clear it with None. Return whether the overlay showed it."""
+    return bool((ask_rook("guide", json.dumps(value), wait=2) or {}).get("shown"))
 
 
 def ask_rook(command, body="", wait=300):
@@ -457,6 +457,8 @@ def settings_command(argv):
             {"value": saved_file.get("build_threads") or {},
              "source": "settings file" if saved_file.get("build_threads") else "not set"}
         )
+        # The thread watcher reads this one from the file at each look, so the file is what is in force.
+        values["thread_milestones"] = dict(zip(("value", "source"), settings.thread_milestones_in_force(saved_file)))
         values["plugins"] = {"value": saved_file.get("plugins") or {},
                              "source": "settings file" if saved_file.get("plugins") else "not set"}
         for key in keys:
@@ -599,6 +601,18 @@ def settings_command(argv):
         utter(f"Saved {key} = {value}" + (", with that agent's default model and effort" if key == "agent" else "")
               + f". It takes effect at Rook's next start, not now. Rook never restarts itself. {OWNER_START} or the build "
               f"thread restarts it with relay.py restart, or the daily restart at 04:30 does.{note}")
+        return
+    if key == "thread_milestones":  # The thread watcher reads the file at each look, so nothing is applied now.
+        value = value.strip().lower()
+        old = settings.thread_milestones_in_force(saved)[0]
+        if value == "previous":
+            if key not in previous:
+                leave(f"There is no previous {key} to go back to.")
+            value = previous[key]
+        if value not in settings.THREAD_MILESTONES_MODES:
+            leave(f"thread_milestones must be {' or '.join(settings.THREAD_MILESTONES_MODES)}. {value} is not one of them.")
+        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
+        utter(f"Saved thread_milestones = {value}. The thread watcher uses it from its next look, within a minute.")
         return
     if key in ("owner_name", "owner_pronouns", "assistant_name"):  # Rook's prompt names both, so these take effect at its next start.
         value = value.strip() if key != "owner_pronouns" else value.strip().lower()
@@ -2429,7 +2443,7 @@ def ask_command(argv):
     if answer is None:
         leave(f"Rook is not running: nothing answers at {INBOX}.")
     if not answer.get("ok"):
-        leave(answer.get("error") or "Rook could not answer.")
+        leave(answer.get("error") or answer.get("answer") or "Rook could not answer.")  # The agent's own reason.
     print(answer.get("spoken") or answer.get("answer") or "")  # The agent's own answer: never rendered again.
 
 
@@ -3636,8 +3650,11 @@ def mac_access_command(argv):
             verb in ("ask", "open", "wait", "restart", "kick") and (len(argv) != 2 or grant not in MAC_GRANTS)):
         sys.exit(f"Usage: relay.py mac-access [ask|open|wait|restart {'|'.join(MAC_GRANTS)}] | done")
     if verb == "open":
-        done = subprocess.run(["/usr/bin/open", f"x-apple.systempreferences:com.apple.preference.security?"
-                               f"{MAC_GRANTS[grant]}"], capture_output=True, text=True)
+        try:
+            done = subprocess.run(["/usr/bin/open", f"x-apple.systempreferences:com.apple.preference.security?"
+                                   f"{MAC_GRANTS[grant]}"], capture_output=True, text=True)
+        except OSError as error:
+            sys.exit(f"Could not open System Settings: {error}")
         if done.returncode:
             sys.exit(f"Could not open System Settings: {(done.stderr or done.stdout).strip()}")
         print(f"System Settings shows the {grant} list.")
@@ -3939,6 +3956,28 @@ def check():
             # relay.py forge list finds themes/forge/forge.py from the repository root.
             forge = run_cli(Path(folder), ["forge", "list"], cfg_dir=Path(folder) / "forge-config")
             assert forge.returncode == 0 and forge.stdout == "No packs yet.\n", (forge.returncode, forge.stderr)
+            # forge new on the default Devs path: a scene becomes 640 flat rows; a bad file or a mismatch gets one sentence.
+            forge_cfg = Path(folder) / "forge-config"
+            scene = '{"name": "ring", "parts": [{"id": "ring", "circle": [50, 50, 30]}]}'
+            forge = run_cli(Path(folder), ["forge", "new", "dusty", "ring"], stdin_text=scene, cfg_dir=forge_cfg)
+            made = json.loads((forge_cfg / "rook/themes/dusty/forms/ring.json").read_text())
+            assert forge.returncode == 0 and len(made) == 640 and {r[2] for r in made} == {0.0}, forge.stderr
+            for args, stdin_text, said in (
+                    (["dusty", "orb", "--base", "nova"], "vec4 icon(vec2 p, float t, int l){return vec4(0);}",
+                     "dusty is a points pack on devs. Start a new pack for this icon."),
+                    (["dusty", "huge"], json.dumps([[0, 10 ** 400, 0]] + [[0, 0, 0]] * 639),
+                     "Row 1 of the form lies outside the 124 px form box."),
+                    (["dusty", "deep"], "[" * 30000 + "]" * 30000, None)):
+                forge = run_cli(Path(folder), ["forge", "new", *args], stdin_text=stdin_text, cfg_dir=forge_cfg)
+                assert forge.returncode == 1 and forge.stderr.strip() == (said or forge.stderr.strip().split("\n")[0]) \
+                    and "Traceback" not in forge.stderr, (args, forge.stderr)
+            # A hand-edited manifest that forge cannot add to gets one sentence.
+            (forge_cfg / "rook/themes/handmade").mkdir(parents=True)
+            for broken in ("[]", '{"icons": {}}', '{"base": "devs"}', "{"):
+                (forge_cfg / "rook/themes/handmade/manifest.json").write_text(broken)
+                forge = run_cli(Path(folder), ["forge", "new", "handmade", "ring"], stdin_text=scene, cfg_dir=forge_cfg)
+                assert forge.returncode == 1 and forge.stderr.strip() == (
+                    "The manifest of handmade needs a base theme and an icons object. Start a new pack instead."), forge.stderr
             # Combined handoff --work --print writes the same work entry and prints the same brief bytes as two calls.
             test_cfg = Path(folder) / "config"
             (test_cfg / "rook").mkdir(parents=True, exist_ok=True)
@@ -5367,6 +5406,17 @@ def check_shared_memory():
         assert refused_link.returncode != 0 and len(refused_link.stderr.strip().splitlines()) == 1, refused_link.stderr
         assert foreign_dream.is_symlink() and not (fake_home / ".agents/hooks/memory-context.sh").exists()
         foreign_dream.unlink()
+
+        # 1b. No systemd (a Mac): one plain refusal, and nothing is written, not even the manifest.
+        no_systemd_bin = base / "bin-no-systemd"
+        no_systemd_bin.mkdir(mode=0o700)
+        before = sorted(str(p) for p in fake_home.rglob("*"))
+        no_systemd = run_cli("memory", "install-shared", extra={"PATH": str(no_systemd_bin)})
+        assert no_systemd.returncode != 0, (no_systemd.returncode, no_systemd.stdout, no_systemd.stderr)
+        assert no_systemd.stderr.strip() == ("Refused: the shared memory tidies its notes each night with a systemd "
+                                             "timer, and this computer has no systemd, so Rook keeps its own memory."), \
+            no_systemd.stderr
+        assert sorted(str(p) for p in fake_home.rglob("*")) == before and not sys_log.exists(), "no-systemd wrote files"
 
         # 2. Failed install leaves a manifest that remove-shared undoes cleanly (including autoMemoryEnabled), and retry works.
         claude_settings = fake_home / ".claude/settings.json"

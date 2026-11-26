@@ -351,8 +351,81 @@ def load_pack(name: str = DEFAULT_PACK, themes_dir: str = THEMES_DIR, reload: bo
         pack["_dir"] = pdir
         pack["icons"] = own_icons
     pack["_user"] = _is_user
+    pack["_own"] = tuple(own_icons)  # The icons this pack's own manifest names, not its base's.
     _PACK_CACHE[key] = pack
     return pack
+
+
+FORM_ROWS = 640  # A dust form's grains: the dust engine's GRAINS.
+FORM_HALF = 62.0  # Half the 124 px form box, in logical px.
+MAX_FORM_BYTES = 64 * 1024
+MAX_PACK_FORMS = 4  # Dust forms a pack may add to the thinking rotation; Devs has four thinking forms of its own.
+MAX_FORM_TRIES = 4 * MAX_PACK_FORMS  # Form files read per pack load, good or bad, so a huge pack cannot stall it.
+
+
+def _plain(text) -> str:
+    """A name from a pack, safe to put in a log line: printable characters only, and short."""
+    return "".join(c if c.isprintable() else "?" for c in str(text))[:60]
+
+
+def check_form_rows(rows) -> str | None:
+    """One plain sentence on what is wrong with a dust form's [x, y, z] rows, or None when they are good. It only
+    compares numbers, so no value can make it raise."""
+    if not isinstance(rows, list) or len(rows) != FORM_ROWS:
+        return f"The form has {len(rows) if isinstance(rows, list) else 0} rows, and a form needs exactly {FORM_ROWS}."
+    for k, row in enumerate(rows, 1):
+        if not (isinstance(row, list) and len(row) == 3 and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != math.inf for v in row)):
+            return f"Row {k} of the form is not three plain numbers."
+        if not all(abs(v) <= FORM_HALF for v in row):
+            return f"Row {k} of the form lies outside the 124 px form box."
+    return None
+
+
+def pack_forms(pack: dict) -> tuple[dict, list]:
+    """A user dust pack's own forms for the thinking rotation: ({key: (points, spin)}, problems). Each problem is one
+    plain sentence, and its icon is left out, so thinking keeps the built-in forms. At most MAX_PACK_FORMS are read."""
+    forms, problems, over, tries = {}, [], 0, 0
+    if pack.get("kind") != "points" or not pack.get("_user"):
+        return forms, problems
+    for iname in pack.get("_own", ()):
+        spec = pack["icons"].get(iname)
+        rel = spec.get("form") if isinstance(spec, dict) and spec.get("think") else None
+        if not (isinstance(rel, str) and rel.endswith(".json")):
+            problems.append(f"Icon {_plain(iname)} keeps the built-in forms. A dust icon needs a .json form file and "
+                            "think set to true.")
+            continue
+        if len(forms) >= MAX_PACK_FORMS or tries >= MAX_FORM_TRIES:
+            over += 1
+            continue
+        tries += 1
+        shown = _plain(rel)
+        spin, rows = spec.get("spin", 0.45), None
+        try:
+            path = _contained_file(pack["_dir"], rel, rel)
+            if os.path.getsize(path) > MAX_FORM_BYTES:
+                problem = f"The form file {shown} is over {MAX_FORM_BYTES // 1024} KB."
+            else:
+                with open(path, encoding="utf-8") as f:
+                    rows = json.load(f)
+                problem = check_form_rows(rows)
+        except Exception as exc:  # Every way a form file can fail ends in one sentence, never a dropped pack.
+            text = str(exc)
+            problem = (f"The form file {shown} is not JSON." if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError))
+                       else f"The form file {shown} is missing." if "missing" in text
+                       else f"The form file {shown} is not a file inside the pack folder." if isinstance(exc, ValueError)
+                       else f"The form file {shown} cannot be read as a form.")
+        if problem is None and not (isinstance(spin, (int, float)) and not isinstance(spin, bool) and abs(spin) <= 2):
+            problem = "The icon's spin must be a number from -2 to 2."
+        if problem:
+            problems.append(f"Icon {_plain(iname)} keeps the built-in forms. {problem}")
+            continue
+        points = sorted((tuple(map(float, r)) for r in rows), key=lambda p: math.atan2(p[1], p[0]))
+        forms[f"pack:{os.path.basename(pack['_dir'])}/{iname}"] = (points, float(spin))
+    if over:
+        problems.append(f"{over} more icons keep the built-in forms, because a pack holds at most {MAX_PACK_FORMS} "
+                        "dust forms.")
+    return forms, problems
 
 
 def pack_font_file(pack: dict) -> str | None:

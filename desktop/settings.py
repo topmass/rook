@@ -87,6 +87,10 @@ LISTEN_AFTER = "off"
 # Smart Turn v3.2 end-of-turn detection during listen_after(): off by default so zero extra RAM/CPU until enabled.
 SMART_TURNS = ("off", "on")
 SMART_TURN = "off"
+# Whether a watched thread that still waits on its subagents may report its new "For Rook:" milestones before it
+# finishes. Off by default, so Rook stays quiet until a thread finishes. The watcher reads it at each look.
+THREAD_MILESTONES_MODES = ("off", "on")
+THREAD_MILESTONES = "off"
 # Opt-in live thought and between-tool narration: off by default.
 # beats: prompt allows brief plain-English beats between later tool calls.
 # thoughts: narrates cleaned English agent_thought_chunk updates in real time.
@@ -109,7 +113,7 @@ MACHINES_CONFIG = CONFIG.with_name("machines.json")
 DEFAULT_THEME_PACK = "devs"
 THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
 SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "diagram_entrance", "diagram_dance",
-            "stage", "listen_after", "smart_turn", "speak_thoughts", "recording_minutes", *RANGES, *AGENT_SETTINGS,
+            "stage", "listen_after", "smart_turn", "thread_milestones", "speak_thoughts", "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
             "recogniser_model")
 CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
@@ -159,6 +163,8 @@ def valid(data):
         elif key == "listen_after" and isinstance(value, str) and value.strip().lower() in LISTEN_AFTERS:
             found[key] = value.strip().lower()
         elif key == "smart_turn" and isinstance(value, str) and value.strip().lower() in SMART_TURNS:
+            found[key] = value.strip().lower()
+        elif key == "thread_milestones" and isinstance(value, str) and value.strip().lower() in THREAD_MILESTONES_MODES:
             found[key] = value.strip().lower()
         elif key == "speak_thoughts" and isinstance(value, str) and value.strip().lower() in SPEAK_THOUGHTS_MODES:
             found[key] = value.strip().lower()
@@ -572,6 +578,13 @@ def smart_turn_in_force(saved):
     if saved.get("smart_turn") in SMART_TURNS:
         return saved["smart_turn"], "settings file"
     return SMART_TURN, "default"
+
+
+def thread_milestones_in_force(saved):
+    """Return (thread_milestones mode, source): the saved mode while valid, else the default (off)."""
+    if saved.get("thread_milestones") in THREAD_MILESTONES_MODES:
+        return saved["thread_milestones"], "settings file"
+    return THREAD_MILESTONES, "default"
 
 
 def speak_thoughts_in_force(saved):

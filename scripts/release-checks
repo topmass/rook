@@ -5,6 +5,7 @@
 # rook-media and rook-phone are slower, so they run only when named.
 # ROOK_PYTHON names Rook's Python. The default is the installer's venv, then the AirType tool's Python.
 # KEEP_SCRATCH=1 keeps the scratch folder for a look afterwards.
+# Checks run in parallel, ROOK_CHECK_JOBS at a time (default 4), each in its own scratch XDG folders.
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -38,8 +39,8 @@ case "$X" in */rook-checks.*) ;; *) echo "release-checks: odd scratch folder $X"
 if [ -z "${KEEP_SCRATCH:-}" ]; then
     trap 'rm -rf "$X"' EXIT
 fi
-mkdir -p "$X/state" "$X/data/rook" "$X/config" "$X/cache" "$X/run" "$X/claude" "$X/guard" "$X/gst"
-chmod 700 "$X" "$X/run"
+mkdir -p "$X/guard" "$X/gst"
+chmod 700 "$X"
 
 # A check that reaches a real desktop tool, the agent or the sound gets a refusal, never the real program.
 for tool in claude grim hyprctl notify-send paplay pw-play pw-cat pw-record arecord parecord pactl; do
@@ -47,46 +48,55 @@ for tool in claude grim hyprctl notify-send paplay pw-play pw-cat pw-record arec
     chmod +x "$X/guard/$tool"
 done
 
-# Speech models are read from the real folders, so a run does not copy hundreds of MB into scratch.
-[ -e "$REAL_CACHE/airtype" ] && ln -s "$REAL_CACHE/airtype" "$X/cache/airtype"
-[ -e "$REAL_DATA/rook/voice-phonon" ] && ln -s "$REAL_DATA/rook/voice-phonon" "$X/data/rook/voice-phonon"
-if [ -e "$REAL_DATA/wowfriend/voice-phonon" ]; then
-    mkdir -p "$X/data/wowfriend"
-    ln -s "$REAL_DATA/wowfriend/voice-phonon" "$X/data/wowfriend/voice-phonon"
-fi
+# Each check gets its own scratch XDG folders, so parallel checks never share a database, socket or settings file.
+scratch() {
+    mkdir -p "$1/state" "$1/data/rook" "$1/config" "$1/cache" "$1/run" "$1/claude"
+    chmod 700 "$1/run"
+    # Speech models are read from the real folders, so a run does not copy hundreds of MB into scratch.
+    [ -e "$REAL_CACHE/airtype" ] && ln -s "$REAL_CACHE/airtype" "$1/cache/airtype"
+    [ -e "$REAL_DATA/rook/voice-phonon" ] && ln -s "$REAL_DATA/rook/voice-phonon" "$1/data/rook/voice-phonon"
+    if [ -e "$REAL_DATA/wowfriend/voice-phonon" ]; then
+        mkdir -p "$1/data/wowfriend"
+        ln -s "$REAL_DATA/wowfriend/voice-phonon" "$1/data/wowfriend/voice-phonon"
+    fi
+    export XDG_STATE_HOME="$1/state" XDG_DATA_HOME="$1/data" XDG_CONFIG_HOME="$1/config" XDG_CACHE_HOME="$1/cache"
+    export XDG_RUNTIME_DIR="$1/run" CLAUDE_CONFIG_DIR="$1/claude"
+}
 
 export PATH="$X/guard:$PATH" PYTHONDONTWRITEBYTECODE=1 TMPDIR="${TMPDIR:-/tmp}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$REAL_CACHE/uv}" UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$REAL_DATA/uv/python}"
 export HF_HOME="${HF_HOME:-$REAL_CACHE/huggingface}" HF_HUB_OFFLINE=1
-export XDG_STATE_HOME="$X/state" XDG_DATA_HOME="$X/data" XDG_CONFIG_HOME="$X/config" XDG_CACHE_HOME="$X/cache"
-export XDG_RUNTIME_DIR="$X/run" CLAUDE_CONFIG_DIR="$X/claude"
 # Empty GStreamer plugin folders, so no camera or audio plugin loads.
 export GST_PLUGIN_PATH_1_0="$X/gst" GST_PLUGIN_SYSTEM_PATH_1_0="$X/gst" GST_PLUGIN_PATH="$X/gst"
 export GST_PLUGIN_SYSTEM_PATH="$X/gst" GST_REGISTRY_1_0="$X/gst/registry.bin"
 unset ROOK_AGENT T3CODE_THREAD_ID WAYLAND_DISPLAY DISPLAY HYPRLAND_INSTANCE_SIGNATURE PULSE_SERVER PIPEWIRE_REMOTE
 cd "$REPO" || exit 2
 
-failed=0
+# A pipe holds one token per free slot. Each check takes a token to start and puts it back when it ends.
+JOBS=${ROOK_CHECK_JOBS:-4}
+mkfifo "$X/slots" && exec 3<>"$X/slots" && rm "$X/slots" || exit 2
+i=0
+while [ "$i" -lt "$JOBS" ]; do echo >&3; i=$((i + 1)); done
+names=""
 run() {
     name=$1
     shift
     if [ -n "$PICK" ]; then
         case " $PICK " in *" $name "*) ;; *) return ;; esac
     fi
-    start=$(date +%s)
-    "$@" > "$X/out-$name.txt" 2>&1 < /dev/null
-    code=$?
-    if [ "$code" -eq 0 ]; then
-        echo "ok    $name ($(( $(date +%s) - start )) s)"
-    else
-        failed=$((failed + 1))
-        echo "FAIL  $name (exit $code)"
-        tail -n 5 "$X/out-$name.txt" | sed 's/^/      /'
-    fi
+    names="$names $name"
+    read -r _ <&3
+    (
+        scratch "$X/c/$name"
+        start=$(date +%s)
+        "$@" > "$X/out-$name.txt" 2>&1 < /dev/null
+        echo "$? $(( $(date +%s) - start ))" > "$X/res-$name"
+        echo >&3
+    ) &
 }
 PICK="$*"
 
-for flag in journal restart agent steps dark timing mailbox desktop speech; do
+for flag in speech start journal restart agent steps dark timing mailbox desktop; do  # The slowest first.
     run "rook-$flag" "$PY" desktop/rook.py "--check-$flag"
 done
 # Slower checks with a headless browser or media: they run only when named, such as rook-media.
@@ -112,9 +122,23 @@ run server "$PY" desktop/server.py --check
 run speech-words "$PY" desktop/speech.py --check-words
 run turn-end "$PY" desktop/turn_end.py --check
 run desk "$SYS_PY" desktop/desk.py
+run start-limit "$SYS_PY" desktop/start_limit.py --check
 run machine "$SYS_PY" desktop/machine.py
 run boundaries "$SYS_PY" scripts/check_boundaries.py
 run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
+wait
+
+failed=0
+for name in $names; do
+    read -r code secs < "$X/res-$name" 2>/dev/null || { code=99; secs=0; }
+    if [ "$code" -eq 0 ]; then
+        echo "ok    $name ($secs s)"
+    else
+        failed=$((failed + 1))
+        echo "FAIL  $name (exit $code)"
+        tail -n 5 "$X/out-$name.txt" | sed 's/^/      /'
+    fi
+done
 
 [ -n "${KEEP_SCRATCH:-}" ] && echo "Output is in $X"
 if [ "$failed" -gt 0 ]; then

@@ -14,6 +14,24 @@ ROOK_PUBLIC_SOURCE="https://github.com/topmass/rook.git"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+# bounded SECONDS OUT COMMAND...: run COMMAND with no input and its output in OUT, for at most SECONDS, so a tool that
+# hangs or prompts cannot hang the install. Its exit code, or 124 at the limit. The Mac has no timeout command.
+bounded() {
+  limit=$(( $1 * 10 )) out=$2
+  shift 2
+  "$@" </dev/null >"$out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$limit" -le 0 ]; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    limit=$((limit - 1))
+  done
+  wait "$pid"
+}
 
 # Everything runs inside main, so sh has read the whole script before any step can read stdin.
 main() {
@@ -32,23 +50,41 @@ main() {
     *) source="$1"; shift ;;
   esac
 
-  # The base agent: the first one found on PATH. --agent after SOURCE overrides it.
+  # The agent Rook runs on: the one named with --agent, else the first that runs on PATH.
   # Checked first, so a missing agent stops the install before any download.
   export PATH="$HOME/.local/bin:$PATH"
-  for pair in claude:claude codex:codex agy:antigravity pi:pi; do
-    if command -v "${pair%%:*}" >/dev/null 2>&1; then
-      set -- --agent "${pair#*:}" "$@"
+  dry=0
+  case " $* " in *" --dry-run "*) dry=1 ;; esac
+  named="" prev=""
+  for arg in "$@"; do
+    [ "$prev" != "--agent" ] || named="$arg"
+    prev="$arg"
+  done
+  agent="" agent_cmd="" label=""
+  for entry in "claude:claude:Claude Code" "codex:codex:Codex" "agy:antigravity:Antigravity" "pi:pi:Pi"; do
+    cmd="${entry%%:*}" rest="${entry#*:}"
+    name="${rest%%:*}"
+    [ -z "$named" ] || [ "$named" = "$name" ] || continue
+    if command -v "$cmd" >/dev/null 2>&1 && bounded 10 /dev/null "$cmd" --version; then
+      agent="$name" agent_cmd="$cmd" label="${rest#*:}"
       break
     fi
   done
-  case " $* " in
-    *" --agent"*|*" --dry-run "*) ;;
-    *) die "No agent found on PATH. Install Claude Code, Codex, Antigravity, or Pi and sign in (see INSTALL.md step 1), then run this again." ;;
-  esac
+  guide="https://github.com/topmass/rook/blob/main/INSTALL.md"
+  if [ -n "$agent" ]; then
+    [ -n "$named" ] || set -- --agent "$agent" "$@"
+    say "Rook will run on $label ($(command -v "$agent_cmd")). To use another agent, add --agent claude, codex, antigravity or pi after \"sh -s --\"."
+  elif [ -n "$named" ] && [ "$dry" -eq 0 ]; then
+    die "Rook is set to run on $named with --agent, but that agent is missing or does not run. Install it and sign in (see $guide), or pick another with --agent claude, codex, antigravity or pi."
+  elif [ "$dry" -eq 0 ]; then
+    die "No coding agent found. Rook runs on Claude Code, Codex, Antigravity or Pi. Install one and sign in, then run this again. Claude Code installs with: curl -fsSL https://claude.ai/install.sh | bash. More in $guide"
+  fi
 
   # 1. uv, the tool that builds Rook's Python environments.
-  if ! command -v uv >/dev/null 2>&1; then
-    say "Installing uv..."
+  if ! command -v uv >/dev/null 2>&1 && [ "$dry" -eq 1 ]; then
+    say "uv is missing. A real install gets it from https://astral.sh/uv/install.sh. This dry run does not."
+  elif ! command -v uv >/dev/null 2>&1; then
+    say "Installing uv. Its installer puts uv in ~/.local/bin and adds that folder to your shell's PATH in your shell's start files."
     curl -LsSf https://astral.sh/uv/install.sh | sh
     command -v uv >/dev/null 2>&1 || die "uv did not install. See https://docs.astral.sh/uv/getting-started/installation/"
   fi
@@ -72,6 +108,7 @@ main() {
       git -C "$work/rook" init -q
       git -C "$work/rook" add -A
       git -C "$work/rook" -c user.name=Rook -c user.email=rook@localhost commit -qm "Rook from $source"
+      from_tarball=1
       code="$work/rook"
       source="$work/rook" ;;
     *)
@@ -87,7 +124,7 @@ main() {
   esac
   [ -f "$code/install/install.sh" ] || die "$source does not hold Rook (install/install.sh is missing)."
 
-  # 4. Install. The models download here: the small voice (about 65 MB) and AirType's recogniser (about 490 MB, English unless --recogniser-model multi).
+  # 4. Install. The models download here: the small voice (about 65 MB) and AirType's recogniser (about 480 MB for English, 490 MB with --recogniser-model multi).
   # The medium voice (about 3.3 GB on disk, 2.5 GB on a Mac) too, when this computer can run it.
   voice=medium
   why=$(sh "$code/install/medium-voice.sh" --check) || { voice=small; say "$why"; }
@@ -98,7 +135,7 @@ main() {
       say "Rook also gets its medium voice, a $size voice model. To skip it, press Ctrl+C and add --voice small to the install command." ;;
   esac
   rc=0
-  bash "$code/install/install.sh" --source "$source" \
+  ROOK_GET_STARTS_ROOK=1 bash "$code/install/install.sh" --source "$source" \
     --voice "$voice" --voice-model yes --recogniser yes --service yes "$@" </dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
     say ""
@@ -147,13 +184,42 @@ main() {
   elif [ "$(uname -s)" = Darwin ]; then
     say ""
     say "Start Rook with the command above, then hold Right Option and say \"run onboarding\"."
-  elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rook.service" ]; then
-    systemctl --user start rook.service
-    say ""
-    say "Rook is starting. When it says it is ready, hold Right Control and say \"run onboarding\"."
   else
+    # The talk key in force: the saved one, else Right Control.
+    key=$(python3 -c 'import json, re, sys
+try:
+    keys = json.load(open(sys.argv[1])).get("talk_keys") or []
+except (OSError, ValueError, AttributeError):
+    keys = []
+key = keys[0] if keys and isinstance(keys, list) and isinstance(keys[0], str) else "RightCtrl"
+print(re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", key).replace("Ctrl", "Control"))' \
+      "${XDG_CONFIG_HOME:-$HOME/.config}/rook/settings.json" 2>/dev/null) || key="Right Control"
+    rook="${XDG_DATA_HOME:-$HOME/.local/share}/rook"
     say ""
-    say "Start Rook with the command above, then hold Right Control and say \"run onboarding\"."
+    if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rook.service" ]; then
+      systemctl --user start rook.service
+      say "Rook is starting. When it says it is ready, hold $key and say \"run onboarding\"."
+    else
+      say "Start Rook with the command above, then hold $key and say \"run onboarding\"."
+    fi
+    say "Until the talk key works, type instead: $rook/venv/bin/python $rook/live/desktop/relay.py ask \"run onboarding\""
+    say "To remove Rook later: bash $rook/live/install/uninstall.sh"
+    [ -z "${from_tarball:-}" ] || say "This copy came from a .tar.gz file, so relay.py update cannot update it. To update later, uninstall and install again from a git URL."
+  fi
+  # Last, so it is the line a person reads: an agent that is not signed in answers nothing.
+  # Only a status command that runs and says plainly that it is signed out: an old tool without one says nothing.
+  status="$work/agent-status.txt"
+  case "$agent_cmd" in
+    claude) bounded 15 "$status" "$agent_cmd" auth status --text && : > "$status"; login="auth login" ;;
+    codex) bounded 15 "$status" "$agent_cmd" login status && : > "$status"; login="login" ;;
+    *) : > "$status" 2>/dev/null || true ;;
+  esac
+  if [ -s "$status" ] && grep -qi -E 'not (logged|signed) in|logged out|signed out' "$status"; then
+    signin="$(command -v "$agent_cmd") $login"
+  fi
+  if [ -n "${signin:-}" ]; then
+    say ""
+    say "Sign in first: $signin"
   fi
 }
 

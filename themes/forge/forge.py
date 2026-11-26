@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """The forge for Rook's own hands: make an icon or a theme in ~/.config/rook/themes, in two commands.
 
-    forge.py new <theme> <icon> [--base nova] [--think] [--frames 24] [--fps 12] [--layers main,voice] < icon.glsl
-        Creates the pack if it is new (built on a repo theme, Nova by default), writes the shader, and adds the
-        manifest entry. The shader comes on standard input, so writing it costs no extra step.
+    forge.py new <theme> <icon> [--spin 0.45] < scene.json
+        A Devs pack (the default): a flat dust form for the thinking rotation, which sways gently. Standard input is a
+        render-tool scene, which becomes 640 grains, or 640 [x, y, z] rows written by hand.
+    forge.py new <theme> <icon> --base nova [--think] [--frames 24] [--fps 12] [--layers main,voice] < icon.glsl
+        A Nova pack: a shader icon. Standard input is the GLSL.
     forge.py bake <theme> [icon ...] [--show]
-        Bakes, checks that every loop closes (seam) and that nothing touches the cell's edge (edge), and renders a
-        still and a short loop. Prints the checks and the preview paths. With --show, and only when every check
-        passes, it puts the loop in Rook's viewer for the owner.
+        Devs: renders each dust form offscreen, a still and a loop, in about 5 seconds. Nova: bakes the shaders, checks
+        that every loop closes (seam) and that nothing touches the cell's edge (edge), and renders a still and a loop.
+        Prints the checks and the preview paths. With --show, and only when every check passes, it puts the loop in
+        Rook's viewer for the owner.
     forge.py list
         The user's packs and their icons.
 
@@ -47,18 +50,48 @@ def _user_pack_folder(theme):
     return safe_user_write_path(user_themes_dir() / theme, is_dir=True)
 
 
+def dust_rows(doc):
+    """640 [x, y, z] rows from a render-tool scene, or the rows themselves when they were written by hand."""
+    sys.path.insert(0, str(ROOT / "desktop"))
+    import pack_player
+    import render
+    if not isinstance(doc, list):
+        scene, errors = render.validate(doc)
+        if errors:
+            raise SystemExit("\n".join(errors))
+        form = render.sample(scene, budget=pack_player.FORM_ROWS, box=116)
+        half = pack_player.FORM_HALF
+        doc = [[round(max(-half, min(half, v)), 2) for v in (x, y)] + [0.0] for x, y in zip(form["x"], form["y"])]
+    problem = pack_player.check_form_rows(doc)
+    if problem:
+        raise SystemExit(problem)
+    return doc
+
+
 def new(a):
     theme, icon = name("theme", a.theme), name("icon", a.icon)
     folder = _user_pack_folder(theme)
-    base = name("base", a.base)
+    path = folder / "manifest.json"
+    try:
+        have = json.loads(path.read_text()) if path.exists() else None
+    except Exception:  # Not JSON, or not readable.
+        have = []
+    if have is not None and not (isinstance(have, dict) and isinstance(have.get("icons"), dict)
+                                 and isinstance(have.get("base"), str)):
+        raise SystemExit(f"The manifest of {theme} needs a base theme and an icons object. Start a new pack instead.")
+    base = name("base", have["base"] if have else a.base or "devs")
     if not (THEMES / base / "manifest.json").exists():
         raise SystemExit(f"There is no built-in theme called {base}.")
+    base_m = json.loads((THEMES / base / "manifest.json").read_text())
+    if have and ((a.base or base) != base or have.get("kind", "points") != base_m.get("kind", "points")):
+        raise SystemExit(f"{theme} is a {have.get('kind', 'points')} pack on {base}. Start a new pack for this icon.")
+    if base_m.get("kind") == "points":
+        return new_dust(a, theme, icon, folder, path, base)
     layers = [name("layer", x) for x in a.layers.split(",")] if a.layers else ["main"]
     if not (1 <= a.frames <= MAX_FRAMES):
         raise SystemExit(f"--frames must be between 1 and {MAX_FRAMES} (got {a.frames}).")
     if not (1 <= a.fps <= 60):
         raise SystemExit(f"--fps must be between 1 and 60 (got {a.fps}).")
-    base_m = json.loads((THEMES / base / "manifest.json").read_text())
     cell = int(base_m.get("cell", 256))
     side = math.ceil(math.sqrt(a.frames * len(layers))) * cell
     if side > MAX_ATLAS_SIDE:
@@ -70,7 +103,6 @@ def new(a):
         raise SystemExit("The shader is over 64 KB. Keep an icon to one small file.")
     icons_dir = folder / "icons"
     shader_path = icons_dir / f"{icon}.glsl"
-    path = folder / "manifest.json"
     safe_user_write_path(icons_dir, is_dir=True)
     safe_user_write_path(shader_path)
     safe_user_write_path(path)
@@ -87,6 +119,28 @@ def new(a):
     m["icons"][icon] = entry
     path.write_text(json.dumps(m, indent=1) + "\n")
     print(f"Wrote {shader_path} and its entry in {path}.")
+    print(f"Next: forge.py bake {theme} {icon} --show")
+
+
+def new_dust(a, theme, icon, folder, path, base):
+    try:
+        doc = json.loads(sys.stdin.read(MAX_SHADER + 1))
+    except Exception:  # Bad JSON, or JSON nested too deep to read.
+        raise SystemExit("Pipe a render-tool scene, or 640 [x, y, z] rows, in on standard input as JSON.")
+    if not abs(a.spin) <= 2:
+        raise SystemExit("--spin must be a number from -2 to 2.")
+    rows = dust_rows(doc)
+    form_path = folder / "forms" / f"{icon}.json"
+    for target in (folder / "forms", form_path, path):
+        safe_user_write_path(target, is_dir=target.name == "forms")
+    form_path.parent.mkdir(parents=True, exist_ok=True)
+    m = json.loads(path.read_text()) if path.exists() else {
+        "name": theme, "title": theme.replace("-", " ").title(), "format": 1, "kind": "points", "base": base,
+        "icons": {}, "states": {}}
+    form_path.write_text(json.dumps(rows, separators=(",", ":")) + "\n")
+    m["icons"][icon] = {"form": f"forms/{icon}.json", "spin": a.spin, "think": True}
+    path.write_text(json.dumps(m, indent=1) + "\n")
+    print(f"Wrote {form_path} and its entry in {path}.")
     print(f"Next: forge.py bake {theme} {icon} --show")
 
 
@@ -123,6 +177,15 @@ def bake(a):
         cmd = ["flock", "-w", "900", LOCK, str(ROOT / "scripts/capped"), sys.executable, __file__, *sys.argv[1:]]
         os.execve("/usr/bin/flock", cmd, {**os.environ, "FORGE_LOCKED": "1"})
     py, ok = sys.executable, True
+    previews.mkdir(exist_ok=True)
+    if m.get("kind") == "points":
+        shown = []
+        for icon in icons:
+            code, out = run([py, str(FORGE / "dust_preview.py"), theme, icon, str(previews)])
+            print(out)
+            ok = ok and code == 0
+            shown.append((icon, previews / f"{icon}.webm"))
+        return show(a, ok, shown)
     code, out = run([py, str(FORGE / "bake.py"), "--user-only", theme, *icons])
     print(out)
     if code != 0:
@@ -131,7 +194,6 @@ def bake(a):
     print(out)
     if "SEAM" in out or code != 0:
         ok = False
-    previews.mkdir(exist_ok=True)
     shown = []
     for icon in icons:
         still, loop = previews / f"{icon}.png", previews / f"{icon}.webm"
@@ -146,8 +208,12 @@ def bake(a):
         print(f"{icon}: still {still}")
         print(f"{icon}: loop {loop}")
         shown.append((icon, loop))
+    return show(a, ok, shown)
+
+
+def show(a, ok, shown):
     if not ok:
-        print("A check failed: fix the shader and bake again. Nothing was shown.")
+        print("A check failed: fix it and bake again. Nothing was shown.")
         return 1
     print("All checks passed.")
     if a.show and shown:
@@ -172,7 +238,8 @@ def main():
     n = sub.add_parser("new")
     n.add_argument("theme")
     n.add_argument("icon")
-    n.add_argument("--base", default="nova")
+    n.add_argument("--base", help="a new pack's built-in theme: devs (the default) or nova")
+    n.add_argument("--spin", type=float, default=0.45, help="Devs: the pace of its sway, in radians per second")
     n.add_argument("--think", action="store_true", help="join the thinking rotation")
     n.add_argument("--frames", type=int, default=24)
     n.add_argument("--fps", type=int, default=12)

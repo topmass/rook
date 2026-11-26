@@ -43,6 +43,12 @@ fi
 if [ "${2:-}" = "is-enabled" ] && [[ " ${FAKE_SYSTEMCTL_DISABLED:-} " == *" ${3:-} "* ]]; then
   exit 1
 fi
+if [ "${2:-}" = "is-active" ] && [ -n "${FAKE_SYSTEMCTL_INACTIVE:-}" ]; then
+  exit 3
+fi
+if [ "${2:-}" = "show-environment" ]; then
+  [ -z "${FAKE_SYSTEMCTL_PATH:-}" ] || echo "PATH=$FAKE_SYSTEMCTL_PATH"
+fi
 exit 0
 SH
 chmod +x "$FAKE_BIN/systemctl"
@@ -170,6 +176,9 @@ if [ "$cmd" = "pip" ]; then
   if [ "${FAIL_UV_PIP_ON:-}" != "" ] && [[ "$venv_dir" == *"$FAIL_UV_PIP_ON"* ]]; then
     echo "Simulated uv pip install failure on $venv_dir" >&2
     exit 1
+  fi
+  if [ "${FAIL_UV_PIP_SILENT_ON:-}" != "" ] && [[ "$venv_dir" == *"$FAIL_UV_PIP_SILENT_ON"* ]]; then
+    exit 1  # Killed or out of memory: nothing on stderr.
   fi
   stub_dir="$venv_dir/lib/stub"
   mkdir -p "$stub_dir/airtype"
@@ -1320,4 +1329,262 @@ run_in_sb "$SB27" bash "$UNINSTALL_SH" --yes >/dev/null
 grep -qF -- "--user disable --now rook-medium-voice.service" "$TEST_ROOT/systemctl.log" || fail "27 uninstall did not stop the medium unit. Log: $(cat "$TEST_ROOT/systemctl.log")"
 pass "Medium voice wrote no unit under --service no and printed the hand command; uninstall removed its unit, environment and model"
 
-echo "All install failure and recovery tests passed (27/27)."
+echo "=== Case 28: Mac: a failed medium voice keeps the small voice, the install finishes, and uninstall leaves no voice job ==="
+SB28="$(new_sandbox mac-medium-fail)"
+MAC_BIN="$TEST_ROOT/fake-mac-bin"
+mkdir -p "$MAC_BIN"
+cat >"$MAC_BIN/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in -m) echo arm64 ;; *) echo Darwin ;; esac
+SH
+cat >"$MAC_BIN/sw_vers" <<'SH'
+#!/usr/bin/env bash
+echo 15.6
+SH
+cat >"$MAC_BIN/xcode-select" <<'SH'
+#!/usr/bin/env bash
+echo /Library/Developer/CommandLineTools
+SH
+cat >"$MAC_BIN/sysctl" <<'SH'
+#!/usr/bin/env bash
+echo 25769803776
+SH
+cat >"$MAC_BIN/launchctl" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "${FAKE_LAUNCHCTL_LOG:-/dev/null}"
+# Ctrl+C while the medium voice waits for its server: install.sh, the voice script's parent, gets TERM.
+if [ -n "${FAKE_LAUNCHCTL_STOP_INSTALL:-}" ] && [ "${1:-}" = "bootstrap" ] && [[ "${3:-}" == *com.rook.medium-voice.plist ]]; then
+  kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d ' ')"
+fi
+exit 0
+SH
+cat >"$MAC_BIN/curl" <<'SH'
+#!/usr/bin/env bash
+# The medium voice server answers its health check only when FAKE_CURL_OK is set.
+[ -z "${FAKE_CURL_OK:-}" ] || exit 0
+echo "ERROR: curl must never be called ($*)" >&2
+exit 99
+SH
+cat >"$MAC_BIN/clang" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && { mkdir -p "$(dirname "$2")"; echo stub >"$2"; chmod +x "$2"; }; shift; done
+SH
+cat >"$MAC_BIN/codesign" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$MAC_BIN"/*
+: >"$TEST_ROOT/launchctl.log"
+# The fake curl refuses every call, so the medium voice server's health check never answers: the failed first run.
+set +e
+OUT28_1="$(run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+  bash "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC28_1=$?
+set -e
+PLIST28="$SB28/Library/LaunchAgents/com.rook.medium-voice.plist"
+[ "$RC28_1" -eq 2 ] || fail "28 install did not finish after the medium voice failed ($RC28_1): $OUT28_1"
+printf '%s\n' "$OUT28_1" | grep -qF "Warning: The medium voice did not install (The medium voice server did not start." \
+  || fail "28 missing the medium voice warning with its reason: $OUT28_1"
+printf '%s\n' "$OUT28_1" | grep -qF "==> [8/8] Installing Rook.app and its launchd agent" || fail "28 install stopped before its last step: $OUT28_1"
+grep -qF '"voice_engine": "small"' "$SB28/.config/rook/settings.json" || fail "28 settings did not keep the small voice"
+[ "$(grep 'com.rook.medium-voice' "$TEST_ROOT/launchctl.log" | tail -n 1)" = "bootout gui/$(id -u)/com.rook.medium-voice" ] \
+  || fail "28 the failed medium voice job was left loaded. Log: $(cat "$TEST_ROOT/launchctl.log")"
+[ -f "$PLIST28" ] || fail "28 medium voice plist was not written"
+python3 - "$SB28/.local/share/rook/install-manifest.json" "$PLIST28" <<'PY' || fail "28 manifest does not own the medium voice plist with its hash"
+import hashlib, json, os, sys
+entries = json.load(open(sys.argv[1]))["entries"]
+want = os.path.normpath(sys.argv[2])
+sha = hashlib.sha256(open(want, "rb").read()).hexdigest()
+sys.exit(0 if any(e.get("path") == want and e.get("created") and e.get("sha256") == sha for e in entries) else 1)
+PY
+: >"$TEST_ROOT/launchctl.log"
+run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" bash "$UNINSTALL_SH" --yes >/dev/null
+[ ! -e "$PLIST28" ] || fail "28 uninstall left the medium voice plist"
+[ ! -e "$SB28/.local/share/rook/medium-voice" ] || fail "28 uninstall left the medium voice folder"
+grep -qF "bootout gui/$(id -u)/com.rook.medium-voice" "$TEST_ROOT/launchctl.log" || fail "28 uninstall did not boot out the medium voice job"
+pass "Mac medium voice failure: warned with the reason, kept the small voice, finished, and uninstall removed the plist, job and folder"
+
+mac_sb() {  # mac_sb SANDBOX [ENV=VALUE...] -- SCRIPT [OPTIONS...]: run install.sh or uninstall.sh on the faked Mac.
+  local sb="$1"; shift
+  local envs=()
+  while [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  shift
+  run_in_sb "$sb" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+    "${envs[@]}" bash "$@"
+}
+medium_lines() { grep 'com.rook.medium-voice' "$TEST_ROOT/launchctl.log" || true; }
+
+echo "=== Case 29: Linux: a medium voice that fails with nothing on stderr keeps the small voice, and the install finishes ==="
+SB29="$(new_sandbox linux-medium-silent)"
+SYS29="$SB29/.config/systemd/user"
+: >"$TEST_ROOT/systemctl.log"
+set +e
+OUT29="$(run_in_sb "$SB29" env FAKE_GPU="8.6, 12288, 580.95.05" FAIL_UV_PIP_SILENT_ON="medium-voice" bash "$INSTALL_SH" \
+  --voice medium --voice-model no --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC29=$?
+set -e
+[ "$RC29" -eq 2 ] || fail "29 install did not finish after a silent medium voice failure ($RC29): $OUT29"
+printf '%s\n' "$OUT29" | grep -qF "Warning: The medium voice did not install (medium-voice.sh stopped without saying why). Rook keeps its small voice. Details: $SB29/.local/state/rook/medium-voice-install.log." \
+  || fail "29 missing the warning with the log path: $OUT29"
+printf '%s\n' "$OUT29" | grep -qF "==> [7/8] Installing the medium voice (optional)" || fail "29 medium voice step label is wrong: $OUT29"
+printf '%s\n' "$OUT29" | grep -qF "==> [8/8] Installing systemd user service units" || fail "29 last step label is wrong: $OUT29"
+grep -qF '"voice_engine": "small"' "$SB29/.config/rook/settings.json" || fail "29 settings did not keep the small voice"
+[ ! -e "$SYS29/rook-medium-voice.service" ] || fail "29 wrote rook-medium-voice.service for a voice that failed"
+run_in_sb "$SB29" bash "$UNINSTALL_SH" --yes >/dev/null
+[ ! -e "$SB29/.local/share/rook/medium-voice" ] || fail "29 uninstall left the failed medium voice folder"
+pass "Linux silent medium voice failure: warned with the log path, kept the small voice, right step numbers, clean uninstall"
+
+echo "=== Case 30: Mac: an interrupt during the medium voice's health wait leaves an owned job that uninstall stops and removes ==="
+SB30="$(new_sandbox mac-medium-interrupt)"
+PLIST30="$SB30/Library/LaunchAgents/com.rook.medium-voice.plist"
+: >"$TEST_ROOT/launchctl.log"
+set +e
+mac_sb "$SB30" FAKE_LAUNCHCTL_STOP_INSTALL=1 -- "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes \
+  --recogniser-source "$FAKE_WHEEL" >"$TEST_ROOT/out30.txt" 2>&1
+RC30=$?
+set -e
+[ "$RC30" -ne 0 ] && [ "$RC30" -ne 2 ] || fail "30 install was not stopped by the interrupt ($RC30): $(cat "$TEST_ROOT/out30.txt")"
+[ "$(medium_lines | tail -n 1)" = "bootstrap gui/$(id -u) $PLIST30" ] || fail "30 the job was not left loaded: $(medium_lines)"
+: >"$TEST_ROOT/launchctl.log"
+mac_sb "$SB30" -- "$UNINSTALL_SH" --yes >/dev/null
+grep -qF "bootout gui/$(id -u)/com.rook.medium-voice" "$TEST_ROOT/launchctl.log" || fail "30 uninstall did not stop the medium voice job"
+[ ! -e "$PLIST30" ] || fail "30 uninstall left the medium voice plist"
+[ ! -e "$SB30/.local/share/rook" ] || fail "30 uninstall left files this run created: $(find "$SB30/.local/share/rook" | head -5)"
+pass "Mac interrupt during the health wait: the plist was owned by its hash, and uninstall stopped the job and removed it all"
+
+echo "=== Case 31: Mac: a medium voice plist that was there before and is not ours stays untouched ==="
+SB31="$(new_sandbox mac-medium-foreign)"
+PLIST31="$SB31/Library/LaunchAgents/com.rook.medium-voice.plist"
+mkdir -p "$(dirname "$PLIST31")"
+printf '%s\n' '<plist><!-- written by hand with launchd/install-voice.sh --></plist>' >"$PLIST31"
+FOREIGN31="$(sha256sum "$PLIST31")"
+for run in 1 2; do
+  : >"$TEST_ROOT/launchctl.log"
+  set +e
+  OUT31="$(mac_sb "$SB31" FAKE_CURL_OK=1 -- "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes \
+    --recogniser-source "$FAKE_WHEEL" 2>&1)"
+  RC31=$?
+  set -e
+  [ "$RC31" -eq 2 ] || fail "31 run $run failed ($RC31): $OUT31"
+  printf '%s\n' "$OUT31" | grep -qF "Kept $PLIST31 as it is, because this installer did not write it" || fail "31 run $run said nothing: $OUT31"
+  [ "$(sha256sum "$PLIST31")" = "$FOREIGN31" ] || fail "31 run $run changed the plist"
+  [ -z "$(medium_lines)" ] || fail "31 run $run touched the medium voice job: $(medium_lines)"
+  ! grep -qF "$PLIST31" "$SB31/.local/share/rook/install-manifest.json" || fail "31 run $run recorded the plist as its own"
+done
+: >"$TEST_ROOT/launchctl.log"
+mac_sb "$SB31" -- "$UNINSTALL_SH" --yes >/dev/null
+[ "$(sha256sum "$PLIST31")" = "$FOREIGN31" ] || fail "31 uninstall changed or removed the plist"
+[ -z "$(medium_lines)" ] || fail "31 uninstall touched the medium voice job: $(medium_lines)"
+pass "Mac foreign medium voice plist: untouched by install, rerun and uninstall, with one sentence saying so"
+
+echo "=== Case 32: Mac: a rerun that fails after a good install leaves the working medium voice running and selected ==="
+SB32="$(new_sandbox mac-medium-rerun)"
+PLIST32="$SB32/Library/LaunchAgents/com.rook.medium-voice.plist"
+: >"$TEST_ROOT/launchctl.log"
+set +e
+mac_sb "$SB32" FAKE_CURL_OK=1 -- "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes \
+  --recogniser-source "$FAKE_WHEEL" >/dev/null 2>&1
+RC32_1=$?
+set -e
+[ "$RC32_1" -eq 2 ] || fail "32 the first, good install failed ($RC32_1)"
+grep -qF '"voice_engine": "medium"' "$SB32/.config/rook/settings.json" || fail "32 the good install did not select the medium voice"
+: >"$TEST_ROOT/launchctl.log"
+set +e
+OUT32="$(mac_sb "$SB32" FAKE_CURL_OK=1 FAIL_UV_PIP_SILENT_ON=medium-voice -- "$INSTALL_SH" --voice medium --voice-model no \
+  --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC32_2=$?
+set -e
+[ "$RC32_2" -eq 2 ] || fail "32 the failing rerun did not finish ($RC32_2): $OUT32"
+printf '%s\n' "$OUT32" | grep -qF "The medium voice from before keeps running." || fail "32 missing the keeps-running warning: $OUT32"
+grep -qF '"voice_engine": "medium"' "$SB32/.config/rook/settings.json" || fail "32 the failing rerun unselected the working voice"
+! medium_lines | grep -q bootout || fail "32 the failing rerun stopped the working voice: $(medium_lines)"
+[ -f "$PLIST32" ] || fail "32 the working voice's plist is gone"
+mac_sb "$SB32" -- "$UNINSTALL_SH" --yes >/dev/null
+[ ! -e "$PLIST32" ] || fail "32 uninstall left the medium voice plist"
+pass "Mac failing rerun after a good install: the working medium voice kept running and stayed selected"
+
+# Cases 33 and 34 search a PATH that holds no uwsm, whatever this machine has: every system program but uwsm, by link.
+NO_UWSM="$TEST_ROOT/no-uwsm-bin"
+mkdir -p "$NO_UWSM"
+for prog in /usr/bin/*; do
+  case "${prog##*/}" in uwsm*) ;; *) ln -s "$prog" "$NO_UWSM/${prog##*/}" ;; esac
+done
+agent_sb() {  # A sandbox with Claude Code in ~/.local/bin, as its own installer puts it.
+  local sb
+  sb="$(new_sandbox "$1")"
+  mkdir -p "$sb/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$sb/.local/bin/claude"
+  chmod +x "$sb/.local/bin/claude"
+  printf '%s\n' "$sb"
+}
+install_in() {  # install_in SANDBOX [VAR=VALUE...]: --service yes with the sandbox's agent and no uwsm on PATH.
+  local sb="$1"; shift
+  run_in_sb "$sb" env PATH="$sb/.local/bin:$FAKE_BIN:$NO_UWSM" "$@" bash "$INSTALL_SH" --agent claude --voice small \
+    --voice-model no --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1
+}
+
+echo "=== Case 33: The unit gets a PATH line only when the agent's folder is missing from the manager's PATH ==="
+SB33="$(agent_sb path-missing)"
+set +e
+OUT33="$(install_in "$SB33" FAKE_SYSTEMCTL_PATH=/usr/local/bin:/usr/bin)"
+RC33=$?
+set -e
+[ "$RC33" -eq 2 ] || fail "33 install failed ($RC33): $OUT33"
+grep -qxF "Environment=\"PATH=$SB33/.local/bin:/usr/local/bin:/usr/bin\"" "$SB33/.config/systemd/user/rook.service" \
+  || fail "33 no PATH line for a missing agent folder: $(cat "$SB33/.config/systemd/user/rook.service")"
+SB33B="$(agent_sb path-present)"
+set +e
+OUT33B="$(install_in "$SB33B" FAKE_SYSTEMCTL_PATH="$SB33B/.local/bin:/usr/bin")"
+RC33B=$?
+set -e
+[ "$RC33B" -eq 2 ] || fail "33 second install failed ($RC33B): $OUT33B"
+! grep -q '^Environment="PATH=' "$SB33B/.config/systemd/user/rook.service" || fail "33 wrote a PATH line the manager did not need"
+SB33C="$(agent_sb path-unknown)"
+set +e
+OUT33C="$(install_in "$SB33C")"
+RC33C=$?
+set -e
+[ "$RC33C" -eq 2 ] || fail "33 third install failed ($RC33C): $OUT33C"
+! grep -q '^Environment="PATH=' "$SB33C/.config/systemd/user/rook.service" || fail "33 wrote a PATH line with no manager PATH known"
+pass "The PATH line appears only when the manager's PATH lacks the agent's folder"
+
+echo "=== Case 34: The start target follows the session: graphical-session.target or uwsm keeps today's unit, else default.target ==="
+SB34A="$(agent_sb target-default)"
+set +e
+OUT34A="$(install_in "$SB34A" FAKE_SYSTEMCTL_INACTIVE=1)"
+RC34A=$?
+set -e
+[ "$RC34A" -eq 2 ] || fail "34 install failed ($RC34A): $OUT34A"
+UNIT34A="$SB34A/.config/systemd/user/rook.service"
+grep -qx "WantedBy=default.target" "$UNIT34A" || fail "34 no default.target without a session target: $(cat "$UNIT34A")"
+! grep -q "graphical-session" "$UNIT34A" || fail "34 kept graphical-session.target lines: $(cat "$UNIT34A")"
+for mode in active uwsm; do
+  SB34="$(agent_sb "target-$mode")"
+  if [ "$mode" = uwsm ]; then
+    printf '#!/bin/sh\nexit 0\n' >"$SB34/.local/bin/uwsm"
+    chmod +x "$SB34/.local/bin/uwsm"
+    set +e; OUT34="$(install_in "$SB34" FAKE_SYSTEMCTL_INACTIVE=1)"; RC34=$?; set -e
+  else
+    set +e; OUT34="$(install_in "$SB34")"; RC34=$?; set -e
+  fi
+  [ "$RC34" -eq 2 ] || fail "34 $mode install failed ($RC34): $OUT34"
+  UNIT34="$SB34/.config/systemd/user/rook.service"
+  for line in "PartOf=graphical-session.target" "After=graphical-session.target" "WantedBy=graphical-session.target"; do
+    grep -qxF "$line" "$UNIT34" || fail "34 $mode lost today's line $line: $(cat "$UNIT34")"
+  done
+done
+for mode in active inactive; do
+  SB34="$(agent_sb "target-link-$mode")"
+  mkdir -p "$SB34/.config/systemd/user"
+  printf '[Service]\nExecStart=/bin/true\n' >"$SB34/my-rook.service"
+  ln -s "$SB34/my-rook.service" "$SB34/.config/systemd/user/rook.service"
+  BEFORE34="$(sha256sum "$SB34/my-rook.service")"
+  set +e
+  if [ "$mode" = inactive ]; then OUT34="$(install_in "$SB34" FAKE_SYSTEMCTL_INACTIVE=1)"; else OUT34="$(install_in "$SB34")"; fi
+  set -e
+  [ -L "$SB34/.config/systemd/user/rook.service" ] || fail "34 $mode replaced the person's symlinked unit"
+  [ "$(sha256sum "$SB34/my-rook.service")" = "$BEFORE34" ] || fail "34 $mode wrote through the person's symlinked unit"
+done
+pass "The start target follows the session, and a symlinked unit stays untouched either way"
+
+echo "All install failure and recovery tests passed (34/34)."
