@@ -4,8 +4,8 @@ Rook notices a delegation in Claude's stream: a T3 tool call that sends to or la
 `t3 thread send` or `t3 thread start` command. It then polls each watched thread with
 `t3 thread show <id> --json` about once a minute, locally or over SSH, as
 machines.json says, and announces each change once through Rook's inbox. It also watches the Herdr agents that
-relay.py herdr sends to, with one herdr agent get each, and says when one is blocked or done. Standard library only, so
-relay.py can use it too.
+relay.py herdr sends to, with one herdr agent get each and a screen read while one is ready, and says when one is
+blocked or done. Standard library only, so relay.py can use it too.
 """
 
 import asyncio
@@ -525,6 +525,13 @@ class Watcher:
         except herdr.Failed as failed:
             return None, f"{failed.code or 'error'}: {failed}"
 
+    async def herdr_screen(self, machine, agent):
+        """(the end of a Herdr agent's screen, None) or ("", an error)."""
+        try:
+            return await asyncio.to_thread(herdr.read_screen, machine, agent, 15, SHOW_SECONDS), None
+        except herdr.Failed as failed:
+            return "", f"{failed.code or 'error'}: {failed}"
+
     def stale_sends(self):
         """At a start: a Herdr send still marked sending was cut off when Rook stopped, so it may or may not have
         arrived. Mark each one unknown first, so it is told once and never sent again. Then tell the owner, and watch the
@@ -581,22 +588,31 @@ class Watcher:
             # The state count just before Rook's send, from its intent record, else now: only later changes are news.
             sent = herdr.last_send(machine, agent, self.path.with_name("herdr-sends.json"))
             entry["since"] = sent["seq"] if sent and isinstance(sent.get("seq"), int) else seq
-        finished = state in herdr.READY
-        # A smaller count means the Herdr server restarted. A ready agent unchanged since the send never took it.
-        if seq < entry["since"] or finished and seq == entry["since"] and now - entry.get("watched_at", now) > KEEP_SECONDS:
+        ready = state in herdr.READY
+        # A turn finished since the send only when Herdr counts work done after it. An idle that comes from a dialog
+        # answered, a fresh start, or a changed placeholder or footer is no finish.
+        finished = ready and (info.get("completion_seq") or (seq if state == "done" else 0)) > entry["since"]
+        # A smaller count means the Herdr server restarted. A ready agent with no finish since the send never took it.
+        if seq < entry["since"] or ready and not finished and now - entry.get("watched_at", now) > KEEP_SECONDS:
             self.log("watch_dropped", thread=entry["thread"], machine=entry["machine"], error=f"{state} at {seq}")
             self.entries.pop(key, None)
             return
-        mark = f"herdr:{'finished' if finished else state}:{seq}"
-        if (state != "blocked" and not finished or seq <= entry["since"] or mark in entry["announced"]
-                or (*key, mark) in self.queued
-                # done turning idle once the owner saw it in Herdr is the same finish.
-                or finished and entry.get("told") == ["finished", seq - 1]):
+        if state != "blocked" and not ready or seq <= entry["since"]:
             return
-        entry["told"] = ["finished" if finished else state, seq]
-        screen, _ = await self.herdr(machine, "agent", "read", agent, "--source", "recent-unwrapped", "--lines", "15",
-                                     raw=True)
-        said = herdr.screen_tail(screen, 15)[-800:]
+        said = None
+        if ready:  # Herdr may read a dialog as idle, so the screen decides. ponytail: one read per poll while ready.
+            said, _ = await self.herdr_screen(machine, agent)
+            if herdr.dialog(said):
+                state, finished = "blocked", False
+        mark = f"herdr:{'finished' if finished else state}:{seq}"
+        if (state != "blocked" and not finished or mark in entry["announced"] or (*key, mark) in self.queued
+                or finished and entry.get("finish_told") == entry.get("watched_at")):  # One finish for each send.
+            return
+        if finished:
+            entry["finish_told"] = entry.get("watched_at")
+        if said is None:
+            said, _ = await self.herdr_screen(machine, agent)
+        said = (said or "")[-800:]
         name = f"The Herdr agent \"{agent}\" ({info.get('agent') or 'agent'}) on {machine or entry['machine']}"
         # Rook's own words fill in. The agent's name and screen pass as they are.
         if finished:

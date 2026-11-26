@@ -13,7 +13,7 @@ Herdr runs coding agents in terminal panes, on this machine and on saved Herdr m
 - `relay.py herdr agents` lists every agent: name, kind, state, folder and machine.
 - `relay.py herdr read AGENT [--machine NAME] [--lines N]` gives the agent's state and the end of its screen.
 - `relay.py herdr send AGENT [--machine NAME] "<text>"` sends one message.
-- `relay.py herdr start <folder> --kind claude|codex|pi|... [--model MODEL] [--name NAME] "<first prompt>"` opens a new Herdr workspace for the folder without focus, starts the agent there, and sends the first prompt. On a saved machine, give the folder as an absolute path or one that starts with `~/`.
+- `relay.py herdr start <folder> --kind claude|codex|pi|... [--model MODEL] [--effort LEVEL] [--name NAME] "<first prompt>"` starts the agent without focus, in a new tab of the folder's Herdr workspace or in a new workspace, and sends the first prompt. Only claude and codex take `--effort`. On a saved machine, give the folder as an absolute path or one that starts with `~/`.
 - `relay.py pi sessions` and `relay.py pi read <session id>` read Pi's saved sessions. They never change them. A live Pi agent runs inside Herdr: start it with `--kind pi`.
 
 Pass a long message on stdin with `-` and a quoted heredoc. Write a first prompt the way you write a brief for a thread.
@@ -21,13 +21,13 @@ Pass a long message on stdin with `-` and a quoted heredoc. Write a first prompt
 ## A hand-off
 
 1. **Find the agent.** Run `relay.py herdr agents`. A done or idle agent in the work's folder takes it with `send`. Otherwise `start` a new one in that folder.
-2. **Choose the kind** ⟦owner⟧ names, such as claude, codex, or pi. With none named, use claude. When ⟦verb:he names|they name⟧ a model, pass its id with `--model`, from the rook:delegate skill's models.md.
+2. **Choose the kind** ⟦owner⟧ names, such as claude, codex, or pi. With none named, use claude. When ⟦verb:he names|they name⟧ a model, pass its id with `--model`, from the rook:delegate skill's models.md, and the effort with `--effort`.
 3. **Tell ⟦owner⟧** in one spoken sentence which agent has it, on which machine.
 
 ## States
 
 - **working**: busy. A send waits until it is done.
-- **blocked**: it waits at a question or an approval. Tell ⟦owner⟧ which agent needs ⟦him⟧, and that ⟦verb:he answers|they answer⟧ it in Herdr. Never send it keys, and never answer or approve anything for ⟦him⟧. Each agent keeps its own permission settings.
+- **blocked**: it waits at a question, an approval, or a dialog such as Claude Code's folder trust question. Tell ⟦owner⟧ which agent needs ⟦him⟧, and that ⟦verb:he answers|they answer⟧ it in Herdr. Never send it keys, and never answer or approve anything for ⟦him⟧. Each agent keeps its own permission settings.
 - **done** or **idle**: ready for a message.
 - **unknown**: Herdr cannot tell. Read it before you say anything about it.
 

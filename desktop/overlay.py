@@ -3409,6 +3409,8 @@ DISPATCH_RAW_CAP = 200   # Hard cap on raw thread title characters before layout
 SEND_TRACE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "rook",
                           "overlay-send-trace.jsonl")
 SEND_TRACE_LINES, SEND_TRACE_AFTER, SEND_TRACE_HYPR = 2000, 2.0, 0.25
+# The trace is a diagnostic: off unless ROOK_SEND_TRACE=1, so a send makes no Hyprland requests and writes no file.
+SEND_TRACE_ON = os.environ.get("ROOK_SEND_TRACE") == "1"
 # The states a turn moves on to after a send: the fan's teardown plays before their form. Any other state ends it at once.
 FAN_TEARDOWN_STATES = ("speaking", "result", "ready", "error")
 
@@ -5078,7 +5080,8 @@ class Scene:
         lead = None
         if any(part["motion"] == "turn" for part in form["parts"]) or self._render_flying(form, now):
             w = self.omega  # The swarm may have fewer grains than the form while it grows or after it shrinks.
-            lead = [1.1 / (w[i % len(w)] * self.pace * self.cohesion) for i in range(len(form["x"]))]
+            n_w, pace, cohesion = len(w), self.pace, self.cohesion
+            lead = [1.1 / (w[i % n_w] * pace * cohesion) for i in range(len(form["x"]))]
         tx, ty, tb = scenes.targets(form, now - self.render_since, lead)
         dy = (self.render or {}).get("dy") or 0.0
         if dy:
@@ -5120,15 +5123,29 @@ class Scene:
         return form is not None and now - self.render_since - form.get("start", 0.0) < scenes.FLIGHT and any(
             "flight" in part for part in form["parts"])
 
+    def _render_label_alpha(self, now):
+        """How strongly _render_labels draws the scene's labels, outlines and line at now."""
+        # Labels appear once the dust forms so text never precedes its lines.
+        late = scenes.LABELS_AFTER if self.render_form.get("material") else 0.0
+        alpha = LABEL_ALPHA * _ease_out(min(1.0, max(0.0, now - self.render["at"] - late) / 0.5))
+        if self.render_end is not None:
+            alpha *= max(0.0, 1 - (now - self.render_end) / RENDER_FADE)
+        return alpha
+
+    def _render_labels_moment(self, now):
+        """What of now _render_labels draws: nothing while its alpha is too low to draw, else that alpha and where the
+        moved parts fly. Equal moments draw the same pixels."""
+        alpha = self._render_label_alpha(now)
+        if alpha <= 0.01:
+            return "hidden"
+        form = self.render_form
+        return alpha, self._render_flying(form, now), repr(scenes.flights(form, now - self.render_since))
+
     def _render_labels(self, cr, cx, cy):
         """The scene's labels as letter outlines with no plate, as the state labels are, and its title or the step's
         caption under it. Labels of parts a step does not light are dimmer."""
         r, form, now = self.render, self.render_form, self.last
-        # Labels appear once the dust forms so text never precedes its lines.
-        late = scenes.LABELS_AFTER if form.get("material") else 0.0
-        alpha = LABEL_ALPHA * _ease_out(min(1.0, max(0.0, now - r["at"] - late) / 0.5))
-        if self.render_end is not None:
-            alpha *= max(0.0, 1 - (now - self.render_end) / RENDER_FADE)
+        alpha = self._render_label_alpha(now)
         if alpha <= 0.01:
             return
         scenes.draw_outline(cr, form, cx, cy + r["dy"], PALETTE["label"], alpha / LABEL_ALPHA, now - self.render_since)
@@ -6119,10 +6136,11 @@ class Scene:
         if self.springs_on_gpu:
             # The chip runs this step (see _DustGL.step_springs): the targets and settings below, for the grains drawn.
             # The old form may hold fewer grains than a scene's grown swarm; the new ones take their own target.
+            n_tz, n_oz, n_old = len(tz), len(old_z) if old_z else 0, len(old[0]) if old is not None else 0
             held = None if old is None else [v for i in self.idx for v in (
-                (old[0][i], old[1][i], old[2][i], old_z[i] if old_z and i < len(old_z) else 0.0)
-                if i < len(old[0]) else (tx[i], ty[i], tb[i], tz[i] if i < len(tz) else 0.0))]
-            goals = [v for i in self.idx for v in (tx[i], ty[i], tb[i], tz[i] if i < len(tz) else 0.0)]
+                (old[0][i], old[1][i], old[2][i], old_z[i] if i < n_oz else 0.0)
+                if i < n_old else (tx[i], ty[i], tb[i], tz[i] if i < n_tz else 0.0))]
+            goals = [v for i in self.idx for v in (tx[i], ty[i], tb[i], tz[i] if i < n_tz else 0.0)]
             if straight:  # Each flying grain's row on the chip, as Python zeroes its curl by grain.
                 row = {g: k for k, g in enumerate(self.idx)}
                 for i in straight:
@@ -8660,6 +8678,7 @@ class _DustGL:
         self.hdr_tex, self.hdr_size = None, (0, 0)
         self.bloom_texs, self.bloom_size = (), (0, 0)  # (half_a, quarter, half_b) RGBA16F for 2-level Dual Kawase.
         self.uniforms = {}
+        self.sent = {}  # (program, uniform) -> the (type, value) it holds now; see _set.
         ids = (ctypes.c_uint * 14)()
         gl.GenVertexArrays(5, ids)
         gl.GenBuffers(9, ctypes.cast(ctypes.byref(ids, 20), ctypes.POINTER(ctypes.c_uint)))
@@ -8693,8 +8712,6 @@ class _DustGL:
                 gl.VertexAttribDivisor(loc, 1)
         gl.BindBuffer(0x90D2, self.count_buf)  # GL_SHADER_STORAGE_BUFFER
         gl.BufferData(0x90D2, 4, None, 0x88E8)
-        gl.BindBuffer(0x90D2, self.node_buf)
-        gl.BufferData(0x90D2, self.CAPACITY * 16, None, 0x88E8)
         fbo = (ctypes.c_uint * 1)()
         gl.GenFramebuffers(1, fbo)
         self.out_fbo = fbo[0]
@@ -8748,8 +8765,14 @@ class _DustGL:
         return self.uniforms[key]
 
     def _set(self, prog, **values):
-        gl = self.gl
+        """Set uniforms of prog, which is in use. A program keeps its uniforms, so a value it already holds is not
+        sent again (the type is part of the value: an int goes as Uniform1i, a float as Uniform1f)."""
+        gl, sent = self.gl, self.sent
         for name, value in values.items():
+            key, held = (prog, name), (type(value), value)
+            if sent.get(key) == held:
+                continue
+            sent[key] = held
             loc = self._u(prog, name)
             if isinstance(value, int):
                 gl.Uniform1i(loc, value)
@@ -9752,6 +9775,9 @@ class _DustGL:
         w, h = max(w, self.head_size[0]), max(h, self.head_size[1])
         if self.head is not None:
             gl.DeleteTextures(1, (ctypes.c_uint * 1)(self.head))
+        else:  # The squares' lists (CAPACITY * 16 bytes, 8 MB) are made on first use: the default look never uses them.
+            gl.BindBuffer(0x90D2, self.node_buf)
+            gl.BufferData(0x90D2, self.CAPACITY * 16, None, 0x88E8)
         ids = (ctypes.c_uint * 1)()
         gl.GenTextures(1, ids)
         gl.BindTexture(0x0DE1, ids[0])
@@ -10439,7 +10465,8 @@ class Overlay(Gtk.Application):
         self._dispatch_cx = None  # The presence's x in the window while it is wider for a fan (None: WIDTH / 2).
         self._widen_to = None  # A wider window's (left margin, presence x), held until GTK has laid the width out.
         self._centred = False  # The compositor centres the window (no left anchor): a fan widens it about Rook.
-        self._trace, self._trace_end, self._trace_hypr, self._drawn = None, None, 0, None  # See _trace_send.
+        # See _trace_send; False keeps the trace off.
+        self._trace, self._trace_end, self._trace_hypr, self._drawn = None if SEND_TRACE_ON else False, None, 0, None
         motion = Gtk.EventControllerMotion()
         motion.connect("enter", lambda *_: self._hover(True))
         motion.connect("leave", lambda *_: self._hover(False))
@@ -11241,7 +11268,8 @@ class Overlay(Gtk.Application):
                    scene.label_anchor, id(PALETTE), id(scene.label_sprites), w, h,
                    round(cx, 1), scale, None if render is None else (id(scene.render_form), repr(render["lit"]),
                                                                       render["dy"], render["bottom"],
-                                                                      scene.last if fading else None), guide)
+                                                                      scene._render_labels_moment(scene.last)
+                                                                      if fading else None), guide)
             if self._labels is None or self._labels[0] != key:
                 image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(w * scale), math.ceil(h * scale))
                 image.set_device_scale(scale, scale)
@@ -15311,6 +15339,18 @@ def _check_send_window():
 
 
 def _check_send_window_gl():
+    """_check_send_window_gl_one with each send form, so the check never depends on whose turn the cycle is on."""
+    saved = SEND_CYCLE[:]
+    try:
+        for form in saved:
+            others = [f for f in saved if f != form]
+            SEND_CYCLE[:] = [others[0], form, *others[1:]]  # A new send rotates the cycle once, so form comes first.
+            _check_send_window_gl_one()
+    finally:
+        SEND_CYCLE[:] = saved
+
+
+def _check_send_window_gl_one():
     """The same send drawn by the chip (_DustGL, its springs on the chip) in a GL context with no window: across the
     widen and the narrow, the lit dust's mean x on the screen never jumps, and no frame is blank. Skipped where this
     machine has no surfaceless EGL."""
@@ -15378,11 +15418,14 @@ def _check_send_window_gl():
             t += 1 / 60
         assert sc.springs_on_gpu and len({w for w, _ in xs}) == 2, "the chip did not run the springs, or no resize"
         steps = [(a[0] != b[0], abs(b[1] - a[1])) for a, b in zip(xs, xs[1:])]
-        assert max(m for _, m in steps) <= 4.0, ("the dust jumped on the screen", max(steps, key=lambda s: s[1]))
+        # A resize must not move the dust. Between resizes the lit mean moves with the form itself: the array's
+        # one-sided wings gather 6 px a frame in its teardown, which is motion, so only a teleport fails there.
+        assert max((m for r, m in steps if r), default=0.0) <= 4.0, ("the dust jumped at a resize", steps)
+        assert max(m for _, m in steps) <= 10.0, ("the dust jumped on the screen", max(steps, key=lambda s: s[1]))
     finally:
         ctx.clear_current()
         _use_theme("light" if saved_pal is THEMES["light"] else "dark")
-    print("send window on the chip (widen and narrow, the lit dust's screen x steady, no blank frame): ok")
+    print(f"send window on the chip, {SEND_CYCLE[0]} (widen and narrow, the lit dust's screen x steady, no blank frame): ok")
 
 
 def _send_turns():

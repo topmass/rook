@@ -56,11 +56,12 @@ relay.py herdr read AGENT [--machine NAME] [--lines N]
 relay.py herdr send AGENT [--machine NAME] TEXT|-
                             Prompt a Herdr agent once, only when it is idle or done, and watch it. A send whose
                             outcome is unknown is recorded and never sent again.
-relay.py herdr start FOLDER --kind KIND [--model MODEL] [--name NAME] [--machine NAME] TEXT|-
-                            Open a new Herdr workspace for FOLDER without focus, start a KIND agent there (claude,
-                            codex, pi and others), send it TEXT through the same guard, and watch it. --model passes
-                            the agent its own --model flag. With --machine, FOLDER must be absolute or start with ~/,
-                            and it is not expanded here.
+relay.py herdr start FOLDER --kind KIND [--model MODEL] [--effort LEVEL] [--name NAME] [--machine NAME] TEXT|-
+                            Start a KIND agent (claude, codex, pi and others) without focus, in a new tab of the Herdr
+                            workspace that holds FOLDER, else in a new workspace. Send it TEXT through the same guard,
+                            and watch it. --model and --effort go through the agent's own flags; only claude and codex
+                            take an effort. With --machine, FOLDER must be absolute or start with ~/, and it is not
+                            expanded here.
 relay.py herdr install [--dry-run]
                             Install Herdr for this user with its official installer, then check that it runs.
 relay.py pi sessions [--limit N]
@@ -1792,7 +1793,7 @@ def herdr_watch(machine, agent):
         return " Rook is not running, so its result waits in Herdr. Rook watches it from its next start."
     if not answer.get("ok"):
         return f" Rook could not watch it: {answer.get('error')}"
-    return f" Rook will say when it is done or needs {OWNER}."
+    return settings.render(f" Rook will say when it is done or needs {OWNER}.")
 
 
 def herdr_command(argv):
@@ -1824,32 +1825,38 @@ def herdr_command(argv):
             leave("Usage: relay.py herdr read AGENT [--machine NAME] [--lines N]")
         try:
             info = herdr.call(machine, "agent", "get", args[0])["agent"]
-            screen = herdr.call(machine, "agent", "read", args[0], "--source", "recent-unwrapped", "--lines",
-                                str(lines), raw=True)
+            screen = herdr.read_screen(machine, args[0], lines)
         except herdr.Failed as error:
             leave(f"Rook could not read {args[0]}: {error}")
         print(f"{herdr.target(info)} ({info.get('agent') or '?'}) is {info.get('agent_status') or 'unknown'} in "
               f"{herdr.short_path(info.get('foreground_cwd') or info.get('cwd'))}.")
-        print(herdr.screen_tail(screen, lines) or "Its screen is empty.")  # A pane's words are data: never rendered.
+        print(screen or "Its screen is empty.")  # A pane's words are data: never rendered.
         return
     if verb in ("send", "start") and args:
         kind = take_option(args, "--kind") if verb == "start" else None
         name = take_option(args, "--name") if verb == "start" else None
         model = take_option(args, "--model") if verb == "start" else None
+        effort = take_option(args, "--effort") if verb == "start" else None
         if len(args) != 2 or verb == "start" and not kind:
             leave("Usage: relay.py herdr send AGENT [--machine NAME] TEXT|-\n"
-                     "       relay.py herdr start FOLDER --kind KIND [--model MODEL] [--name NAME] [--machine NAME] TEXT|-")
+                  "       relay.py herdr start FOLDER --kind KIND [--model MODEL] [--effort LEVEL] [--name NAME] "
+                  "[--machine NAME] TEXT|-")
         text = (sys.stdin.read() if args[1] == "-" else args[1]).strip()
         if not text:
             leave("Give the text as an argument or on stdin.")
         agent, said = args[0], ""
         if verb == "start":
             try:
-                info = herdr.start(machine, args[0], kind, name, model)
+                info = herdr.start(machine, args[0], kind, name, model, effort)
             except herdr.Failed as error:
                 if error.code == "agent_not_ready":
-                    leave(f"Herdr started {error.name}, but it waits at a startup question or approval. {OWNER_START} "
-                             "answers it in Herdr. The first prompt was not sent." + herdr_watch(machine, error.name))
+                    try:
+                        held = herdr.dialog(herdr.read_screen(machine, error.name, 15))
+                    except herdr.Failed:
+                        held = None
+                    leave(f"Herdr started {error.name}, but it " + ("asks whether its folder is trusted" if held ==
+                          "trust" else "waits at a startup question or approval") + f". {OWNER_START} answers it in "
+                          "Herdr. The first prompt was not sent." + herdr_watch(machine, error.name))
                 leave(f"Herdr could not start the agent: {error}")
             agent = herdr.target(info)
             said = f"Started {agent} ({kind}) in {herdr.short_path(info.get('cwd'))}. "
@@ -3108,8 +3115,9 @@ if verb in (["agent", "get"], ["agent", "prompt"]) and args[2] not in agents:
     err("agent_not_found", "agent target " + args[2] + " not found")
 if verb == ["agent", "get"]:
     out({"agent": agents[args[2]], "type": "agent_info"})
-if verb == ["agent", "read"]:
-    print(state.get("screen", ""))
+if verb == ["agent", "read"]:  # Like Herdr, only the last --lines lines.
+    screen = state.get("screens", {}).get(args[2], state.get("screen", "")).split("\\n")
+    print("\\n".join(screen[-int(args[args.index("--lines") + 1]):]))
     sys.exit(0)
 if verb == ["agent", "prompt"]:
     if state.get("prompt", "ok") != "ok":
@@ -3120,6 +3128,8 @@ if verb == ["workspace", "list"]:
     out({"workspaces": state.get("workspaces", [])})
 if verb == ["pane", "list"]:
     out({"panes": state.get("panes", [])})
+if verb == ["tab", "create"]:
+    out({"tab": {"tab_id": "w3:t2"}, "root_pane": {"pane_id": "w3:p2", "cwd": args[args.index("--cwd") + 1]}})
 if verb == ["workspace", "create"]:
     out({"root_pane": {"pane_id": "w9:p1", "cwd": args[args.index("--cwd") + 1]}})
 if verb == ["pane", "split"]:
@@ -3167,9 +3177,9 @@ def check_herdr():
             data.update(changes)
             state_file.write_text(json.dumps(data))
 
-        def agent(name, status, seq=1, kind="pi", cwd="/tmp/proj"):
+        def agent(name, status, seq=1, kind="pi", cwd="/tmp/proj", **extra):
             return {"name": name, "agent": kind, "agent_status": status, "state_change_seq": seq, "pane_id": "w1:p1",
-                    "cwd": cwd}
+                    "cwd": cwd, **extra}
 
         def run(*args):
             done = subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=env)
@@ -3303,6 +3313,108 @@ def check_herdr():
             assert (here, "herdr:fake9") in watcher.entries and prompts("fake9") == 1
             watcher.stale_sends()
             assert not said
+        finally:
+            os.environ["PATH"] = real_path
+
+        # Screens as Claude Code and Codex draw them: blank padding above the bottom box, and dialogs Herdr reads as idle.
+        pad = "\n" * 40
+        rule = "─" * 60
+        claude_idle = ("❯ How many Python files are in desktop/?\n  Searched for 1 pattern\n● desktop/ has 33 Python "
+                       f"files.\n✻ Crunched for 3s · done 3:38 PM{pad}{rule}\n❯\xa0\n{rule}\n  ⏵⏵ auto mode on "
+                       "(shift+tab to cycle)\n")
+        codex_idle = ("› What is the current git branch?\n• Ran git branch --show-current\n  └ main\n• The current "
+                      f"branch is main.\n  Worked for 4s • 3:36 PM{pad}› Ask Codex to do anything\n\n  model-x medium · "
+                      "/tmp/proj\n  ← for agents · ? for shortcuts\n")
+        trust = (f"{rule}\n  Accessing workspace:\n\n  /tmp/proj\n\n  Quick safety check: Is this a project you created "
+                 "or one you trust? If not, review what is in this folder first.\n\n  ❯ 1. Yes, I trust this folder\n"
+                 f"    2. No, exit\n\n  Enter to confirm · Esc to cancel{pad}")
+        auto_modal = (f"{rule}\n  Make auto mode your default permission mode?\n\n  Auto mode lets Claude handle "
+                      "permission prompts automatically.\n\n  ❯ Yes, set auto mode as my default permission mode\n"
+                      f"    No, keep bypass permissions\n\n  Not answered yet · ↑/↓ to choose · Esc to cancel{pad}")
+        assert (herdr.dialog(trust), herdr.dialog(auto_modal), herdr.dialog(claude_idle), herdr.dialog(codex_idle)) == (
+            "trust", "dialog", None, None)
+        # Bug 5: a read strips the padding and the input box, so --lines 25 shows the reply.
+        fake(machines={"local": {"cl": agent("cl", "idle", 3, "claude"), "cx": agent("cx", "done", 3, "codex")}},
+             screens={"cl": claude_idle, "cx": codex_idle}, screen="", panes=[])
+        code, out = run("herdr", "read", "cl", "--lines", "25")
+        assert code == 0 and out.endswith("● desktop/ has 33 Python files.\n✻ Crunched for 3s · done 3:38 PM\n"), repr(out)
+        code, out = run("herdr", "read", "cx", "--lines", "3")
+        assert code == 0 and out.endswith("• The current branch is main.\n  Worked for 4s • 3:36 PM\n"), repr(out)
+        assert "Yes, I trust this folder" in herdr.screen_tail(trust, 15)  # A dialog is kept whole.
+        # Bugs 2 and 7: an idle agent at a dialog is blocked. A send types nothing into it and records no intent.
+        rows = len(herdr.records(sends))
+        for screen, words in ((trust, "asks whether its folder is trusted"), (auto_modal, "waits at a dialog")):
+            fake(screens={"cl": screen})
+            code, out = run("herdr", "send", "cl", "Go.")
+            assert code == 1 and words in out and "answers it in Herdr" in out and prompts("cl") == 0, out
+            assert "⟦" not in out and len(herdr.records(sends)) == rows, out
+        # Bug 2: a start whose agent stops at the trust question holds its first prompt, says why, and watches it.
+        fake(screens={"claude-trusted": trust})
+        code, out = run("herdr", "start", "/tmp/trusted", "--kind", "claude", "Begin.")
+        assert code == 1 and "Started claude-trusted" in out and "asks whether its folder is trusted" in out, out
+        assert prompts("claude-trusted") == 0 and (here, "herdr:claude-trusted") in watch.load(
+            base / "state/rook/watching.json") and "⟦" not in out, out
+        # Bug 1: --effort goes through each agent's own flag, and a level the agent does not take is refused first.
+        before = len(calls.read_text().splitlines())
+        for kind, extra, words in (("codex", ["--effort", "high"], ["--", "-c", "model_reasoning_effort=high"]),
+                                   ("claude", ["--model", "m-2", "--effort", "xhigh"],
+                                    ["--", "--model", "m-2", "--effort", "xhigh"])):
+            code, out = run("herdr", "start", f"/tmp/effort-{kind}", "--kind", kind, *extra, "Begin.")
+            started = [json.loads(line) for line in calls.read_text().splitlines()
+                       if json.loads(line)[:2] == ["agent", "start"]]
+            assert code == 0 and started[-1][-len(words):] == words and "⟦" not in out, (out, started[-1])
+        for kind, effort, words in (("claude", "ultra", "claude takes the effort levels low, medium, high, xhigh, max"),
+                                    ("pi", "high", "Rook cannot pass an effort to pi")):
+            before = len(calls.read_text().splitlines())
+            code, out = run("herdr", "start", "/tmp/effort-no", "--kind", kind, "--effort", effort, "Begin.")
+            assert code == 1 and words in out and len(calls.read_text().splitlines()) == before, out
+        # Bug 6: a start for a folder that has a workspace opens a tab there, without focus, not a new workspace.
+        fake(panes=[{"pane_id": "w1:p1", "cwd": "/home", "workspace_id": "w1"},
+                    {"pane_id": "w3:p1", "cwd": "/tmp/reuse", "workspace_id": "w3"}])
+        code, out = run("herdr", "start", "/tmp/reuse", "--kind", "codex", "Begin.")
+        made = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert code == 0 and ["tab", "create", "--workspace", "w3", "--cwd", "/tmp/reuse", "--label", "codex",
+                              "--no-focus"] in made, out
+        assert not any(line[:2] == ["workspace", "create"] and "/tmp/reuse" in line for line in made), made
+        # Bug 3: Rook's own words in a watched send fill in the owner's name.
+        real_ask = ask_watch
+        globals()["ask_watch"] = lambda *args: {"ok": True}
+        try:
+            assert "⟦" not in herdr_watch(None, "cx") and "Rook will say when it is done" in herdr_watch(None, "cx")
+        finally:
+            globals()["ask_watch"] = real_ask
+        # Bugs 5, 7 and 8 in the watcher: the finish shows the reply, a dialog is blocked, and one send is told once.
+        said = []
+        os.environ["PATH"] = env["PATH"]
+        try:
+            watcher = watch.Watcher(base / "state/rook/watch-2.json",
+                                    lambda text, delivered, source: said.append(text), lambda *args, **kwargs: None)
+
+            live = {}
+
+            def poll(screen, **agents):
+                live.update(agents)
+                fake(machines={"local": dict(live)}, screen=screen, screens={})
+                asyncio.run(watcher.poll())
+                assert len(said) <= 1, said
+                return said.pop() if said else None
+
+            for name in ("cl", "cl2", "cl3"):
+                watcher.add(f"herdr:{name}", here, name)
+            assert poll(claude_idle, cl=agent("cl", "idle", 3, "claude"), cl2=agent("cl2", "idle", 3, "claude"),
+                        cl3=agent("cl3", "idle", 3, "claude")) is None  # since is 3 for each.
+            text = poll(claude_idle, cl=agent("cl", "idle", 5, "claude", completion_seq=5))
+            assert "finished its turn" in text and "desktop/ has 33 Python files." in text, text
+            assert "auto mode on" not in text and rule not in text, text
+            # Not yet delivered: a placeholder change makes Herdr flip working and idle, and that is no new turn.
+            assert poll(claude_idle.replace("auto mode on", "Try \"fix lint errors\""),
+                        cl=agent("cl", "idle", 7, "claude", completion_seq=7)) is None
+            # An idle with no work done since the send, as after a trust answer, is no finish.
+            assert poll(claude_idle, cl2=agent("cl2", "idle", 6, "claude")) is None and (here, "herdr:cl2") in watcher.entries
+            # Herdr reads the auto mode dialog as idle. Rook tells it as blocked, never as a finish.
+            text = poll(auto_modal, cl=agent("cl", "working", 8, "claude"), cl2=agent("cl2", "working", 7, "claude"),
+                        cl3=agent("cl3", "idle", 6, "claude", completion_seq=6))
+            assert "is blocked" in text and "finished its turn" not in text and "default permission mode" in text, text
         finally:
             os.environ["PATH"] = real_path
 

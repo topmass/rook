@@ -86,15 +86,46 @@ def agent_line(info, where):
                        short_path(info.get("foreground_cwd") or info.get("cwd")), where))
 
 
+SCREEN_LINES = 200  # Claude Code and Codex pad blank lines above their bottom box, so a read takes this many.
+RULE = re.compile(r"[─━]{8,}")
+# The bottom hint of a dialog that waits for a choice. Herdr may read such a dialog as idle.
+DIALOG = re.compile(r"esc to cancel|enter to (confirm|continue)|to choose\b|to select\b", re.I)
+TRUST = re.compile(r"one you trust|trust (this|the) (folder|files|contents|directory)", re.I)
+
+
+def dialog(tail):
+    """"trust" when a screen's end waits at the agent's folder trust question, "dialog" at another dialog, else None."""
+    lines = [line for line in (tail or "").splitlines() if line.strip()]
+    if not DIALOG.search("\n".join(lines[-3:])):
+        return None
+    return "trust" if TRUST.search("\n".join(lines[-15:])) else "dialog"
+
+
 def screen_tail(text, lines):
-    """The last lines of a pane's text, without trailing space or runs of blank lines, at most 3000 characters."""
+    """The last lines of a pane's text, without trailing space, runs of blank lines, the blank padding at the bottom
+    and the input box and footer of Claude Code or Codex, at most 3000 characters. A dialog is kept whole."""
     kept = []
     for line in (text or "").splitlines():
         line = line.rstrip()
         if line or kept and kept[-1]:
             kept.append(line)
+    while kept and not kept[-1]:
+        kept.pop()
+    if not dialog("\n".join(kept[-15:])):
+        # Claude Code's input box starts with ❯ under a rule, and Codex's with ›. The footer follows it.
+        for at in range(len(kept) - 1, max(len(kept) - 8, 0) - 1, -1):
+            mark = kept[at].lstrip()[:1]
+            if mark == "›" or mark == "❯" and at and RULE.fullmatch(kept[at - 1].strip()):
+                kept = kept[:at - (mark == "❯")]
+                break
     tail = "\n".join(kept[-lines:]).strip()
     return tail if len(tail) <= 3000 else "..." + tail[-3000:]
+
+
+def read_screen(machine, agent, lines, timeout=SECONDS):
+    """The end of an agent's screen, as screen_tail gives it. relay.py and the watcher both read through here."""
+    return screen_tail(call(machine, "agent", "read", agent, "--source", "recent-unwrapped", "--lines",
+                            str(max(lines, SCREEN_LINES)), raw=True, timeout=timeout), lines)
 
 
 def sends_path():
@@ -141,6 +172,14 @@ def send(machine, agent, text, path=None):
                            + settings.render(f"{OWNER_START} answers it in Herdr."))
     if state not in READY:
         return "refused", f"Herdr cannot tell what {who} is doing, so Rook did not send it."
+    try:
+        held = dialog(read_screen(machine, agent, 15))
+    except Failed:
+        held = None  # Herdr itself refuses an agent it knows is blocked.
+    if held:  # Herdr may read a dialog as idle, and a prompt typed into it would answer it.
+        return "refused", (f"{who} " + ("asks whether its folder is trusted" if held == "trust" else
+                                        "waits at a dialog in its window") + ", so Rook did not send it. "
+                           + settings.render(f"{OWNER_START} answers it in Herdr. Then Rook can send it again."))
     key = os.urandom(8).hex()
     rows = records(path)
     # Of the text, only a hash, as Rook's record of T3 sends keeps. seq lets the watcher tell later news from old.
@@ -223,19 +262,35 @@ def free_name(base, taken):
     raise Failed("No free agent name.")
 
 
-def start(machine, folder, kind, name=None, model=None):
-    """Open a new workspace for folder without focus, so no pane the owner looks at is split, and start an agent of kind
-    there, on model when given, through the agent's own --model flag. Return the agent's info. On this machine a folder may be relative or start with ~. On a saved Herdr
+# Each agent's own effort flag, and the levels its CLI takes: claude --help, and Codex's model_reasoning_effort.
+EFFORTS = {"claude": (["--effort", "{}"], ("low", "medium", "high", "xhigh", "max")),
+           "codex": (["-c", "model_reasoning_effort={}"], ("low", "medium", "high", "xhigh", "max", "ultra"))}
+
+
+def start(machine, folder, kind, name=None, model=None, effort=None):
+    """Start an agent of kind for folder without focus, so no pane the owner looks at is split: in a new tab of the
+    workspace that already holds a pane in folder, else in a new workspace. model and effort go through the agent's
+    own flags. Return the agent's info. On this machine a folder may be relative or start with ~. On a saved Herdr
     machine it is passed as given, and Herdr takes it only when it is absolute or starts with ~/."""
+    if effort and effort not in EFFORTS.get(kind, ((), ()))[1]:
+        levels = EFFORTS.get(kind, ((), ()))[1]
+        raise Failed(f"{kind} takes the effort levels {', '.join(levels)}" if levels else
+                     f"Rook cannot pass an effort to {kind}", "usage")
     if not machine:
         folder = os.path.abspath(os.path.expanduser(folder))
-    made = call(machine, "workspace", "create", "--cwd", folder, "--label", Path(folder).name or folder, "--no-focus")
+    home = next((p["workspace_id"] for p in call(machine, "pane", "list").get("panes") or ()
+                 if folder in (p.get("cwd"), p.get("foreground_cwd")) and p.get("workspace_id")), None)
+    made = (call(machine, "tab", "create", "--workspace", home, "--cwd", folder, "--label", kind, "--no-focus") if home
+            else call(machine, "workspace", "create", "--cwd", folder, "--label", Path(folder).name or folder,
+                      "--no-focus"))
     pane = made["root_pane"]
     taken = {a.get("name") for a in call(machine, "agent", "list").get("agents") or ()}
     name = name or free_name(f"{kind}-{Path(pane.get('cwd') or kind).name}", taken)
+    extra = [*(["--model", model] if model else []),
+             *([word.format(effort) for word in EFFORTS[kind][0]] if effort else [])]
     try:
         return call(machine, "agent", "start", name, "--kind", kind, "--pane", pane["pane_id"],
-                    *(["--", "--model", model] if model else []), timeout=START_SECONDS)["agent"]
+                    *(["--", *extra] if extra else []), timeout=START_SECONDS)["agent"]
     except Failed as error:
         if error.code != "agent_not_ready":  # A blocked start keeps its pane, so the owner can answer it in Herdr.
             try:
