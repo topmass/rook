@@ -10549,11 +10549,13 @@ class Overlay(Gtk.Application):
         # width, and no margin moves while it shows (see _size_canvas). Elsewhere the left margin places it.
         self._centred = left is None or (game is None and self.bounds is not None
                                          and abs(left + WIDTH / 2 - (self.bounds[0] + self.bounds[2] / 2)) <= 0.5)
-        LayerShell.set_anchor(self.win, LayerShell.Edge.LEFT, not self._centred)
-        if left is not None:
-            LayerShell.set_margin(self.win, LayerShell.Edge.LEFT, left)
         if self._centred:
             self._dispatch_cx = None
+        elif self._dispatch_cx is not None:  # A fan's wide window: the margin puts Rook home, not the window's edge.
+            self.left = round(left + WIDTH / 2 - self._dispatch_cx)
+        LayerShell.set_anchor(self.win, LayerShell.Edge.LEFT, not self._centred)
+        if left is not None:
+            LayerShell.set_margin(self.win, LayerShell.Edge.LEFT, self.left)
         if lift != self.scene.lift:
             self.scene.lift = lift
             self.area.set_content_height(lift + ORB_H)
@@ -10612,8 +10614,9 @@ class Overlay(Gtk.Application):
         return True
 
     def _centre(self):
-        """The working centre in monitor coordinates."""
-        return self.left + WIDTH / 2, self.top + self.scene.lift + ORB / 2
+        """The working centre in monitor coordinates. A fan's wider window moves the left margin, not the presence."""
+        cx = WIDTH / 2 if self._dispatch_cx is None else self._dispatch_cx
+        return self.left + cx, self.top + self.scene.lift + ORB / 2
 
     # ---- theme ----
     def _watch_theme(self):
@@ -15154,6 +15157,8 @@ def _check_send_window():
                 layer = (free - laid[0]) / 2 if centred else margin[0]
                 assert 0 <= where <= area_w, (centred, lag, t, where, area_w, "the presence left its area")
                 xs.append(layer + (laid[0] - area_w) / 2 + where)
+                # The viewer's box, captions and dust hang from _centre(): it stays on the presence as the margin moves.
+                assert Overlay._centre(ov)[0] == xs[-1], (centred, t, Overlay._centre(ov), xs[-1])
                 grains.append((laid[0], [xs[-1] + sc.x[i] for i in sc.idx]))  # Each grain's x on the screen.
                 widths.add(laid[0])
                 phases.append(None if not sc.dispatch_active(t) else "leaving" if sc.dispatch_leaving(t) else "on")

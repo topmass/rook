@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner/banner.webp" alt="Rook listens, thinks, then sends work to coding agents: T3 Code, Herdr, Claude Code, Codex, Antigravity and Pi" width="100%"></p>
+
 # Rook
 
 Rook is a voice assistant for your desktop. You hold a key, speak, and Rook answers out loud. A small swarm of particles on your screen shows what Rook is doing: listening, thinking, speaking, or drawing a diagram.
