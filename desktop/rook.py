@@ -103,8 +103,6 @@ RESTART_NOTE = INBOX.with_name("rook-restart-note")
 # The owner's notes on how Rook talks, read into the system prompt at every launch. Rook edits it only when they ask.
 PERSONALITY = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rook/personality.md"
 PERSONALITY_LIMIT = 20000  # Characters, the SOUL.md cap in OpenClaw and Hermes. Past it, the middle is cut with a marker.
-# House Style sections in every prompt. The rest of skills/house-style loads on demand, so one file serves both.
-HOUSE_STYLE_FLOOR = ("The voice", "Banned", "Punctuation and formatting", "Bold for skimming", "Scope")
 # The owner's routing and model choices, placed in context at session start and again after the file changes.
 MODEL_PREFERENCES = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rook/model-preferences.md"
 MODEL_PREFERENCES_LIMIT = 8000  # Characters. Holds the preferences table many times over; more is cut.
@@ -2635,11 +2633,7 @@ class Companion:
             self.recording_started.clear()
 
     async def launch_agent(self):
-        intro, *sections = (ROOT / "skills/house-style/SKILL.md").read_text().split("\n---\n", 1)[-1].split("\n## ")
-        style = ("The writing rules below cover the written part of each answer, handoff briefs and notes. The speech "
-                 "rules above and your personality notes win for your spoken words and your voice. For UI copy, docs, "
-                 "posts or emails, load the house-style skill for the full guide.\n\n"
-                 + "\n## ".join([intro, *(x for x in sections if x.split("\n", 1)[0] in HOUSE_STYLE_FLOOR)]))
+        style = (ROOT / "prompts/house-style.md").read_text()  # House Style in full; the personality joins its voice.
         try:
             personality = PERSONALITY.read_text(errors="replace").strip()
         except OSError:
@@ -2661,6 +2655,7 @@ class Companion:
                 "build thread. A change takes full effect at your next start. Follow what you wrote for the rest "
                 f"of this session, and never tell {OWNER} that a restart is needed.\n") + (
                 "--- Personality notes ---\n" + personality + "\n--- End of personality notes ---\n\n")
+        personality = style.replace("## The voice\n\n", "## The voice\n\n" + personality, 1) + "\n\n"
         self.prefs_stamp, preferences = await asyncio.to_thread(read_preferences)
         try:  # Resolve the plugins and write the snapshot. It must never delay or stop the agent's start.
             await asyncio.wait_for(asyncio.to_thread(plugin_loader.publish), PLUGIN_SECONDS)
@@ -2823,8 +2818,7 @@ class Companion:
                   f"paths. {OWNER_START} hears only this part, so it holds everything {pn('he')} must hear, above all any question "
                   f"you have for {pn('him')}. Never tell {pn('him')} you asked something that is not in it. Then leave a "
                   "blank line and write the full answer. Put exact commands, paths, and code only "
-                  "there.\n"
-                  + style))
+                  "there.\n"))
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         uv = shutil.which("uv")
@@ -8362,8 +8356,7 @@ def check_agent():
     """Self-check of how Rook chooses its main agent and falls back to Claude Code, with a stand-in agent and no
     real process. Run it with Rook's Python: ~/.local/share/rook/venv/bin/python desktop/rook.py --check-agent"""
     from types import SimpleNamespace
-    headings = re.findall(r"^## (.+)$", (ROOT / "skills/house-style/SKILL.md").read_text(), re.M)
-    assert set(HOUSE_STYLE_FLOOR) <= set(headings), "a House Style heading moved: the always-on floor would lose it"
+    assert "## The voice\n\n" in (ROOT / "prompts/house-style.md").read_text(), "the personality has no place in the voice"
 
     class Standin(harness.Claude):  # A second agent that can be told to fail.
         name, model, effort, problem = "Stand-in", "gemini-4-neon", "medium", None
