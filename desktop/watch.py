@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
+import signal
 import socket
 import sys
 import time
@@ -759,6 +761,297 @@ class Watcher:
                 pass
 
 
+# The roster: the open, unsettled and recently active threads and agents of T3 Code on every machine and of Herdr. Rook
+# keeps it in step with its own tool calls, refreshes it quietly, and saves it with the request record. Its agent gets a
+# directory of it once per conversation, then only the directory's changes. Another orchestrator adds rows of its own kind.
+ROSTER_SECONDS = 5 * 60  # The quiet refresh: one command per machine for T3, one call per machine for Herdr.
+# This machine's lists run on the owner's own CPU, which a game shares, so they run less often. Rook's own calls
+# already change this machine's rows at once.
+LOCAL_ROSTER_SECONDS = 20 * 60
+ROSTER_FIRST_SECONDS = 30  # The first refresh waits this long, so a start does not wait on it.
+ROSTER_BUSY_SECONDS = 60  # A refresh put off while the owner uses Rook or plays tries again after this long.
+LIST_SECONDS = 90  # One machine's thread lists, all its projects in one command, may take this long.
+SETTLED_KEEP_SECONDS = 24 * 3600  # A settled thread stays in the roster this long after its last change.
+ROSTER_ROW = {"orchestrator": "t3", "machine": "", "project": "", "id": "", "title": "", "status": "", "settled": False,
+              "snoozed": False, "updated_at": 0.0, "scope": ""}  # scope: what one list reads, a project or "herdr".
+
+
+def roster_key(row):
+    return row.get("orchestrator", "t3"), row["machine"], row["id"]
+
+
+class Roster:
+    def __init__(self, rows=(), save=None):
+        """save(puts, drops) keeps changed rows durably. Without it the roster lives in memory only."""
+        self.rows = {roster_key(row): {**ROSTER_ROW, **row} for row in rows}
+        self.save = save
+        self.ready = bool(self.rows)  # Saved rows or one refresh: enough for a directory.
+        self.confirmed = False  # Whether a refresh ran in this start. Rows saved before it may be out of date.
+        self.touched = {}  # key: when Rook's own tool call last changed it. A refresh begun before keeps it.
+
+    def _saved(self, puts, drops):
+        if self.save and (puts or drops):
+            self.save([dict(row) for row in puts], list(drops))
+
+    def put(self, row):
+        """Add a row, or change the given fields of a known one, from one of Rook's own calls."""
+        key = roster_key(row)
+        self.rows[key] = {**ROSTER_ROW, **self.rows.get(key, {}), **{k: v for k, v in row.items() if v is not None},
+                          "updated_at": time.time()}
+        self.touched[key] = time.time()
+        self._saved([self.rows[key]], ())
+
+    def change(self, orchestrator, machine, thread, **fields):
+        """Change a known row only: a thread the roster does not hold waits for the refresh."""
+        if (orchestrator, machine, thread) in self.rows:
+            self.put({"orchestrator": orchestrator, "machine": machine, "id": thread, **fields})
+
+    def drop(self, orchestrator, machine, thread):
+        key = (orchestrator, machine, thread)
+        self.touched[key] = time.time()
+        if self.rows.pop(key, None):
+            self._saved((), [key])
+
+    def title(self, machine, thread):
+        row = self.rows.get(("t3", machine, thread))
+        return row and row["title"] or None
+
+    def project_name(self, machine, scope):
+        """A project's spoken name from a row of the same project, else its id."""
+        return next((row["project"] for key, row in self.rows.items() if key[:2] == ("t3", machine)
+                     and row["scope"] == scope and row["project"] != scope), scope)
+
+    def replace(self, orchestrator, machine, scopes, fresh, since):
+        """The lists of these scopes on a machine came back whole, so their rows become fresh: a row missing from them
+        is closed, and a settled row past its keep goes. A row Rook's own call changed since the refresh began stays."""
+        now = time.time()
+        fresh = {roster_key(row): {**ROSTER_ROW, **row} for row in fresh
+                 if not row["settled"] or now - row["updated_at"] < SETTLED_KEEP_SECONDS}
+        mine = {key for key, at in self.touched.items() if at >= since}
+        drops = [key for key, row in self.rows.items() if key[:2] == (orchestrator, machine)
+                 and row["scope"] in scopes and key not in fresh and key not in mine]
+        puts = []
+        for key, row in fresh.items():
+            old = self.rows.get(key)
+            if key in mine or old and {**old, "updated_at": 0} == {**row, "updated_at": 0}:
+                continue  # Rook's newer word stands, and a row with nothing new keeps its time.
+            self.rows[key] = row
+            puts.append(row)
+        for key in drops:
+            del self.rows[key]
+        self.ready = True
+        self._saved(puts, drops)
+
+    def directory(self):
+        """{key: (title, project, snoozed)} of every unsettled thread and agent. No status: that is news, not routing."""
+        return {key: (row["title"], row["project"], bool(row["snoozed"])) for key, row in self.rows.items()
+                if not row["settled"] and row["title"]}
+
+    def listing(self):
+        return sorted((dict(row) for row in self.rows.values()),
+                      key=lambda row: (row["settled"], row["machine"], row["project"], row["title"]))
+
+
+def directory_line(key, entry):
+    orchestrator, machine, thread = key
+    title, project, snoozed = entry
+    parts = [title, project, machine, thread] if orchestrator == "t3" else [f"{orchestrator} agent {title}", project, machine]
+    return " | ".join(part for part in parts if part) + (" | snoozed" if snoozed else "")
+
+
+def directory_text(entries, confirmed=True):
+    """The whole directory, given once per conversation. Unconfirmed, it says it may be out of date."""
+    ids = ", ".join(f"{name} {entry['environmentId']}" for name, entry in machines().items() if entry.get("environmentId"))
+    head = ("Thread directory, from Rook's live roster (title | project | machine | thread id). Route sends by it with no "
+            "lookup; look up only a thread it lacks. Later turns carry only its changes."
+            + (f" T3 environment ids: {ids}." if ids else "")
+            + ("" if confirmed else " Saved before Rook's restart, so it may be out of date until its first refresh."))
+    lines = [f"- {directory_line(key, entry)}" for key, entry in sorted(entries.items(), key=lambda item: (
+        item[0][1], item[1][1].lower(), item[1][0].lower()))]
+    return "\n".join([head, *(lines or ["- no open threads"])])
+
+
+def directory_changes(before, after, rows):
+    """The directory's changes since the last turn, or "" when none."""
+    lines = []
+    for key, entry in after.items():
+        old = before.get(key)
+        if old is None:
+            lines.append(f"- added: {directory_line(key, entry)}")
+            continue
+        if old[0] != entry[0]:
+            lines.append(f"- renamed: \"{old[0]}\" is now \"{entry[0]}\" ({key[1]}, {key[2]})")
+        if old[2] != entry[2]:
+            lines.append(f"- {'snoozed' if entry[2] else 'woke'}: \"{entry[0]}\" ({key[1]})")
+    for key, old in before.items():
+        if key not in after:
+            gone = "settled" if key in rows and rows[key]["settled"] else "closed"
+            lines.append(f"- {gone}: \"{old[0]}\" ({key[1]})")
+    return "\n".join(["Thread directory changes:", *lines]) if lines else ""
+
+
+def note_tool(roster, name, tool_input, result, failed):
+    """Keep the roster in step with one of Rook's own T3 calls that succeeded: a launch, send, organize or rename."""
+    if failed or not isinstance(tool_input, dict) or not (machine := machine_for(tool_input.get("environmentId"))):
+        return
+    try:
+        data = json.loads(text_of(result))
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    tool, thread = name.split("__")[-1], data.get("threadId") or tool_input.get("threadId")
+    if not thread:  # No thread id means the caller's own thread, and Rook is in none.
+        return
+    if tool == "t3_thread_launch":
+        scope = data.get("projectId") or tool_input.get("projectId") or ""
+        name = roster.project_name(machine, scope)
+        roster.put({"machine": machine, "id": thread, "project": table_project(machine, scope) if name == scope else name,
+                    "scope": scope,
+                    "title": data.get("title") or tool_input.get("title") or "", "settled": False, "snoozed": False,
+                    "status": "running" if tool_input.get("message") else "idle"})
+    elif tool == "t3_thread_send":
+        roster.change("t3", machine, thread, status="running")
+    elif tool == "t3_thread_organize" and (action := tool_input.get("action")) == "archive":
+        roster.drop("t3", machine, thread)
+    elif tool == "t3_thread_organize" and action in ("settle", "unsettle", "snooze", "unsnooze"):
+        roster.change("t3", machine, thread, **{action.removeprefix("un") + "d": not action.startswith("un")})
+    elif tool == "t3_thread_update" and (title := tool_input.get("title") if tool_input.get("action") == "rename"
+                                         else data.get("title")):
+        roster.change("t3", machine, thread, title=title)
+
+
+def table_project(machine, project_id):
+    """A project's name from the owner's projects table by its T3 project id, else the id."""
+    import agent_inbox  # Here: the owner's projects table, read only on a launch into an unknown project.
+    try:
+        text = Path(agent_inbox.PROJECTS_FILE).read_text()
+    except OSError:
+        return project_id
+    for line in text.splitlines():
+        cells = [cell.strip().strip("`") for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 5 and cells[2].lower() == machine.lower() and cells[-1] == project_id:
+            return cells[0]
+    return project_id
+
+
+def t3_roster_row(machine, project, scope, thread):
+    """A roster row from one thread of t3 thread list, or None for a subagent or delegated child."""
+    if not isinstance(thread, dict) or not thread.get("threadId") or thread.get("parentThreadId") \
+            or thread.get("relationshipToParent"):
+        return None
+    return {"orchestrator": "t3", "machine": machine, "project": project, "id": thread["threadId"],
+            "title": thread.get("title") or "", "status": thread.get("status") or "", "settled": bool(thread.get("settled")),
+            "snoozed": bool(thread.get("snoozed")), "updated_at": updated(thread) or 0.0, "scope": scope}
+
+
+async def output_of(command, seconds):
+    """(stdout, None) of a command, or (None, an error). It never hangs past seconds."""
+    try:
+        # A session of its own, so a timeout kills the whole group: sh and every t3 it started.
+        process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.DEVNULL, start_new_session=True,
+                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except OSError as exc:
+        return None, str(exc)
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), seconds)
+    except TimeoutError:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+        return None, "timed out"
+    return output.decode(errors="replace"), None if process.returncode == 0 else f"exit {process.returncode}"
+
+
+async def refresh_roster(roster, log, projects=None, local=True):
+    """Read every machine's T3 threads and every Herdr agent once, machines side by side, and fold them in. A machine
+    or project that does not answer keeps its rows. projects is {machine: [(name, path)]}, by default the owner's table.
+    Without local, this machine's T3 lists wait for a later refresh."""
+    since = time.time()
+    if projects is None:
+        import agent_inbox  # Here: the owner's projects table, read only when a refresh runs.
+        projects = agent_inbox.projects_by_machine()
+
+    async def t3_lists(machine, entry):
+        scopes = {path: name for name, path in projects.get(machine, ())}
+        for key, row in roster.rows.items():  # A project known only by id, such as one a launch named, is read too.
+            if key[:2] == ("t3", machine) and row["scope"] and row["scope"] not in scopes:
+                scopes[row["scope"]] = row["project"]
+        if not scopes:
+            return
+        # One command for all of a machine's projects: one SSH connection, not one per project.
+        script = "; ".join(f"{shlex.quote(entry['t3'])} thread list --project {shlex.quote(scope)} --json 2>/dev/null; "
+                           "printf '\\n##%s\\n' $?" for scope in scopes)
+        command = on(machine, "sh", "-c", script)
+        if command == ["sh", "-c", script]:  # This machine: the lowest CPU and disk priority, so a game keeps its frames.
+            command = ["nice", "-n", "19", *(["ionice", "-c3"] if shutil.which("ionice") else []), *command]
+        output, error = await output_of(command, LIST_SECONDS)
+        if error:
+            log("roster_unreachable", machine=machine, error=error)
+            return
+        sections, body = [], []
+        for line in output.splitlines():
+            if re.fullmatch(r"##\d+", line):
+                sections.append((line == "##0", "\n".join(body)))
+                body = []
+            else:
+                body.append(line)
+        fresh, done = {}, set()
+        for (scope, name), (ok, text) in zip(scopes.items(), sections):
+            try:
+                threads = json.loads(text[text.find("["):]) if ok else None
+            except ValueError:
+                threads = None
+            if isinstance(threads, list):
+                done.add(scope)
+                for thread in threads:
+                    if (row := t3_roster_row(machine, name, scope, thread)) and row["id"] not in fresh:
+                        fresh[row["id"]] = row
+        roster.replace("t3", machine, done, fresh.values(), since)
+
+    async def herdr_agents(label):
+        try:
+            agents = (await asyncio.to_thread(herdr.call, label, "agent", "list", timeout=SHOW_SECONDS))["agents"]
+        except herdr.Failed as failed:
+            if failed.code != "server_not_running":
+                return
+            agents = []  # No Herdr server runs there, so none of its agents does.
+        except (KeyError, TypeError):
+            return
+        machine = label or local_machine()
+        roster.replace("herdr", machine, {"herdr"}, [
+            {"orchestrator": "herdr", "machine": machine, "id": herdr.target(agent), "title": herdr.target(agent),
+             "project": Path(agent.get("foreground_cwd") or agent.get("cwd") or "").name, "status":
+             agent.get("agent_status") or "", "settled": False, "snoozed": False, "updated_at": since, "scope": "herdr"}
+            for agent in agents or () if isinstance(agent, dict)], since)
+
+    labels = await asyncio.to_thread(herdr.machines)
+    here = local_machine()
+    await asyncio.gather(*(t3_lists(name, entry) for name, entry in machines().items() if local or name != here),
+                         *(herdr_agents(label) for label in (None, *labels)))
+    roster.confirmed = True
+
+
+async def keep_roster(roster, log, busy=None):
+    """Refresh the roster quietly, off every turn's path, for as long as Rook runs. await busy() says when the owner uses
+    Rook or plays, and a refresh then waits. This machine's lists run every LOCAL_ROSTER_SECONDS, the first time too."""
+    await asyncio.sleep(ROSTER_FIRST_SECONDS)
+    local_at = None
+    while True:
+        try:
+            if busy and await busy():
+                await asyncio.sleep(ROSTER_BUSY_SECONDS)
+                continue
+            local = local_at is None or time.monotonic() - local_at >= LOCAL_ROSTER_SECONDS - 1
+            await refresh_roster(roster, log, local=local)
+            if local:
+                local_at = time.monotonic()
+        except Exception as exc:  # The roster must never take Rook down.
+            log("roster_error", error=str(exc))
+        await asyncio.sleep(ROSTER_SECONDS)
+
+
 def _check():
     """Self-check of Watcher and machines table using isolated scratch XDG folders and a fake t3 on PATH."""
     import tempfile
@@ -967,8 +1260,169 @@ def _check():
             assert len(announced) == 1 and announced[0][2]["machine"] == "host-a", announced
             assert ("host-b", tid_b) in watcher.entries and watcher.entries[("host-b", tid_b)]["failed_since"] is not None
 
+        def roster_check():
+            """The roster: Rook's own calls change it at once, a refresh picks up what changed outside Rook, the
+            directory gives changes only, and the rows survive a restart."""
+            global LIST_SECONDS, ROSTER_FIRST_SECONDS, ROSTER_BUSY_SECONDS, ROSTER_SECONDS, refresh_roster
+            (cfg / "rook/machines.json").write_text(json.dumps({"host-a": {"environmentId": "env-a", "run": [], "t3": "t3",
+                                                                  "code": "/c"}}))
+            os.environ["PATH"] = f"{bin_dir}:/usr/bin:/bin"  # The refresh runs sh, which runs the fakes below.
+            lists, agents = base / "t3-lists.json", base / "herdr-agents.json"
+            (bin_dir / "t3").write_text(
+                f"#!{sys.executable}\nimport json, pathlib, sys\n"
+                f"table = json.loads(pathlib.Path({str(lists)!r}).read_text())\n"
+                "project = sys.argv[sys.argv.index('--project') + 1]\n"
+                f"pathlib.Path({str(base / 't3-nice')!r}).write_text(str(__import__('os').nice(0)))\n"
+                "if project == '/c/slow':\n"
+                f"    pathlib.Path({str(base / 't3-slow.pid')!r}).write_text(str(__import__('os').getpid()))\n"
+                "    __import__('time').sleep(60)\n"
+                "if project not in table: sys.exit(1)\n"
+                "print(json.dumps(table[project]))\n")
+            (bin_dir / "herdr").write_text(
+                f"#!{sys.executable}\nimport json, pathlib, sys\n"
+                "if sys.argv[1:3] == ['machine', 'list']: print(json.dumps({'result': {'machines': []}})); sys.exit()\n"
+                f"print(json.dumps({{'result': {{'agents': json.loads(pathlib.Path({str(agents)!r}).read_text())}}}}))\n")
+            (bin_dir / "herdr").chmod(0o755)
+            fresh = datetime.fromtimestamp(time.time() - 60).astimezone().isoformat()
+
+            def thread(tid, title, **fields):
+                return {"threadId": tid, "title": title, "status": "completed", "settled": False, "snoozed": False,
+                        "updatedAt": fresh, **fields}
+            lists.write_text(json.dumps({"/c/notes": [thread("t1", "Omarchy Agent"), thread("t2", "Fix the halo"),
+                                                      thread("child", "Reviewer", parentThreadId="t2")]}))
+            agents.write_text(json.dumps([{"name": "claude-site", "agent": "claude", "agent_status": "idle",
+                                           "cwd": "/c/site"}]))
+            projects, saves, logs = {"host-a": [("notes", "/c/notes")]}, [], []
+            roster = Roster(save=lambda puts, drops: saves.append((puts, drops)))
+            assert not roster.ready and Roster([{"machine": "m", "id": "x"}]).ready
+            asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), projects))
+            first = roster.directory()
+            assert first == {("t3", "host-a", "t1"): ("Omarchy Agent", "notes", False),
+                             ("t3", "host-a", "t2"): ("Fix the halo", "notes", False),
+                             ("herdr", "host-a", "claude-site"): ("claude-site", "site", False)}, first
+            assert roster.ready and saves and not logs, (saves, logs)
+            text = directory_text(first)
+            assert "T3 environment ids: host-a env-a." in text and "- Omarchy Agent | notes | host-a | t1" in text and \
+                "- herdr agent claude-site | site | host-a" in text and "running" not in text and "idle" not in text, text
+            saves.clear()
+            asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), projects))
+            assert not saves, saves  # Nothing changed, so nothing is written.
+
+            # Rook's own calls: a launch, a send, a settle, a snooze, a rename and an archive each change it at once. A
+            # failed call or a call for "this thread" changes nothing.
+            def call(tool, failed=False, result=None, **tool_input):
+                note_tool(roster, f"mcp__t3__{tool}", {"environmentId": "env-a", **tool_input},
+                          json.dumps(result or {}), failed)
+            assert (base / "t3-nice").read_text() == "19"  # This machine's lists run at the lowest priority.
+            call("t3_thread_launch", result={"threadId": "t5"}, projectId="p-extra", title="New study", message="Go.")
+            assert roster.rows[("t3", "host-a", "t5")]["title"] == "New study"
+            assert roster.rows[("t3", "host-a", "t5")]["project"] == "p-extra"
+            # A launch into a project no row names takes its name from the owner's projects table, by its id.
+            import agent_inbox
+            saved_table, agent_inbox.PROJECTS_FILE = agent_inbox.PROJECTS_FILE, base / "workspace.md"
+            agent_inbox.PROJECTS_FILE.write_text("| Project | Path | Machine | Aliases | T3 project id |\n|---|---|---|---|---|\n"
+                                                 "| Site | `/c/site` | host-a | site | p-site |\n")
+            try:
+                call("t3_thread_launch", result={"threadId": "t8"}, projectId="p-site", title="Site pass")
+                assert roster.rows[("t3", "host-a", "t8")]["project"] == "Site"
+            finally:
+                agent_inbox.PROJECTS_FILE = saved_table
+            roster.drop("t3", "host-a", "t8")
+            call("t3_thread_send", threadId="t2", message="More.")
+            assert roster.rows[("t3", "host-a", "t2")]["status"] == "running"
+            call("t3_thread_organize", threadId="t1", action="settle")
+            call("t3_thread_organize", threadId="t2", action="snooze", snoozedUntil="2026-11-27T09:00:00Z")
+            call("t3_thread_update", threadId="t2", action="rename", title="Halo fix")
+            call("t3_thread_organize", failed=True, threadId="t2", action="settle")
+            call("t3_thread_organize", action="settle")
+            call("t3_thread_launch", result={"threadId": "t6"}, projectId="p-extra", title="Gone soon")
+            call("t3_thread_organize", threadId="t6", action="archive")
+            assert roster.rows[("t3", "host-a", "t1")]["settled"] and not roster.rows[("t3", "host-a", "t2")]["settled"]
+            assert ("t3", "host-a", "t6") not in roster.rows and saves[-1] == ([], [("t3", "host-a", "t6")]), saves[-1]
+            second = roster.directory()
+            changes = directory_changes(first, second, roster.rows)
+            assert changes == ("Thread directory changes:\n- renamed: \"Fix the halo\" is now \"Halo fix\" (host-a, t2)\n"
+                               "- snoozed: \"Halo fix\" (host-a)\n- added: New study | p-extra | host-a | t5\n"
+                               "- settled: \"Omarchy Agent\" (host-a)"), changes
+            assert directory_changes(second, roster.directory(), roster.rows) == ""  # Each change goes once.
+
+            # A refresh picks up what the owner did outside Rook: a settle, a new thread, a rename in a project known
+            # only by its id, and a Herdr agent that closed. A refresh that began before Rook's own change keeps it.
+            lists.write_text(json.dumps({
+                "/c/notes": [thread("t1", "Omarchy Agent", settled=True), thread("t2", "Halo fix", settled=True),
+                             thread("t4", "Docs pass")],
+                "p-extra": [thread("t5", "Study, renamed outside")]}))
+            agents.write_text("[]")
+            asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), projects))
+            third = roster.directory()
+            assert set(third) == {("t3", "host-a", "t4"), ("t3", "host-a", "t5")}, third
+            assert third[("t3", "host-a", "t5")][0] == "Study, renamed outside"
+            changes = directory_changes(second, third, roster.rows)
+            assert "- added: Docs pass | notes | host-a | t4" in changes and "- settled: \"Halo fix\" (host-a)" in changes \
+                and "- closed: \"claude-site\" (host-a)" in changes and "is now \"Study, renamed outside\"" in changes, changes
+            roster.put({"machine": "host-a", "id": "t7", "title": "Launched mid-refresh", "scope": "/c/notes"})
+            roster.replace("t3", "host-a", {"/c/notes"}, [], time.time() - 5)
+            assert ("t3", "host-a", "t7") in roster.rows
+            # A project whose list fails keeps its rows.
+            lists.write_text(json.dumps({}))
+            before = dict(roster.rows)
+            asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), projects))
+            assert roster.rows == before
+            # A settled thread past its keep leaves the roster.
+            lists.write_text(json.dumps({"/c/notes": [thread("t1", "Omarchy Agent", settled=True, updatedAt="2026-01-01T00:00:00Z")]}))
+            asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), {"host-a": [("notes", "/c/notes")]}))
+            assert ("t3", "host-a", "t1") not in roster.rows
+
+            # A list that hangs is killed whole at its time limit, with every t3 it started, and its rows stay.
+            saved_limit, LIST_SECONDS = LIST_SECONDS, 2
+            try:
+                asyncio.run(refresh_roster(roster, lambda event, **fields: logs.append(event), {"host-a": [("slow", "/c/slow")]}))
+            finally:
+                LIST_SECONDS = saved_limit
+            time.sleep(0.2)
+            try:
+                os.kill(int((base / "t3-slow.pid").read_text()), 0)
+                raise AssertionError("A timed-out list left its t3 running.")
+            except ProcessLookupError:
+                pass
+            assert logs[-1] == "roster_unreachable", logs
+
+            # The refresh waits while the owner uses Rook or plays, and lists this machine only every
+            # LOCAL_ROSTER_SECONDS. Saved rows are unconfirmed until a refresh runs.
+            assert not Roster([{"machine": "m", "id": "x"}]).confirmed and roster.confirmed
+            assert "may be out of date" in directory_text({}, False) and "may be out of date" not in directory_text({})
+            saved = ROSTER_FIRST_SECONDS, ROSTER_BUSY_SECONDS, ROSTER_SECONDS, refresh_roster
+            busy, ran = [True, True, False, False, False], []
+
+            async def busy_now():
+                return busy.pop(0)
+
+            async def counted(_roster, _log, local=True):
+                ran.append(local)
+                if len(ran) == 3:
+                    raise asyncio.CancelledError
+            ROSTER_FIRST_SECONDS = ROSTER_BUSY_SECONDS = ROSTER_SECONDS = 0
+            refresh_roster = counted
+            try:
+                asyncio.run(keep_roster(roster, lambda event, **fields: None, busy_now))
+            except asyncio.CancelledError:
+                pass
+            finally:
+                ROSTER_FIRST_SECONDS, ROSTER_BUSY_SECONDS, ROSTER_SECONDS, refresh_roster = saved
+            assert ran == [True, False, False] and not busy, (ran, busy)
+
+            # The rows survive a restart in the request record's file.
+            import journal
+            record = journal.Journal(base / "roster.db").open()
+            record.roster_save(roster.listing(), [])
+            record.roster_save([], [("t3", "host-a", "t4")])
+            again = Roster(record.roster())
+            assert again.ready and again.rows == {key: row for key, row in roster.rows.items() if key[2] != "t4"}, again.rows
+            record.conn.close()
+
         try:
             asyncio.run(run())
+            roster_check()
         finally:
             MACHINES = saved_machines
             _MACHINES_WARNING = _LAST_MACHINES_ERROR = None

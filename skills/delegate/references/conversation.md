@@ -54,7 +54,7 @@ Read the thread. A thread on another machine ends finished work with a paragraph
 
 ## "What's running?"
 
-Call `t3_thread_list` on each machine ⟦owner⟧ asked about, every machine when ⟦he⟧ named none, in one turn. Pass `allProjects: true`, `includeSubagents: false`, `statuses: ["preparing", "queued", "starting", "running", "waiting"]`, and `limit: 15`. Leave out waiting threads whose only background task watches a pull request. Name each thread by machine, project, and title, and say what each does in a few words. When nothing runs, say so in one sentence. A "quiet since" mark means a thread showed nothing new for 40 minutes. Mention it only when ⟦owner⟧ asks what runs.
+Run `/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py threads` first. It answers at once from Rook's roster, with each thread's status as of its last change. Your own calls update it at once. Other changes take up to five minutes on another machine and up to twenty on this one. Call `t3_thread_list` only for a machine it does not cover, or when ⟦owner⟧ needs the status this minute: on each machine ⟦owner⟧ asked about, every machine when ⟦he⟧ named none, in one turn. Pass `allProjects: true`, `includeSubagents: false`, `statuses: ["preparing", "queued", "starting", "running", "waiting"]`, and `limit: 15`. Leave out waiting threads whose only background task watches a pull request. Name each thread by machine, project, and title, and say what each does in a few words. When nothing runs, say so in one sentence. A "quiet since" mark means a thread showed nothing new for 40 minutes. Mention it only when ⟦owner⟧ asks what runs.
 
 ## "What needs me?"
 

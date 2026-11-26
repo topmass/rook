@@ -1,5 +1,5 @@
 """The README banner (docs/banner/banner.webp): Rook's real Devs animation, captured offscreen. It plays listening on
-the helix, the resting loop, a send to six threads, and rest again. The overlay's own GL engine draws the dust in a
+the helix, the thinking loop, a send to six threads, and rest again. The overlay's own GL engine draws the dust in a
 surfaceless EGL context, so no window opens. Cairo draws the labels and thread names over it, as the live overlay does.
 
 To re-run it, from the repo root, under scripts/capped with scratch XDG folders and no display (see AGENTS.md):
@@ -23,8 +23,9 @@ CX, CY = W / SCALE / 2, 113 / SCALE  # The presence's centre in logical pixels.
 WORD_Y, LINE_Y = 278, 340  # The tops of the wordmark's and the tagline's sprites, in pixels.
 FPS, PREROLL = 30, 3.0  # Output frames per second; seconds of rest before the first frame, so the loop is settled.
 THREADS = ("T3 Code", "Herdr", "Claude Code", "Codex", "Antigravity", "Pi")
-SEND = 5.0  # When the send starts, in banner seconds.
-SCRIPT = [(0.0, {"state": "ready"}), (0.8, {"state": "listening"}), (3.0, {"state": "ready"}),
+SEND = 3.0  # When the send starts, in banner seconds: listening ends straight into it.
+# The send's own loop forms once from the helix and assembles into the send form, with no rest loop before it.
+SCRIPT = [(0.0, {"state": "ready"}), (0.8, {"state": "listening"}),
           (SEND, {"state": "thinking", "activity": "t3_thread_send"}),
           (SEND + 0.05, {"send": [{"id": f"t{k}", "name": n} for k, n in enumerate(THREADS)]}),
           (SEND + 3.6, {"send": [{"id": f"t{k}", "outcome": "landed"} for k in range(len(THREADS))]}),

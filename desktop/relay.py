@@ -46,6 +46,9 @@ relay.py shared-agents [--dry-run]
 relay.py watch THREAD [--machine NAME] [--title TITLE]
                             Have Rook watch a T3 thread and say when it finishes, stops, or needs ⟦owner⟧.
 relay.py watching           List the threads Rook watches.
+relay.py threads [--json]   List Rook's thread roster: every open, unsettled or recently active T3 thread and Herdr
+                            agent, with machine, project, title, status and id. It reads no thread, so it answers
+                            at once. It needs a running Rook.
 relay.py herdr agents       List every Herdr agent here and on the saved Herdr machines: name, kind, state
                             (working, blocked, done, idle or unknown), folder and machine.
 relay.py herdr read AGENT [--machine NAME] [--lines N]
@@ -1733,6 +1736,20 @@ def watch_command(argv):
         print(f"Rook now watches {args[0]} on {options['machine']}.")
     else:
         sys.exit(answer.get("error"))
+
+
+def threads_command(argv):
+    answer = ask_rook("threads", wait=10)
+    if not answer or not answer.get("ok"):  # The roster lives in the running Rook. ponytail: no offline read.
+        sys.exit((answer or {}).get("error") or "Rook is not running, so it holds no thread roster now.")
+    rows = answer["threads"]
+    if argv == ["--json"]:
+        print(json.dumps(rows, indent=1))
+        return
+    print("\n".join(" | ".join(part for part in (
+        row["machine"], row["orchestrator"], row["project"], row["title"] or "?",
+        row["status"] + (", settled" if row["settled"] else "") + (", snoozed" if row["snoozed"] else ""), row["id"])
+        if part) for row in rows) or "The roster holds no threads.")
 
 
 def take_option(args, flag, default=None):
@@ -5662,6 +5679,8 @@ def main():
         return watch_command(sys.argv[1:])
     if len(sys.argv) >= 2 and sys.argv[1] == "inbox":
         return inbox_command(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "threads":
+        return threads_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "mailbox":
         return mailbox_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "work":

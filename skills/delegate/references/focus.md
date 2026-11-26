@@ -14,7 +14,7 @@ The class is `com.t3tools.T3Code`. The title is `<project title> / <thread title
 
 1. Split the title at the last ` / `. The left part is the project title, and the right part is the thread title.
 2. Find the project title in the workspace skill's projects. When it is on one machine only, that is the machine.
-3. When the same title exists on more than one machine, call `t3_thread_list` on each of those machines with that project's id and `titleContains` set to the thread title. The machine that has the thread is the answer.
+3. When the same title exists on more than one machine, the thread directory in your turn lines names the machine that has the thread. Only when it does not, call `t3_thread_list` on each of those machines with that project's id and `titleContains` set to the thread title. The machine that has the thread is the answer.
 4. When several machines have it, or none does, look at the screenshot for the machine name. When it still is not clear, ask: "<the other machine> or this machine?"
 5. A title with no ` / `, such as `T3 Code`, names no thread. Ask which project ⟦verb:he means|they mean⟧.
 

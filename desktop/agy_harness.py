@@ -149,7 +149,7 @@ SCRIPTS = {ROOT / "desktop/relay.py", ROOT / "skills/delegate/scripts/t3_threads
 # going dark is reversible, and set only saves a checked setting for the next start). RELAY_PROMPT are the prompt's own
 # commands. restart, reload and daily-restart are refused outright, by antigravity_home: Rook never restarts itself.
 RELAY_SKILLS = ("get", "voices", "fonts", "dusts", "set ", "show ", "dark ", "media", "forge ", "wow-note ", "wow-data ", "project new ",
-                "watch ", "work ", "inbox", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ", "mac-access",
+                "watch ", "work ", "inbox", "threads", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ", "mac-access",
                 "herdr agents", "herdr read ", "herdr install", "pi ")
 RELAY_CARD = ()
 RELAY_PROMPT = ("timer ", "remember ")

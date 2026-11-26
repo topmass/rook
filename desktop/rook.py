@@ -172,6 +172,7 @@ NO_NOTICES = ("", [], [], [], "")  # A report that tells no owed notices, and cl
 SEND_LOOKUP_SECONDS = 8
 SEND_LOOKUP_MESSAGES = 30
 SEND_TOOLS = ("mcp__t3__t3_thread_send", "mcp__t3__t3_thread_launch", "mcp__t3__t3_pending_request")
+ROSTER_TOOLS = ("mcp__t3__t3_thread_organize", "mcp__t3__t3_thread_update")  # Calls only the thread roster follows.
 # A typed request, from relay.py ask, waits at most this long for Rook to be free, and as long again for
 # its answer. A request that could not be sent in time is not sent later.
 ASK_SECONDS = 300
@@ -409,7 +410,7 @@ BASH_PROGRAMS = {"yt-dlp": "media", "ffmpeg": "media", "ffprobe": "media", "git"
                  "hyprshot": "screenshot", "t3": "threads"}
 BASH_PROGRAMS.update(dict.fromkeys(("find", "fd", "rg", "grep", "locate", "plocate"), "find"))
 RELAY_COMMANDS = {"timer": "timer", "handoff": "handoff", "watch": "threads", "watching": "threads", "inbox": "threads",
-                  "media": "media"}
+                  "threads": "threads", "media": "media"}
 
 
 def _plugin_bash_activity(program):
@@ -2325,11 +2326,13 @@ class Companion:
                         print(f"rook: could not import {name}: {type(exc).__name__}", file=sys.stderr)
             initial_inbox = opened.load_inbox()
             self.timers, self.timer_next = opened.load_timers()
+            roster_rows = opened.roster()
             self.journal = opened
         except Exception as exc:  # Rook goes on without the record, and says so in one line with no text.
             print(f"rook: the request record is unavailable: {type(exc).__name__}", file=sys.stderr)
             self.journal = None
             initial_inbox = None
+            roster_rows = ()
             self.timers, self.timer_next, _ = load_timers_json(STATE / "timers.json")
         self.inbox = (Inbox(STATE / "inbox.json", run_write=self.store_write,
                             run_write_async=self.store_write_async, initial=initial_inbox)
@@ -2363,6 +2366,10 @@ class Companion:
             lambda text, delivered, source=None: self.inbox.put_nowait(("watch", text, time.time(), delivered, source)),
             self.log)
         self.watcher.capture = self.capture_item
+        # Every open thread and agent, kept across restarts. The agent gets its directory once per conversation, then
+        # only its changes: roster_given is (conversation, the directory as last given).
+        self.roster = watch.Roster(roster_rows, lambda puts, drops: self.journal_write("roster_save", puts, drops))
+        self.roster_given = None
         self.pending_lock = asyncio.Lock()
         # Held from the idle check to the submit by every typed or unprompted turn, so two never start at once.
         self.turn_lock = asyncio.Lock()
@@ -3179,6 +3186,8 @@ class Companion:
         if self.fired:
             now += "\nTimers that went off since your last turn: " + " ".join(self.fired)
             self.fired = []
+        if directory := self.roster_lines():
+            now += "\n" + directory
         once = now[extras:].strip("\n")  # The lines below are read afresh by a turn given again.
         if lines:
             now += "\n" + lines
@@ -3199,6 +3208,25 @@ class Companion:
         self.carry(carried, release=release, notices=owed[3] if owed else (), told=[] if release else checkin_ids)
         if source == "startup" or report is not None:
             self.record_agent_told()
+
+    def roster_lines(self):
+        """The thread directory for this turn: whole on a conversation's first turn, then only its changes, each once.
+        It goes in the turn's own lines, never the system prompt, so the prompt cache stays whole."""
+        roster = getattr(self, "roster", None)  # Stand-ins in the checks may have none.
+        if not roster or not roster.ready:
+            return ""
+        entries, given = roster.directory(), getattr(self, "roster_given", None)
+        self.roster_given = (self.session, entries)
+        if not given or given[0] != self.session:
+            return watch.directory_text(entries, roster.confirmed)
+        return watch.directory_changes(given[1], entries, roster.rows)
+
+    async def roster_busy(self):
+        """Whether the roster's refresh waits: the owner uses Rook, or plays. Its CPU would cost the game frames."""
+        if self.busy_with(quiet=True):
+            return True
+        window = await self.hyprctl("activewindow") or {}
+        return window.get("title", "").startswith("World of Warcraft")
 
     async def read_stream(self):
         async for message in self.harness.read(messages(self.agent.stdout)):
@@ -3378,7 +3406,7 @@ class Companion:
                         self.stamp["release"] = True
                     if block.get("type") == "tool_use" and (
                             block.get("name") in ("mcp__t3__t3_thread_send", "mcp__t3__t3_thread_launch",
-                                                  "mcp__t3__t3_pending_request")
+                                                  "mcp__t3__t3_pending_request", *ROSTER_TOOLS)
                             or block.get("name") == "Bash" and "t3 thread" in str((block.get("input") or {}).get("command"))):
                         self.delegating[block.get("id")] = (block.get("name"), block.get("input"))
                         if block.get("name") in SEND_TOOLS:
@@ -3394,7 +3422,11 @@ class Companion:
                             if outcome := send_outcome(call[0], block.get("content"), block.get("is_error")):
                                 self.journal_write("send_settle", key, *outcome)
                             self.settle_fan(key, outcome[0] if outcome else "unknown")
-                        if call[0] == "mcp__t3__t3_pending_request":  # Code, not the model, keeps questions current.
+                        if roster := getattr(self, "roster", None):  # Stand-ins in the checks may have none.
+                            watch.note_tool(roster, *call, block.get("content"), block.get("is_error"))
+                        if call[0] in ROSTER_TOOLS:
+                            pass  # Only the roster follows these.
+                        elif call[0] == "mcp__t3__t3_pending_request":  # Code, not the model, keeps questions current.
                             if seen := watch.pending(call[1], block.get("content"), block.get("is_error")):
                                 self.loop.create_task(self.note_pending(seen))
                         elif found := watch.delegation(*call, block.get("content"), block.get("is_error")):
@@ -4573,9 +4605,15 @@ class Companion:
                 note = f" ({err})" if err else ""
                 return {"ok": False, "error": f"No machine named {machine}. Machines: {', '.join(watch.machines())}.{note}"}
             self.watcher.add(thread, machine, data.get("title"))
+            if thread.startswith(watch.HERDR):  # relay.py herdr sent to or started this agent.
+                where, agent = watch.herdr_target(thread)
+                self.roster.put({"orchestrator": "herdr", "machine": where or machine, "id": agent, "title": agent,
+                                 "status": "working", "scope": "herdr"})
             return {"ok": True, "watching": self.watcher.listing()}
         if verb == "watching":
             return {"ok": True, "watching": self.watcher.listing()}
+        if verb == "threads":
+            return {"ok": True, "threads": self.roster.listing()}
         if verb == "timer":
             return self.timer_request(arg.strip(), body.strip())
         if verb == "dark":
@@ -6506,7 +6544,7 @@ class Companion:
     def fan_send(self, key, tool, args):
         """Add a send to this turn's dispatch fan as its intent is recorded; flush_fan shows the fan. Only a live send
         of the owner's running turn, while the overlay shows that turn's forms, as it does the old send form. The name is a
-        thread's title from what Rook holds: the launch's title, a build thread's name, or the watch list. Never a
+        thread's title from what Rook holds: the launch's title, a build thread's name, the roster, or the watch list. Never a
         lookup on this path."""
         overlay = getattr(self, "overlay", None)  # Stand-ins in the checks may have none.
         if (not overlay or overlay.returncode is not None or self.warming
@@ -6518,7 +6556,9 @@ class Companion:
             return
         thread = args.get("threadId")
         watched = getattr(getattr(self, "watcher", None), "entries", {})
-        name = (args.get("title") if tool == "t3_thread_launch" else None) or session._build_names().get(thread) or next(
+        roster = getattr(self, "roster", None)
+        name = (args.get("title") if tool == "t3_thread_launch" else None) or session._build_names().get(thread) or (
+            roster and roster.title(watch.machine_for(args.get("environmentId")), thread)) or next(
             (entry.get("title") for entry in watched.values() if entry.get("thread") == thread and entry.get("title")),
             None) or "A thread"
         row = {"id": key, "name": " ".join(str(name).split())[:200], "outcome": "pending",
@@ -7491,7 +7531,7 @@ class Companion:
                     device.close()
             return unreadable
 
-        async def watch():
+        async def watch_devices():
             """Scan again when the device folder changes, once the change has settled. Nodes that cannot be
             opened yet are retried for a few seconds. A long gap between ticks means the machine slept."""
             # ponytail: one stat a second; an inotify watch on /dev/input would react at once.
@@ -7623,7 +7663,7 @@ class Companion:
             if not devices:
                 self.log("no_keyboard")
                 print("Rook could not read a keyboard yet. Check AirType's keyboard permissions.", file=sys.stderr)
-            watcher = self.loop.create_task(watch())
+            watcher = self.loop.create_task(watch_devices())
             key_poll = self.loop.create_task(poll_keys())
         for signum in (signal.SIGTERM, signal.SIGINT):
             self.loop.add_signal_handler(signum, self.exit.set)
@@ -7658,6 +7698,7 @@ class Companion:
         if self.game and not self.dark:  # --wow: game events. Dark takes no captures.
             self.keep("game events", self.game.watch, optional=True)
         self.keep("thread watcher", self.watcher.run, optional=True)  # Says when delegated threads finish.
+        self.keep("thread roster", lambda: watch.keep_roster(self.roster, self.log, self.roster_busy), optional=True)
         self.keep("timers", self.run_timers, optional=True)
         want_overlay = self.use_overlay and self.overlay_explicit is not False
         if start_state is not None and not (
@@ -8648,7 +8689,7 @@ def check_agent():
                 read_calls.append(updated)
                 return real_read(path, updated=updated)
 
-            async def start_session(kind, game=None, log_rows=None):
+            async def start_session(kind, game=None, log_rows=None, roster=None):
                 launched, written = [], []
 
                 class FakeProc:
@@ -8690,6 +8731,8 @@ def check_agent():
                     show=lambda *a, **k: None,
                     harness=(harness.Claude() if kind == "claude"
                              else agy_harness.Antigravity() if kind == "antigravity" else codex_harness.Codex()))
+                if roster:
+                    c.roster = roster
                 c.exit.set()
                 await c.launch_agent()
                 c.warming = False
@@ -8755,6 +8798,45 @@ def check_agent():
                     assert "Rook found no routing preferences file" in turn_text(kind, written)
                     await c.submit("Fifth turn.", source="spoken")
                     assert "routing preferences" not in turn_text(kind, written)
+                # The thread directory goes in a conversation's first turn, then only its changes, each once. It never
+                # enters the system prompt, which stays byte for byte the same with a roster or without one.
+                for kind in ("claude", "antigravity", "codex"):
+                    _, bare, _ = await start_session(kind)
+                    roster = watch.Roster([{"machine": "m1", "id": "t1", "project": "notes", "title": "Omarchy Agent",
+                                            "status": "running", "scope": "p1"}])
+                    c, sp, written = await start_session(kind, roster=roster)
+                    assert sp == bare and "Omarchy Agent" not in sp
+                    await c.submit("First turn.", source="spoken")
+                    first = turn_text(kind, written)
+                    assert "Thread directory, from Rook's live roster" in first and "may be out of date" in first and \
+                        "\n- Omarchy Agent | notes | m1 | t1\n" in first and "running" not in first, first
+                    roster.confirmed = True  # The first refresh ran.
+                    await c.submit("Second turn.", source="spoken")
+                    assert "Thread directory" not in turn_text(kind, written)
+                    roster.change("t3", "m1", "t1", status="idle")  # A status change is news, not a directory change.
+                    await c.submit("Third turn.", source="spoken")
+                    assert "Thread directory" not in turn_text(kind, written)
+                    roster.change("t3", "m1", "t1", snoozed=True)
+                    roster.put({"machine": "m1", "id": "t2", "project": "notes", "title": "Fix the halo", "scope": "p1"})
+                    await c.submit("Fourth turn.", source="spoken")
+                    assert "Thread directory changes:\n- snoozed: \"Omarchy Agent\" (m1)\n- added: Fix the halo | notes | " \
+                        "m1 | t2\n" in turn_text(kind, written), turn_text(kind, written)
+                    await c.submit("Fifth turn.", source="spoken")
+                    assert "Thread directory" not in turn_text(kind, written)
+                    c.session = "s-new"  # A new conversation gets the whole directory again.
+                    await c.submit("Sixth turn.", source="spoken")
+                    sixth = turn_text(kind, written)
+                    assert "\n- Omarchy Agent | notes | m1 | t1 | snoozed\n" in sixth and "out of date" not in sixth, sixth
+                # The roster's refresh waits while the owner uses Rook or the game has focus.
+                c.__dict__.update(pending_turns=set(), cut_waiting=None, voice_id=None, recording=False,
+                                  talking=lambda: False, capture_finished=asyncio.Event(), stopping=lambda: False)
+                c.capture_finished.set()
+                for title, turns, busy in (("T3 Code", set(), False), ("World of Warcraft", set(), True),
+                                           ("T3 Code", {"turn"}, True)):
+                    async def window(_, title=title):
+                        return {"title": title}
+                    c.hyprctl, c.pending_turns = window, turns
+                    assert await c.roster_busy() is busy, (title, turns)
                 # Two quick turns after a preferences change: each gets its own id, the block goes once,
                 # and no turn stays orphaned in pending_turns when their result returns.
                 import threading
@@ -9287,7 +9369,9 @@ def check_agent():
                                       show=lambda state, **fields: shown.append(fields) if "send" in fields else (
                                           acts.append(fields["activity"]) if "activity" in fields else None),
                                       watcher=SimpleNamespace(add=lambda *found: None, keep_work=lambda change: None,
-                                                              entries={(local_m, "t2"): {"thread": "t2", "title": "Fix the halo"}}))
+                                                              entries={(local_m, "t2"): {"thread": "t2", "title": "Fix the halo"}}),
+                                      # An idle thread that no build list or watch names gets its title from the roster.
+                                      roster=watch.Roster([{"machine": local_m, "id": "t9", "title": "Omarchy Agent"}]))
                     c.capture_finished.set()
 
                     def send_call(uid, thread):
@@ -9320,7 +9404,8 @@ def check_agent():
                     assert shown[1:4] == [{"send": [{"id": "call:f1", "outcome": "landed"}]},
                                           {"send": [{"id": "call:f2", "outcome": "failed"}]},
                                           {"send": [{"id": "call:f3", "outcome": "unknown"}]}], shown[1:4]
-                    assert [row["name"] for row in shown[4]["send"]] == ["Fable", "Fix the halo", "New look study", "A thread"]
+                    assert [row["name"] for row in shown[4]["send"]] == ["Fable", "Fix the halo", "New look study",
+                                                                        "Omarchy Agent"]
                     assert [row["outcome"] for row in shown[4]["send"]] == ["landed", "failed", "unknown", "pending"]
                     assert len(shown) == 5
                     c.settle_fan("old-send", "landed")  # A send from before this start: no fan.

@@ -163,6 +163,26 @@ EVENT_TABLES = (
     )
     """,
 )
+# The thread roster: one row per open, unsettled or recently active thread or agent, so a restart keeps it. watch.Roster
+# owns its rules; the rows are only kept here.
+ROSTER_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS roster (
+        orchestrator TEXT NOT NULL,
+        machine TEXT NOT NULL,
+        id TEXT NOT NULL,
+        project TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        settled INTEGER NOT NULL DEFAULT 0,
+        snoozed INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (orchestrator, machine, id)
+    )
+    """,
+)
+ROSTER_COLUMNS = ("orchestrator", "machine", "id", "project", "title", "status", "settled", "snoozed", "updated_at", "scope")
 EVENT_KEEP_SECONDS = 7 * 24 * 3600  # Events older than this are pruned at each start, a batch at a time.
 COMMAND_KEEP_SECONDS = 24 * 3600  # A device's command row, kept long past any retry of it.
 EVENT_PRUNE_BATCH = 500
@@ -207,7 +227,7 @@ class Journal:
             # created says this open made the tables: the first start with a record, whose cuts are still in the log.
             self.created = not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'requests'"
                                             ).fetchone()
-            for statement in TABLES + SEND_TABLES + EVENT_TABLES:
+            for statement in TABLES + SEND_TABLES + EVENT_TABLES + ROSTER_TABLES:
                 conn.execute(statement)
             # brain names the Rook that owns a request, which recovers it at a restart; client is who sent it.
             if "brain" not in {row[1] for row in conn.execute("PRAGMA table_info(requests)")}:
@@ -804,6 +824,19 @@ class Journal:
                               "client = ? AND outcome IS NULL AND at < ?", (now, self.client, now - SEND_RETRY_SECONDS))
             self.conn.execute("DELETE FROM sends WHERE client = ? AND settled < ?", (self.client, now - SEND_KEEP_SECONDS))
         return untold
+
+    def roster(self):
+        """The saved roster rows."""
+        return [{**dict(row), "settled": bool(row["settled"]), "snoozed": bool(row["snoozed"])}
+                for row in self.read("SELECT * FROM roster")]
+
+    def roster_save(self, puts, drops):
+        """Write changed roster rows and delete closed ones, in one transaction."""
+        with self.lock, self.transaction():
+            self.conn.executemany(f"INSERT OR REPLACE INTO roster ({', '.join(ROSTER_COLUMNS)}) VALUES "
+                                  f"({', '.join('?' for _ in ROSTER_COLUMNS)})",
+                                  [tuple(row[column] for column in ROSTER_COLUMNS) for row in puts])
+            self.conn.executemany("DELETE FROM roster WHERE orchestrator = ? AND machine = ? AND id = ?", drops)
 
     def cut_notice(self, at, text):
         """Replace the text of the cut notice from this time that no turn carried yet. Return whether one was."""
