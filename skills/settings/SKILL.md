@@ -16,7 +16,7 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `voice_medium` | The medium voice | `late-night-architect` (the default), `velvet-wit`, `jarvis-poe`, or `observatory-keeper` |
 | `speed` | How fast the voice speaks. Higher is faster | 1 to 100. Default is 75 |
 | `volume` | Speech volume. Higher is louder | 1 to 100, or 0 for silent |
-| `expressiveness` | How freely the voice varies. Higher is more expressive | 1 to 100. Default is 30 |
+| `expressiveness` | How freely the voice varies. Higher is more expressive | 1 to 100. Default is 80 |
 | `font` | The font of Rook's captions and labels on screen | One of the fonts `relay.py fonts` lists |
 | `light_dust` | The look of the dust Rook draws in the light theme. The dark theme's gold dust never changes | One of the looks `relay.py dusts` lists |
 | `diagram_entrance` | How a new diagram appears on screen | `draw` (draws lines on behind sparks, the default) or `fly` (grains fly in from the orb) |
@@ -148,7 +148,7 @@ When ⟦owner⟧ asks to change how lively diagram dust feels, switch between `s
 
 - Speak speed, volume, and expressiveness as points from 1 to 100. Never say raw decimals.
 - Higher means faster, louder, and more expressive. Volume 0 is silent.
-- Rook's default speed is 75, about 10% faster than the medium server's own pace. Normal speed means 75. Default expressiveness is 60.
+- Rook's default speed is 75, about 10% faster than the medium server's own pace. Normal speed means 75. Default expressiveness is 80.
 - Read the current value with `relay.py get` first, and stay inside the range.
 - "A bit faster" means about 10 points up. Use about 10 points for "a bit slower", "a bit louder", "quieter", "steadier", or "more expressive".
 - Near 100 expressiveness, a word may come out less clear.

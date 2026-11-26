@@ -1985,7 +1985,7 @@ defaults = {
     "voice": "Miles",
     "voice_pace": -0.25,
     "voice_volume": 0.5,
-    "voice_temperature": 0.6,
+    "voice_temperature": 0.8,
     "recogniser_model": recogniser,
     "previous": {},
 }

@@ -3,9 +3,9 @@ the helix, the thinking loop, a send to six threads, and rest again. The overlay
 surfaceless EGL context, so no window opens. Cairo draws the labels and thread names over it, as the live overlay does.
 
 To re-run it, from the repo root, under scripts/capped with scratch XDG folders and no display (see AGENTS.md):
-  /usr/bin/python docs/banner/capture.py OUT_DIR           every frame as OUT_DIR/f0000.png, then OUT_DIR/banner.webp
+  /usr/bin/python docs/banner/capture.py OUT_DIR           every frame as OUT_DIR/f0000.png, then OUT_DIR/banner.webp and banner-dark.webp
   /usr/bin/python docs/banner/capture.py OUT_DIR 1.0 5.2   only the frames at those seconds, as OUT_DIR/t1.00.png
-Then copy OUT_DIR/banner.webp to docs/banner/banner.webp.
+Then copy both WebP files to docs/banner/.
 """
 import ctypes
 import os
@@ -146,10 +146,19 @@ def main():
           f"{cpu.user - cpu0.user + cpu.system - cpu0.system:.1f} s CPU. A draw took {1000 * sum(drawn) / len(drawn):.1f} ms, "
           f"a save {1000 * sum(saved) / max(1, len(saved)):.1f} ms more, on average.")
     if not at:
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", str(FPS), "-i", os.path.join(out, "f%04d.png"),
-                        "-c:v", "libwebp_anim", "-lossless", "0", "-quality", "75", "-loop", "0",
-                        os.path.join(out, "banner.webp")], check=True)
-
+        # GitHub pads the README, so the banner cannot reach the card's edges. In dark mode its ground is transparent:
+        # a pixel's alpha is its brightest channel, with the faintest noise dropped, so the dust and lettering glow on
+        # GitHub's own dark page with no box. In light mode it is a black card with rounded corners.
+        r, peak = 16, "max(max(r(X,Y),g(X,Y)),b(X,Y))"  # The light card's corner radius in pixels.
+        corner = f"max(max({r}-{{0}},{{0}}-({{1}}-{r}-1)),0)"
+        card = f"clip(({r}.5-hypot({corner.format('X', 'W')},{corner.format('Y', 'H')}))*255,0,255)"
+        glow = ":".join(f"{c}='255*{c}(X,Y)/max(1,{peak})'" for c in "rgb") + f":a='if(lt({peak},8),0,{peak})'"
+        for name, graph, quality in (
+                ("banner-dark.webp", f"[0]format=rgba,geq={glow},format=yuva420p", "70"),
+                ("banner.webp", f"[0]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{card}',format=yuva420p", "75")):
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", str(FPS), "-i", os.path.join(out, "f%04d.png"),
+                            "-filter_complex", graph, "-c:v", "libwebp_anim", "-lossless", "0", "-quality", quality,
+                            "-compression_level", "6", "-loop", "0", os.path.join(out, name)], check=True)
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/banner/banner.webp" alt="Rook listens, thinks, then sends work to coding agents: T3 Code, Herdr, Claude Code, Codex, Antigravity and Pi" width="100%"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/banner/banner-dark.webp"><img src="docs/banner/banner.webp" alt="Rook listens, thinks, then sends work to coding agents: T3 Code, Herdr, Claude Code, Codex, Antigravity and Pi" width="100%"></picture></p>
 
 # Rook
 

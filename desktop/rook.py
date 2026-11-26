@@ -19276,7 +19276,7 @@ def main():
     parser.add_argument("--voice-model", help="Default: phonon-31m-en. Takes hf://owner/name or a local folder.")
     parser.add_argument("--voice", help="A Phonon catalog voice (default Miles).")
     parser.add_argument("--voice-volume", type=float, default=0.5, help="Speech volume for pw-play. 0 is silent.")
-    parser.add_argument("--voice-temperature", type=float, default=0.6,
+    parser.add_argument("--voice-temperature", type=float, default=0.8,
                         help="How freely the voice varies, from 0 to 1. Lower is steadier, higher is more varied.")
     parser.add_argument("--wow", action="store_true",
                         help="World of Warcraft mode: Rook is also the game companion while the game has focus.")
