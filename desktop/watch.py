@@ -268,6 +268,7 @@ def t3_thread_command(command):
 # The proof lines a brief asks a thread to end its report with, in their order, and one such line.
 PROOF = ("Tested", "Not tested", "Links", "Deployed to", "Show", "Decision needed")
 PROOF_LINE = re.compile(r"^[\s>*_-]*(" + "|".join(PROOF) + r")[*_]*\s*:[*_]*[ \t]*(.*?)[\s*_]*$", re.I | re.M)
+SUMMARY_LIMIT = 6000  # About 1,000 words: enough for full thread summaries and terminal tails without flooding context.
 # The first words of news that needs the owner, which a batch puts first.
 DECISION = "A decision is needed: "
 ANSWER = f"An answer from {OWNER} is needed."
@@ -276,14 +277,14 @@ MAYBE = f"A question may still need {OWNER}."
 
 
 def last_words(messages):
-    """What the thread said last: its "For Rook:" paragraph when it wrote one, else the end of its message. The
-    summary is cut short for speech. The proof lines follow it whole, each on its own line, wherever they stood."""
+    """What the thread said last: its "For Rook:" paragraph when it wrote one, else the end of its message, capped
+    at SUMMARY_LIMIT characters. The proof lines follow it whole, each on its own line, wherever they stood."""
     text = next((m.get("text") or "" for m in reversed(messages or ()) if m.get("role") == "assistant"), "")
     at = text.lower().rfind("for rook:")
     report = text[at + len("for rook:"):] if at >= 0 else text
     proof = {match[1].lower(): match[2] for match in PROOF_LINE.finditer(report)}  # The last of each counts.
     words = " ".join(PROOF_LINE.sub("", report).split())
-    summary = words[:800] if at >= 0 else words if len(words) <= 400 else "..." + words[-400:]
+    summary = words[:SUMMARY_LIMIT] if at >= 0 else words if len(words) <= SUMMARY_LIMIT else "..." + words[-SUMMARY_LIMIT:]
     lines = [f"{label}: {proof[label.lower()]}".rstrip() for label in PROOF if label.lower() in proof]
     return "\n".join(part for part in (summary, *lines) if part)
 
@@ -713,7 +714,7 @@ class Watcher:
             entry["finish_told"] = entry.get("watched_at")
         if said is None:
             said, _ = await self.herdr_screen(machine, agent)
-        said = (said or "")[-800:]
+        said = (said or "")[-SUMMARY_LIMIT:]
         name = f"The Herdr agent \"{agent}\" ({info.get('agent') or 'agent'}) on {machine or entry['machine']}"
         # Rook's own words fill in. The agent's name and screen pass as they are.
         if finished:
@@ -1357,6 +1358,16 @@ def _check():
     name = settings.owner_name({"owner_name": "Test Owner"})
     assert needs_owner(f"An answer from {name} is needed.\nWhich file?") and needs_owner(f"A question may still need {name}. x")
     assert needs_owner(f"{ANSWER}\nWhich file?") and needs_owner(f"{MAYBE} x") and not needs_owner("Finished.")
+    # Thread summaries keep up to SUMMARY_LIMIT (6000) chars in both "For Rook:" and fallback modes.
+    assert SUMMARY_LIMIT == 6000
+    body_2500 = "A" * 2500
+    assert last_words([{"role": "assistant", "text": f"For Rook: {body_2500}"}]) == body_2500
+    assert last_words([{"role": "assistant", "text": body_2500}]) == body_2500
+    body_7000 = "B" * 3000 + "C" * 4000
+    got_for_rook = last_words([{"role": "assistant", "text": f"For Rook: {body_7000}\nTested: ok"}])
+    assert got_for_rook == body_7000[:6000] + "\nTested: ok", len(got_for_rook)
+    got_fallback = last_words([{"role": "assistant", "text": body_7000}])
+    assert got_fallback == "..." + body_7000[-6000:] and len(got_fallback) == 6003, len(got_fallback)
 
     global MACHINES, _MACHINES_WARNING, _LAST_MACHINES_ERROR
     saved_machines, saved_config = MACHINES, settings.CONFIG
@@ -1559,6 +1570,37 @@ def _check():
             await watcher.poll()
             assert len(announced) == 1 and announced[0][2]["machine"] == "host-a", announced
             assert ("host-b", tid_b) in watcher.entries and watcher.entries[("host-b", tid_b)]["failed_since"] is not None
+            # poll_herdr keeps a >800-char terminal tail uncut up to SUMMARY_LIMIT (6000), and caps >6000 to the tail.
+            herdr_announced = []
+            hw = Watcher(state / "rook/herdr-tail.json",
+                         lambda text, done, source=None: herdr_announced.append((text, done, source)),
+                         lambda event, **fields: None)
+            screen_box = {"text": "H" * 2500, "seq": 5}
+
+            async def fake_herdr(_machine, *_args):
+                seq = screen_box["seq"]
+                return {"agent": {"agent": "claude", "agent_status": "idle",
+                                  "state_change_seq": seq, "completion_seq": seq}}, None
+
+            async def fake_herdr_screen(_machine, _agent):
+                return screen_box["text"], None
+
+            hw.herdr = fake_herdr
+            hw.herdr_screen = fake_herdr_screen
+            hthread = herdr_thread(None, "tail-agent")
+            hw.add(hthread, machine="host-a", title="tail-agent", since=4)
+            await hw.poll_herdr(("host-a", hthread), hw.entries[("host-a", hthread)], time.time())
+            hw.release("host-a")
+            assert len(herdr_announced) == 1 and herdr_announced[0][2]["report"] == "H" * 2500, len(herdr_announced[0][2]["report"])
+            herdr_announced[0][1]()
+            herdr_announced.clear()
+            screen_box["text"] = ("P" * 1000) + ("Q" * 6000)
+            screen_box["seq"] = 6
+            hw.add(hthread, machine="host-a", title="tail-agent", since=5)
+            await hw.poll_herdr(("host-a", hthread), hw.entries[("host-a", hthread)], time.time())
+            hw.release("host-a")
+            assert len(herdr_announced) == 1 and herdr_announced[0][2]["report"] == "Q" * 6000, len(herdr_announced[0][2]["report"])
+            herdr_announced[0][1]()
             await milestone_check()
             await attention_check()
 

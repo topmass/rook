@@ -28,7 +28,7 @@ OWNER_START = settings.OWNER_START_TOKEN  # The same, as the first word of a sen
 
 SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5000
-ANSWER_LIMIT = 200
+ANSWER_LIMIT = 1000
 SUMMARY_LIMIT = 300
 # An item's detail is stored up to this size, so one item cannot flood Rook's context. A list shows this much of it.
 DETAIL_LIMIT = 2000
@@ -1776,6 +1776,18 @@ def _run_check_body(root, now, relay_script):
         answer(q1_id, "Use 8080", now=now + 8, path=db)
         assert get(q1_id, path=db)["state"] == "answered" and get(q1_id, path=db)["answer"] == "Use 8080"
         assert get(q2["id"], path=db)["state"] == "open" and get(q2["id"], path=db)["answer"] is None
+
+        # 2b. Answer receipt preserves up to ANSWER_LIMIT (1000) chars and truncates longer answers cleanly.
+        assert ANSWER_LIMIT == 1000
+        db_ans = root / "answer-limit/mailbox.db"
+        q_ok = observe("decision", "Keep 500-char answer?", machine="oak", thread="t-ans", run="r-ok", observed_at=now, path=db_ans)
+        ans_500 = "a" * 500
+        answer(q_ok["id"], ans_500, now=now + 1, path=db_ans)
+        assert get(q_ok["id"], path=db_ans)["answer"] == ans_500
+        q_long = observe("decision", "Cap 1200-char answer?", machine="oak", thread="t-ans", run="r-long", observed_at=now + 2, path=db_ans)
+        answer(q_long["id"], "b" * 1200, now=now + 3, path=db_ans)
+        got_long = get(q_long["id"], path=db_ans)["answer"]
+        assert len(got_long) == 1000 and got_long == ("b" * 997) + "...", (len(got_long), got_long[-10:])
 
         # 3. Deterministic ID collision extends hash length.
         coll_key = "reminder:2026-11-23:" + _norm_hash("collide test")

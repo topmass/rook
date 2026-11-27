@@ -4957,15 +4957,45 @@ def check_memory():
             agy_prompt = antigravity_home.prompt(sample_rook_prompt, str(base))
             assert "full Antigravity session" in agy_prompt and "relay.py remember" in agy_prompt
 
-            # Newest incoming notes win when incoming.jsonl exceeds INCOMING_LIMIT.
-            old_limit = memory.INCOMING_LIMIT
-            memory.INCOMING_LIMIT = 90
+            # Untidied incoming.jsonl notes are kept in full in chronological order (no 10,000-char drop),
+            # and MEMORY.md stays uncut past 8,000 bytes up to INDEX_LINES (200) lines / INDEX_BYTES (25,000) UTF-8 bytes.
+            assert memory.INDEX_LINES == 200 and memory.INDEX_BYTES == 25_000 and memory.DREAM_TIMEOUT == 3600
+            saved_incoming = inc_file.read_bytes()
+            saved_index = (xdg_data / "rook/memory/MEMORY.md").read_text()
             try:
-                trimmed_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
-                assert "Morning standup is at 9:30 AM." in trimmed_prompt
-                assert "older untidied notes" in trimmed_prompt
+                long_a = "First untidied note: " + ("a" * 6000)
+                long_b = "Second untidied note: " + ("b" * 6000)
+                inc_file.write_text(
+                    json.dumps({"ts": "2026-11-27T01:00:00+00:00", "text": long_a}) + "\n"
+                    + json.dumps({"ts": "2026-11-27T02:00:00+00:00", "text": long_b}) + "\n"
+                )
+                med_index = "\n".join(f"- [Item {i}](item-{i}.md): " + ("m" * 100) for i in range(100))
+                assert 8000 < len(med_index.encode("utf-8")) < memory.INDEX_BYTES
+                (xdg_data / "rook/memory/MEMORY.md").write_text(med_index + "\n")
+                full_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                assert long_a in full_prompt and long_b in full_prompt
+                assert full_prompt.index(long_a) < full_prompt.index(long_b)
+                assert "older untidied notes" not in full_prompt
+                assert med_index in full_prompt and "(truncated)" not in full_prompt
+
+                # >200 lines trims at 200 lines and appends (truncated).
+                over_lines = "\n".join(f"- [Line {i}](line-{i}.md): short." for i in range(210))
+                (xdg_data / "rook/memory/MEMORY.md").write_text(over_lines + "\n")
+                lines_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                assert "[Line 199]" in lines_prompt and "[Line 200]" not in lines_prompt
+                assert "\n(truncated)\n--- End of memory index ---" in lines_prompt
+
+                # >25,000 UTF-8 bytes trims cleanly on a UTF-8 boundary and appends (truncated).
+                over_bytes = "\n".join(f"- [Byte {i}](byte-{i}.md): " + ("é" * 300) for i in range(50))
+                assert len(over_bytes.encode("utf-8")) > memory.INDEX_BYTES
+                (xdg_data / "rook/memory/MEMORY.md").write_text(over_bytes + "\n")
+                bytes_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                idx_body = bytes_prompt.split("--- Memory index (MEMORY.md) ---\n", 1)[1].split("\n--- End of memory index ---", 1)[0]
+                assert idx_body.endswith("\n(truncated)")
+                assert len(idx_body[: -len("\n(truncated)")].encode("utf-8")) <= memory.INDEX_BYTES
             finally:
-                memory.INCOMING_LIMIT = old_limit
+                inc_file.write_bytes(saved_incoming)
+                (xdg_data / "rook/memory/MEMORY.md").write_text(saved_index)
 
             # Shared mode when ~/.agents/hooks/memory-context.sh exists.
             shared_hook = fake_home / ".agents/hooks/memory-context.sh"
@@ -5059,6 +5089,49 @@ def check_memory():
             assert turn_only.returncode == 0 and "Tidied memory (0 incoming, 1 turns)." in turn_only.stdout
             assert "oat cortado" in marker.read_text()
             marker.unlink()
+
+            # 4b. new_turns_since() reads full turns.jsonl (>128 KB), keeps >120 turns, skips PASS,
+            # keeps >1,200-char turns uncut, and head+tail cuts a single >100 KB block via _cut_block.
+            saved_turns = turns_file.read_bytes()
+            try:
+                base_ts = 1_700_000_000.0
+                rows_big = []
+                # Early turn at byte 0 (>128 KB before EOF and >120 turns before end).
+                early_at = datetime.fromtimestamp(base_ts + 1, _tz.utc).isoformat()
+                rows_big.append(json.dumps({"at": early_at, "session": "sb", "event": "request", "turn": "early",
+                                            "source": "spoken", "text": "EARLY_MARKER_START"}))
+                rows_big.append(json.dumps({"at": early_at, "session": "sb", "event": "response", "turns": ["early"],
+                                            "text": "PASS"}))
+                # Long (>1,200-char) user and Rook turns stay completely uncut.
+                long_u_at = datetime.fromtimestamp(base_ts + 2, _tz.utc).isoformat()
+                long_u_text = "LONG_USER_HEAD " + ("u" * 2500) + " LONG_USER_TAIL"
+                long_r_text = "LONG_ROOK_HEAD " + ("r" * 2500) + " LONG_ROOK_TAIL"
+                rows_big.append(json.dumps({"at": long_u_at, "session": "sb", "event": "request", "turn": "long1",
+                                            "source": "typed", "text": long_u_text}))
+                rows_big.append(json.dumps({"at": long_u_at, "session": "sb", "event": "response", "turns": ["long1"],
+                                            "text": long_r_text}))
+                # 130 filler turns (~1.2 KB each -> >150 KB total and >120 turns).
+                for idx in range(130):
+                    t_iso = datetime.fromtimestamp(base_ts + 10 + idx, _tz.utc).isoformat()
+                    rows_big.append(json.dumps({"at": t_iso, "session": "sb", "event": "request", "turn": f"f{idx}",
+                                                "source": "spoken", "text": f"Filler turn {idx} " + ("z" * 1200)}))
+                # Single >100 KB message cut cleanly with head + tail.
+                huge_at = datetime.fromtimestamp(base_ts + 200, _tz.utc).isoformat()
+                huge_text = "HUGE_HEAD_MARKER " + ("h" * (130 * 1024)) + " HUGE_TAIL_MARKER"
+                rows_big.append(json.dumps({"at": huge_at, "session": "sb", "event": "request", "turn": "huge1",
+                                            "source": "typed", "text": huge_text}))
+                turns_file.write_text("\n".join(rows_big) + "\n")
+                assert turns_file.stat().st_size > 128 * 1024
+                got_turns, got_max = memory.new_turns_since(base_ts)
+                # 1 early req (PASS response skipped) + 2 long + 130 filler + 1 huge = 134 turns.
+                assert len(got_turns) == 134 and got_max == base_ts + 200, (len(got_turns), got_max)
+                assert "EARLY_MARKER_START" in got_turns[0], got_turns[0]
+                assert not any(line.endswith("Rook: PASS") for line in got_turns)
+                assert long_u_text in got_turns[1] and long_r_text in got_turns[2]
+                assert "HUGE_HEAD_MARKER" in got_turns[-1] and "HUGE_TAIL_MARKER" in got_turns[-1]
+                assert "[... 30 KB cut ...]" in got_turns[-1], got_turns[-1][:120]
+            finally:
+                turns_file.write_bytes(saved_turns)
 
             # 5. Antigravity nightly dream: missing agy skip, dream-guard confinement, and fake agy ACP tests.
             (xdg_config / "rook").mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -5680,9 +5753,15 @@ def check_shared_memory():
         fake_claude = fake_bin / "claude"
         fake_claude.write_text(
             f"#!{sys.executable}\n"
-            "import json, pathlib, sys\n"
+            "import fcntl, json, pathlib, sys\n"
             f"p = pathlib.Path({str(claude_count)!r})\n"
-            "p.write_text(str(int(p.read_text()) + 1 if p.exists() else 1))\n"
+            "with open(p, 'a+') as fh:\n"
+            "    fcntl.flock(fh, fcntl.LOCK_EX)\n"
+            "    fh.seek(0)\n"
+            "    cur = int(fh.read().strip() or '0')\n"
+            "    fh.seek(0)\n"
+            "    fh.truncate()\n"
+            "    fh.write(str(cur + 1))\n"
             'print(json.dumps({"is_error": False, "result": "PROPOSALS\\n1. ADD\\n   Note: prefs.md", "modelUsage": {}}))\n'
         )
         fake_claude.chmod(0o755)
@@ -5835,7 +5914,8 @@ def check_shared_memory():
                 assert p.is_file() and not p.is_symlink(), p
             conf_text = (fake_home / ".agents/memory.conf").read_text()
             assert "PROJECT_ROOTS=" in conf_text.splitlines(), conf_text
-            assert "DREAM_MAX_RUNS=12" in conf_text, conf_text
+            assert "DREAM_MAX_RUNS=12" not in conf_text, conf_text
+            assert not any(line.strip().startswith("DREAM_MAX_RUNS=") for line in conf_text.splitlines()), conf_text
             assert f"CLAUDE_BIN={fake_claude}" in conf_text.splitlines(), conf_text
             for forbidden in (*( (saved_home,) if saved_home else () ), *filter(None, os.environ.get("ROOK_CHECK_PRIVATE_NAMES", "").split(","))):
                 assert forbidden not in conf_text, (forbidden, conf_text)
@@ -5877,12 +5957,14 @@ def check_shared_memory():
             assert "Read the notes related to your task before starting." in hook_run.stdout, hook_run.stdout
             assert "~/.agents/bin/remember" in hook_run.stdout, hook_run.stdout
 
-            # 4. Nightly dream: empty-night skip, CLAUDE_BIN without fake_bin on PATH, DREAM_MAX_RUNS clamp (>=2), and cut part progress.
+            # 4. Nightly dream: empty-night skip, CLAUDE_BIN without fake_bin on PATH, uncapped default,
+            # opt-in DREAM_MAX_RUNS clamp (>=2), and cut part progress.
             minimal_path = {"PATH": "/usr/bin:/bin"}
             empty_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert empty_dream.returncode == 0 and "nothing to dream" in empty_dream.stdout, (empty_dream.stdout, empty_dream.stderr)
 
-            # Create a multi-part session (>400 KB) in ProjA plus a session in ProjB, set DREAM_MAX_RUNS=1 (must clamp to 2).
+            # Create a multi-part session (>400 KB) in ProjA plus a session in ProjB.
+            # Default memory.conf has no DREAM_MAX_RUNS cap, so all parts and both projects run uncapped.
             pmem_a = fake_home / "ProjA/.agent-memory"
             pmem_a.mkdir(parents=True, exist_ok=True)
             (pmem_a / "MEMORY.md").write_text("# Memory index\n[[note]] - Note.\n")
@@ -5905,8 +5987,21 @@ def check_shared_memory():
             os.utime(sfile_b, (time.time() - 3600,) * 2)
 
             (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
+            claude_count.unlink(missing_ok=True)
+            uncapped_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
+            assert uncapped_dream.returncode == 0, (uncapped_dream.stdout, uncapped_dream.stderr)
+            assert int(claude_count.read_text()) >= 5, claude_count.read_text()
+            assert "capped at" not in uncapped_dream.stdout and "cut s1.jsonl" not in uncapped_dream.stdout, uncapped_dream.stdout
+            uncapped_state = json.loads((fake_home / ".agents/dream/state.json").read_text())
+            assert uncapped_state["files"][str(sfile_a)] == len(big_lines), uncapped_state["files"]
+            assert uncapped_state["files"][str(sfile_b)] == 1, uncapped_state["files"]
+            assert uncapped_state["retry"] == [], uncapped_state["retry"]
+
+            # Explicitly configuring DREAM_MAX_RUNS=1 clamps to 2 and defers the remaining parts/sessions.
+            (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
+            claude_count.unlink(missing_ok=True)
             orig_conf = (fake_home / ".agents/memory.conf").read_text()
-            (fake_home / ".agents/memory.conf").write_text(orig_conf.replace("DREAM_MAX_RUNS=12", "DREAM_MAX_RUNS=1"))
+            (fake_home / ".agents/memory.conf").write_text(orig_conf + "\nDREAM_MAX_RUNS=1\n")
             capped_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert capped_dream.returncode == 0, (capped_dream.stdout, capped_dream.stderr)
             assert int(claude_count.read_text()) == 2, claude_count.read_text()

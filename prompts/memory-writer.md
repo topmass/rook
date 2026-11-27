@@ -14,7 +14,7 @@ Rules:
    ---
    ```
 5. Keep each note short, concrete, and easy to scan. Link related notes with `[[slug]]`.
-6. Keep `MEMORY.md` as a concise index with one line per note, under 200 lines total:
+6. Keep `MEMORY.md` as a concise index with one line per note, under 200 lines and 25 KB total:
    `- [Short title](filename.md): One line describing what this note covers.`
 7. Update existing notes when facts change. Remove or prune entries and notes that are stale, superseded, or wrong.
 8. Never store secrets: no passwords, API keys, tokens, cookies, recovery codes, or private keys. If an incoming item or turn contains a secret, skip the secret and keep only non-sensitive context if useful.

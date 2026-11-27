@@ -52,11 +52,10 @@ DREAM_LABEL = "com.rook.agent-dream"  # On a Mac, the launchd job that stands in
 GIT_IGNORE_LINE = ".agent-memory/"
 MANIFEST_NAME = "rook-shared-manifest.json"
 MAX_BACKUPS = 7
-INDEX_LIMIT = 8000
-INCOMING_LIMIT = 10000
-TURNS_TAIL_BYTES = 128 * 1024
-MAX_TURNS = 120
-DREAM_TIMEOUT = 900
+INDEX_LINES = 200
+INDEX_BYTES = 25_000
+BLOCK_KB = 100
+DREAM_TIMEOUT = 3600
 
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
@@ -199,17 +198,41 @@ def _drain_incoming(consumed_raw):
             path.unlink(missing_ok=True)
 
 
+def _trim_index(text):
+    """Trim MEMORY.md to at most INDEX_LINES lines and INDEX_BYTES UTF-8 bytes."""
+    text = text.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    truncated = len(lines) > INDEX_LINES
+    trimmed = "\n".join(lines[:INDEX_LINES])
+    encoded = trimmed.encode("utf-8")
+    if len(encoded) > INDEX_BYTES:
+        trimmed = encoded[:INDEX_BYTES].decode("utf-8", errors="ignore").rstrip()
+        truncated = True
+    return trimmed + "\n(truncated)" if truncated else trimmed
+
+
+def _cut_block(text):
+    """Keep the head and tail of a single message larger than BLOCK_KB (UTF-8 bytes)."""
+    cap = BLOCK_KB * 1024
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text
+    head = raw[:cap * 3 // 4].decode("utf-8", errors="ignore")
+    tail = raw[-(cap // 4):].decode("utf-8", errors="ignore")
+    return f"{head}\n[... {(len(raw) - cap) // 1024} KB cut ...]\n{tail}"
+
+
 def startup_prompt(python_exe, relay_path):
     """Return Rook's own-memory prompt section, or empty string when shared memory is active."""
     if is_shared():
         return ""
     mem_dir = memory_dir()
     try:
-        index_text = (mem_dir / "MEMORY.md").read_text(errors="replace").strip()
+        index_text = _trim_index((mem_dir / "MEMORY.md").read_text(errors="replace"))
     except OSError:
         index_text = ""
-    if len(index_text) > INDEX_LIMIT:
-        index_text = index_text[:INDEX_LIMIT].rstrip() + "\n(truncated)"
     try:
         incoming = _parse_incoming_bytes((mem_dir / "incoming.jsonl").read_bytes())
     except OSError:
@@ -226,19 +249,7 @@ def startup_prompt(python_exe, relay_path):
     if index_text:
         parts.append("--- Memory index (MEMORY.md) ---\n" + index_text + "\n--- End of memory index ---")
     if incoming:
-        # Keep the newest incoming notes first so a large backlog never drops recent facts.
-        kept, used, trimmed = [], 0, False
-        for item in reversed(incoming):
-            ts = item.get("ts") or ""
-            row = ((f"- [{ts}] " if ts else "- ") + item["text"])[:INCOMING_LIMIT]
-            if kept and used + len(row) > INCOMING_LIMIT:
-                trimmed = True
-                break
-            kept.append(row)
-            used += len(row) + 1
-        kept.reverse()
-        if trimmed:
-            kept.insert(0, "- (older untidied notes in incoming.jsonl)")
+        kept = [(f"- [{item['ts']}] " if item.get("ts") else "- ") + item["text"] for item in incoming]
         parts.append("--- Recent notes not yet tidied (incoming.jsonl) ---\n"
                      + "\n".join(kept)
                      + "\n--- End of recent notes ---")
@@ -250,59 +261,56 @@ def startup_prompt(python_exe, relay_path):
 def new_turns_since(since_ts):
     """Return (formatted turn lines, newest timestamp) for spoken/typed turns newer than since_ts."""
     path = desk.state_dir() / "rook/turns.jsonl"
+    found, max_ts, user_turns = [], since_ts, set()
     try:
-        with open(path, "rb") as handle:
-            size = handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, size - TURNS_TAIL_BYTES))
-            lines = handle.read().decode(errors="replace").splitlines()
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                if not raw.strip():
+                    continue
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                event = row.get("event")
+                if event not in ("request", "response"):
+                    continue
+                session = row.get("session")
+                if event == "request":
+                    if row.get("source") not in ("spoken", "typed"):
+                        continue
+                    turn_id = row.get("turn")
+                    if turn_id is not None:
+                        user_turns.add((session, turn_id))
+                at = row.get("at")
+                if not isinstance(at, str):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(at)
+                except ValueError:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                ts = parsed.timestamp()
+                if ts <= since_ts:
+                    continue
+                if event == "request":
+                    text = str(row.get("text") or "").strip()
+                    if text:
+                        found.append(f"[{at}] User ({row['source']}): {_cut_block(text)}")
+                        max_ts = max(max_ts, ts)
+                else:
+                    turns = row.get("turns") or ([row["turn"]] if row.get("turn") is not None else [])
+                    if not any((session, turn_id) in user_turns for turn_id in turns):
+                        continue
+                    text = str(row.get("text") or row.get("spoken") or "").strip()
+                    if text and text != "PASS":
+                        found.append(f"[{at}] Rook: {_cut_block(text)}")
+                        max_ts = max(max_ts, ts)
     except OSError:
         return [], since_ts
-    found, max_ts, user_turns = [], since_ts, set()
-    for raw in lines:
-        if not raw.strip():
-            continue
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        event = row.get("event")
-        if event not in ("request", "response"):
-            continue
-        session = row.get("session")
-        if event == "request":
-            if row.get("source") not in ("spoken", "typed"):
-                continue
-            turn_id = row.get("turn")
-            if turn_id is not None:
-                user_turns.add((session, turn_id))
-        at = row.get("at")
-        if not isinstance(at, str):
-            continue
-        try:
-            parsed = datetime.fromisoformat(at)
-        except ValueError:
-            continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        ts = parsed.timestamp()
-        if ts <= since_ts:
-            continue
-        if event == "request":
-            text = str(row.get("text") or "").strip()
-            if text:
-                found.append(f"[{at}] User ({row['source']}): {text[:1200]}")
-                max_ts = max(max_ts, ts)
-        else:
-            turns = row.get("turns") or ([row["turn"]] if row.get("turn") is not None else [])
-            if not any((session, turn_id) in user_turns for turn_id in turns):
-                continue
-            text = str(row.get("text") or row.get("spoken") or "").strip()
-            if text:
-                found.append(f"[{at}] Rook: {text[:1200]}")
-                max_ts = max(max_ts, ts)
-    return found[-MAX_TURNS:], max_ts
+    return found, max_ts
 
 
 def backup_memory(keep=MAX_BACKUPS):

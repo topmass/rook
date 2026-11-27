@@ -1276,7 +1276,8 @@ def recent_exchanges(limit=25, full=6):
             text, answer = text.strip().split("\n", 1)[0][:200], exchange["spoken"]
         elif at < recent:
             text, answer = text if len(text) <= 300 else text[:300] + " (cut)", exchange["spoken"]
-        answer = answer if len(answer) <= 1200 else answer[:1200] + " (cut)"
+        if at not in owner_turns or at < recent:
+            answer = answer if len(answer) <= 1200 else answer[:1200] + " (cut)"
         replay.append(f"[{when}] {exchange['who']}: {text}\nYou answered: {answer}")
     return replay
 
@@ -8696,6 +8697,22 @@ def check_restart():
         assert len(replay) == 3 and "(cut)" in replay[0] and replay[0].endswith("You answered: Short."), replay
         assert replay[1].endswith("News line.\nYou answered: News.") and replay[2].endswith("Whole answer."), replay
         assert len(recent_exchanges(limit=1, full=1)) == 1
+        # The newest full owner turns keep their full written answer uncut, while older and non-owner turns stay compact.
+        long_written = "Detailed answer " + ("w" * 2600)
+        long_older_spoken = "Older spoken " + ("o" * 1500)
+        long_news_spoken = "News spoken " + ("n" * 1500)
+        (STATE / "turns.jsonl").write_text("\n".join(row(ago, *rest[:1], **rest[1]) for ago, *rest in [
+            (60, "request", {"turn": "m2", "text": "Old question.", "source": "spoken"}),
+            (59, "response", {"turns": ["m2"], "status": "completed", "text": "Old full.", "spoken": long_older_spoken}),
+            (50, "request", {"turn": "n2", "text": "Watcher update.\nDetails.", "source": "watch"}),
+            (49, "response", {"turns": ["n2"], "status": "completed", "text": "Watcher full.", "spoken": long_news_spoken}),
+            (40, "request", {"turn": "t2", "text": "Latest question.", "source": "typed"}),
+            (39, "response", {"turns": ["t2"], "status": "completed", "text": long_written, "spoken": "Short spoken."})]) + "\n")
+        long_replay = recent_exchanges(limit=2, full=1)
+        assert len(long_replay) == 3, long_replay
+        assert long_replay[0].endswith("(cut)") and len(long_replay[0].split("You answered: ", 1)[1]) == 1200 + len(" (cut)"), long_replay[0]
+        assert long_replay[1].endswith("(cut)") and len(long_replay[1].split("You answered: ", 1)[1]) == 1200 + len(" (cut)"), long_replay[1]
+        assert long_replay[2].endswith(f"You answered: {long_written}") and "(cut)" not in long_replay[2], long_replay[2]
         # An odd work list entry never breaks a start: the lines are left out, with one work_error row.
         (STATE / "work.json").write_text('{"next_id": 2, "entries": [{"id": 1}]}')
         rows = []
