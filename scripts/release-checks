@@ -111,6 +111,7 @@ run relay "$SYS_PY" desktop/relay.py --check
 run relay-settings "$SYS_PY" desktop/relay.py --check-settings
 run relay-herdr "$SYS_PY" desktop/relay.py --check-herdr
 run obsidian-notes "$SYS_PY" scripts/check_obsidian_notes.py
+run request-perf "$SYS_PY" desktop/perf.py
 run relay-memory "$SYS_PY" desktop/relay.py --check-memory
 run relay-plugins "$SYS_PY" desktop/relay.py --check-plugins
 run work "$SYS_PY" desktop/work.py

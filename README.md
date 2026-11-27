@@ -60,6 +60,12 @@ Set `ROOK_OBSIDIAN_VAULT` to the absolute path of your vault in the Rook service
 
 Rook appends your words as a Markdown entry in `rook/YYYY-MM-DD.md` by default, using the service's local date. It creates the folder and file as needed and reserves `daily/` for your own notes. Say “Save this to Obsidian” followed by the note, or run `python3 desktop/relay.py obsidian-note "Your note"` while Rook is running. The service writes the entry through Rook's local relay.
 
+## Request performance
+
+Use `relay.py set perf_logging on|off` to control request measurements. The default is `on`. Set `recogniser_threads` to an integer from 1 to 16 (default 2). Set `perf_log_path` to an absolute path or a path beginning with `~/`, or use `default` to restore the default. These settings take effect after restart.
+
+The default log is `$XDG_STATE_HOME/rook/perf.jsonl` (normally `~/.local/state/rook/perf.jsonl`). Rook retains one previous generation, `perf.jsonl.1`, with a 2 MiB limit per file. Rows contain stage times, local process CPU time, and sampled peak resident memory. Counters describe the measured processes, can overlap between stages, and cannot measure GPU work or remote tool resource use. General events are in `turns.jsonl` in the same state directory.
+
 ## What is yours and what ships
 
 Rook ships the same base to everyone:

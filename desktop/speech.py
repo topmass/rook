@@ -992,6 +992,24 @@ def main():
             continue
         error = None
         played = [0, 0, 0]
+        measure = message.get("perf") is True
+        first_pcm = True
+
+        def voice_event(event=None, **fields):
+            if measure:
+                fields.update(perf_at=time.monotonic(), perf_cpu_ms=time.process_time_ns() / 1e6)
+            emit({"id": message["id"], **({"event": event} if event else {}), **fields})
+
+        def measured_generate(text, stopped):
+            nonlocal first_pcm
+            if first_pcm:
+                voice_event("tts_begin")
+            for chunk in generate(text, stopped, message.get("voices")):
+                if chunk and first_pcm:
+                    first_pcm = False
+                    voice_event("tts_pcm")
+                yield chunk
+
         try:
             # An item may carry its own volume: a voice swap's silent probe speaks at 0.
             volume = message.get("volume", args.volume)
@@ -999,18 +1017,18 @@ def main():
                 levels = LevelMeter(message["id"], sample_rate, stop, emit=emit)
                 error = desk.play_pcm(
                     # An item's own voices, such as an audition line's, reach generate with it.
-                    sample_rate, volume, lambda text, stop: generate(text, stop, message.get("voices")),
+                    sample_rate, volume, measured_generate if measure else
+                    lambda text, stop: generate(text, stop, message.get("voices")),
                     message["text"], stop, voiced,
-                    lambda: emit({"id": message["id"], "event": "start"}),
+                    lambda: voice_event("start"),
                     lambda secs: emit({"id": message["id"], "event": "length", "seconds": secs}),
                     played, levels=levels,
                 )
         except Exception as exc:
             error = str(exc)
         problem, generate.__dict__["problem"] = getattr(generate, "problem", None), None
-        emit({"id": message["id"], "volume": volume, "error": error,
-              "seconds": round(max(0, played[2] - played[1]) / sample_rate, 2),
-              **({"medium_voice": problem} if problem else {})})
+        voice_event(volume=volume, error=error, seconds=round(max(0, played[2] - played[1]) / sample_rate, 2),
+                    **({"medium_voice": problem} if problem else {}))
     encoders.shutdown(wait=True)
 
 

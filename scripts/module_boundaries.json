@@ -21,6 +21,7 @@
       "desktop/turn_end.py",
       "desktop/memory.py",
       "desktop/obsidian_notes.py",
+      "desktop/perf.py",
       "desktop/media.py"
     ],
     "platform": [

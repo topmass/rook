@@ -115,7 +115,7 @@ THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
 SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "diagram_entrance", "diagram_dance",
             "stage", "listen_after", "smart_turn", "thread_milestones", "speak_thoughts", "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
-            "recogniser_model")
+            "recogniser_model", "recogniser_threads", "perf_logging", "perf_log_path")
 CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
 # The text fields a build thread entry may hold when it is an object: its id, and what started it.
 BUILD_THREAD_FIELDS = ("thread", "machine", "provider", "model", "effort", "subagents")
@@ -171,6 +171,15 @@ def valid(data):
         elif (key == "recording_minutes" and isinstance(value, int) and not isinstance(value, bool)
               and RECORDING_MINUTES_RANGE[0] <= value <= RECORDING_MINUTES_RANGE[1]):
             found[key] = value
+        elif key == "recogniser_threads" and type(value) is int and 1 <= value <= 16:
+            found[key] = value
+        elif key == "perf_logging" and value in ("on", "off"):
+            found[key] = value
+        elif (key == "perf_log_path" and isinstance(value, str) and not any(c in value for c in "\x00\r\n")
+              and (os.path.isabs(value) or value.startswith("~/")) and not value.endswith("/")):
+            path = Path(os.path.expanduser(value))
+            if path.is_absolute() and path.name and path.name != "..":
+                found[key] = str(path)
         elif (key in RANGES and isinstance(value, (int, float)) and not isinstance(value, bool)
               and RANGES[key][0] <= value <= RANGES[key][1]):
             found[key] = float(value)
@@ -564,6 +573,12 @@ def medium_voice(path, timeout=3):
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def perf_log_path_in_force(saved):
+    if "perf_log_path" in saved:
+        return Path(saved["perf_log_path"]), "settings file"
+    return desk.state_dir() / "rook/perf.jsonl", "default"
 
 
 def listen_after_in_force(saved):

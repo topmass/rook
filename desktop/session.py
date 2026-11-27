@@ -640,6 +640,11 @@ class PhoneSession:
         """Write an uploaded recording to a private temp file, transcribe it, delete the file, and dispatch if spoken."""
         path = None
         text = None
+        logger = getattr(self.c, "perf_log", None)
+        trace = logger.begin("spoken", "phone_upload") if logger else None
+        if trace:
+            trace.turn = turn
+            trace.begin("recognition")
         try:
             mime = (content_type or "").split(";", 1)[0].strip().lower()
             suffix = AUDIO_EXTENSIONS.get(mime, ".bin")
@@ -650,15 +655,21 @@ class PhoneSession:
             print(f"rook: phone audio failed: {type(error).__name__}", file=sys.stderr)
             text = None
         finally:
+            if trace:
+                trace.end("recognition", complete=text is not None)
             body = None
             if path is not None:
                 path.unlink(missing_ok=True)
         if text is None:
+            if trace:
+                trace.finish("recognition_failed")
             self.c.journal_write("empty_audio", turn, "failed")
             self.c.journal_write("command_done", device_id, command_id, "failed")
             return
         cleaned = text.strip()[:TEXT_LIMIT]
         if not cleaned:
+            if trace:
+                trace.finish("empty_transcript")
             self.c.journal_write("empty_audio", turn, "empty")
             self.c.journal_write("command_done", device_id, command_id, "empty")
             return
@@ -671,10 +682,12 @@ class PhoneSession:
             except Exception:
                 moved = False
         if not moved:
+            if trace:
+                trace.finish("not_dispatched")
             self.voice_turns.pop(turn, None)
             self.c.journal_write("command_done", device_id, command_id, "failed")
             return
-        await self.run_ask(device_id, command_id, turn, cleaned, label=PHONE_SPOKEN_LABEL, source="spoken")
+        await self.run_ask(device_id, command_id, turn, cleaned, label=PHONE_SPOKEN_LABEL, source="spoken", trace=trace)
 
     def request_state(self, turn):
         conn = journal.reader(self.c.journal.file)
@@ -684,12 +697,18 @@ class PhoneSession:
             conn.close()
         return row[0] if row else None
 
-    async def run_ask(self, device_id, command_id, turn, text, label=PHONE_LABEL, source="typed"):
+    async def run_ask(self, device_id, command_id, turn, text, label=PHONE_LABEL, source="typed", trace=None):
         """Give a phone's request to the agent. It waits its turn as a typed ask does: the turn lock, then an idle
         Rook. No screenshot: the desk is not the phone. A stop word cuts the running turn first, as at the desk."""
+        timings = {}
+        if trace:
+            trace.begin("queue")
+            timings["timing"] = {"perf": trace}
         try:
             heeded = await self.c.heed_stop(text, client=device_id) if source == "spoken" else None
             if heeded is True:  # A bare stop: nothing goes to the agent.
+                if trace:
+                    trace.finish("stopped")
                 self.voice_turns.pop(turn, None)
                 self.c.journal_write("close", [turn], "closed", "stop")
                 self.c.journal_write("command_done", device_id, command_id, "done")
@@ -700,12 +719,16 @@ class PhoneSession:
                     while not self.c.idle():
                         await asyncio.sleep(0.25)
                     if self.c.exit.is_set():  # Rook is stopping: its row stays queued, and the next start gives it.
+                        if trace:
+                            trace.finish("deferred")
                         self.voice_turns.pop(turn, None)
                         return
                     if await self.c.submit(text, relay.settings.render(label), (), source=source, note=heeded or None, turn=turn,
-                                           client=device_id) is not False:
+                                           client=device_id, **timings) is not False:
                         break
         except Exception as error:  # Its row stays queued, and the next start gives it again.
+            if trace:
+                trace.finish("not_dispatched")
             self.voice_turns.pop(turn, None)
             self.c.log("phone_ask_failed", turn=turn, error=repr(error))
             self.c.journal_write("command_done", device_id, command_id, "failed")
