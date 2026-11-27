@@ -182,45 +182,6 @@ ROSTER_TABLES = (
     )
     """,
 )
-# The silent outbox's ledger (desktop/actions.py): one row per action order, under the actor that runs it. ledger_seq
-# grows by one at each change of state, from a counter in journal_meta that never goes back, so a reader that keeps
-# the highest seq it saw reads only what changed since. notified_state is the state a wake already told Rook of.
-ACTION_TABLES = (
-    """
-    CREATE TABLE IF NOT EXISTS actions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT NOT NULL UNIQUE,
-        actor TEXT NOT NULL DEFAULT 'rook-agent',
-        client TEXT NOT NULL,
-        conversation TEXT NOT NULL,
-        turn TEXT,
-        parent INTEGER,
-        kind TEXT NOT NULL DEFAULT 'task',
-        effect INTEGER NOT NULL DEFAULT 1,
-        wake INTEGER NOT NULL DEFAULT 0,
-        description TEXT NOT NULL,
-        order_text TEXT NOT NULL,
-        state TEXT NOT NULL,
-        at REAL NOT NULL,
-        started REAL,
-        progress REAL,
-        ended REAL,
-        result TEXT,
-        send_key TEXT,
-        ledger_seq INTEGER NOT NULL DEFAULT 0,
-        notified_state TEXT,
-        updated REAL NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_actions_open ON actions (client, state)",
-    "CREATE INDEX IF NOT EXISTS idx_actions_seq ON actions (ledger_seq)",
-)
-# Each state an action may move to from an open one. Every other state is an end.
-ACTION_MOVES = {"dispatched": ("running", "cancelled", "unknown"),
-                "running": ("confirmed", "failed", "stuck", "blocked", "cancelled", "unknown"),
-                "stuck": ("confirmed", "failed", "blocked", "cancelled", "unknown"),
-                "blocked": ("running", "confirmed", "failed", "stuck", "cancelled", "unknown")}
-ACTION_KEEP_SECONDS = 7 * 24 * 3600  # An ended action's row is dropped after this long.
 ROSTER_COLUMNS = ("orchestrator", "machine", "id", "project", "title", "status", "settled", "snoozed", "updated_at", "scope")
 EVENT_KEEP_SECONDS = 7 * 24 * 3600  # Events older than this are pruned at each start, a batch at a time.
 COMMAND_KEEP_SECONDS = 24 * 3600  # A device's command row, kept long past any retry of it.
@@ -266,7 +227,7 @@ class Journal:
             # created says this open made the tables: the first start with a record, whose cuts are still in the log.
             self.created = not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'requests'"
                                             ).fetchone()
-            for statement in TABLES + SEND_TABLES + EVENT_TABLES + ROSTER_TABLES + ACTION_TABLES:
+            for statement in TABLES + SEND_TABLES + EVENT_TABLES + ROSTER_TABLES:
                 conn.execute(statement)
             # brain names the Rook that owns a request, which recovers it at a restart; client is who sent it.
             if "brain" not in {row[1] for row in conn.execute("PRAGMA table_info(requests)")}:
@@ -882,98 +843,6 @@ class Journal:
         return self.write("UPDATE notices SET text = ? WHERE client = ? AND kind = 'cut' AND at = ? AND offered = 0 "
                           "AND cleared IS NULL", (text, self.client, at)).rowcount > 0
 
-    def action_seq(self):
-        """The next ledger seq, in the open transaction. The caller holds the lock."""
-        row = self.conn.execute("SELECT value FROM journal_meta WHERE key = 'action_seq'").fetchone()
-        seq = (int(row[0]) if row else 0) + 1
-        self.conn.execute("INSERT OR REPLACE INTO journal_meta (key, value) VALUES ('action_seq', ?)", (str(seq),))
-        return seq
-
-    def dispatch_action(self, key, *, actor="rook-agent", client=None, conversation="", turn=None, kind="task",
-                        effect=1, wake=0, description="", order_text="", parent=None, send_key=None):
-        """The row of an action order Rook just dispatched, written before the outbox takes it. Like a request's
-        first row, it waits for the disk (synchronous FULL). Return the row as a dict."""
-        now = time.time()
-        with self.lock:
-            self.conn.execute("PRAGMA synchronous = FULL")
-            try:
-                with self.transaction():
-                    self.conn.execute(
-                        "INSERT INTO actions (key, actor, client, conversation, turn, parent, kind, effect, wake, "
-                        "description, order_text, state, at, send_key, ledger_seq, updated) VALUES (?, ?, ?, ?, ?, ?, "
-                        "?, ?, ?, ?, ?, 'dispatched', ?, ?, ?, ?)",
-                        (key, actor, client or self.client, conversation, turn, parent, kind, int(effect), int(wake),
-                         description[:200], order_text, now, send_key, self.action_seq(), now))
-                return dict(self.conn.execute("SELECT * FROM actions WHERE key = ?", (key,)).fetchone())
-            finally:
-                self.conn.execute("PRAGMA synchronous = NORMAL")
-
-    def action_transition(self, key, state, *, result=None, progress_only=False, send_key=None, notified_state=None):
-        """Move an action to state, with its times and one-line result, and the next ledger seq. A move ACTION_MOVES
-        does not allow changes nothing and returns None. A move to the state it is in keeps its seq and sets only the
-        fields given. progress_only is a heartbeat of a running action: only its progress time changes. Return the
-        row as a dict."""
-        now = time.time()
-        with self.lock, self.transaction():
-            row = self.conn.execute("SELECT * FROM actions WHERE key = ?", (key,)).fetchone()
-            if row is None or row["state"] not in ACTION_MOVES:
-                return None
-            if progress_only:
-                self.conn.execute("UPDATE actions SET progress = ?, updated = ? WHERE key = ?", (now, now, key))
-            elif state == row["state"] or state in ACTION_MOVES[row["state"]]:
-                moved = state != row["state"]
-                self.conn.execute(
-                    "UPDATE actions SET state = ?, result = coalesce(?, result), send_key = coalesce(?, send_key), "
-                    "notified_state = coalesce(?, notified_state), started = CASE WHEN ? = 'running' THEN "
-                    "coalesce(started, ?) ELSE started END, ended = CASE WHEN ? THEN ? ELSE ended END, "
-                    "ledger_seq = CASE WHEN ? THEN ? ELSE ledger_seq END, updated = ? WHERE key = ?",
-                    (state, result, send_key, notified_state, state, now, state not in ACTION_MOVES, now, moved,
-                     self.action_seq() if moved else 0, now, key))
-            else:
-                return None
-            return dict(self.conn.execute("SELECT * FROM actions WHERE key = ?", (key,)).fetchone())
-
-    def unread_actions(self, since_seq, *, limit=12):
-        """(rows, max_seq): this client's actions changed after since_seq, oldest change first. max_seq is the
-        highest seq among them, or since_seq when there are none, so the rest come with the next read."""
-        rows = [dict(row) for row in self.read("SELECT * FROM actions WHERE client = ? AND ledger_seq > ? ORDER BY "
-                                               "ledger_seq LIMIT ?", (self.client, since_seq, limit))]
-        return rows, max([since_seq] + [row["ledger_seq"] for row in rows])
-
-    def list_actions(self, *, open_only=False, limit=25):
-        """This client's actions, the newest first. open_only keeps those not ended yet."""
-        return [dict(row) for row in self.read(
-            "SELECT * FROM actions WHERE client = ?" + (f" AND state IN {tuple(ACTION_MOVES)}" if open_only else "")
-            + " ORDER BY id DESC LIMIT ?", (self.client, limit))]
-
-    def get_action(self, key):
-        row = self.read("SELECT * FROM actions WHERE key = ?", (key,))
-        return dict(row[0]) if row else None
-
-    def seen_actions(self, seq):
-        """Keep the highest ledger seq a turn carried and finished cleanly, so a restart tells the rest again."""
-        with self.lock, self.transaction():
-            self.conn.execute("INSERT OR REPLACE INTO journal_meta (key, value) VALUES ('action_seen', ?)", (str(seq),))
-
-    def recover_actions(self):
-        """At a start: an action an earlier Rook left running, stuck or blocked ends as unknown, and one it never
-        began ends as cancelled, each with a new seq. Ended rows past their age are dropped. Return the seq seen_actions
-        kept, or with none the highest seq from before these changes, so the first turn's delta tells of them."""
-        now = time.time()
-        with self.lock, self.transaction():
-            high = (self.conn.execute("SELECT value FROM journal_meta WHERE key = 'action_seen'").fetchone()
-                    or self.conn.execute("SELECT value FROM journal_meta WHERE key = 'action_seq'").fetchone())
-            for row in self.conn.execute(f"SELECT key, state FROM actions WHERE client = ? AND state IN "
-                                         f"{tuple(ACTION_MOVES)} ORDER BY ledger_seq", (self.client,)).fetchall():
-                state, result = (("cancelled", "Rook restarted before it began, so it never ran.")
-                                 if row["state"] == "dispatched" else
-                                 ("unknown", "Rook restarted while it ran, so its outcome is unknown."))
-                self.conn.execute("UPDATE actions SET state = ?, result = ?, ended = ?, ledger_seq = ?, updated = ? "
-                                  "WHERE key = ?", (state, result, now, self.action_seq(), now, row["key"]))
-            self.conn.execute(f"DELETE FROM actions WHERE client = ? AND state NOT IN {tuple(ACTION_MOVES)} AND "
-                              "updated < ?", (self.client, now - ACTION_KEEP_SECONDS))
-        return int(high[0]) if high else 0
-
 
 def card_event(key, turn, tool, summary):
     """A waiting card as a client sees it, from what the record keeps: never the tool's input. A question with
@@ -1114,7 +983,7 @@ def check():
     for scope in (tree.body, journal_class.body):
         names = [node.name for node in scope if isinstance(node, ast.FunctionDef)]
         assert len(names) == len(set(names)), names
-    tables = re.findall(r"CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)", "".join(TABLES + SEND_TABLES + ACTION_TABLES))
+    tables = re.findall(r"CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)", "".join(TABLES + SEND_TABLES))
     assert len(tables) == len(set(tables)), tables
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "rook/mailbox.db"
@@ -1217,9 +1086,14 @@ def check():
         # opens it again with every row.
         with mailbox._connect(path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == mailbox.SCHEMA_VERSION == 2
+            # A file from a Rook that had the retired action ledger opens as before, and its rows stay.
+            conn.execute("CREATE TABLE actions (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, state TEXT)")
+            conn.execute("INSERT INTO actions (key, state) VALUES ('act-1', 'confirmed')")
+            conn.execute("INSERT INTO journal_meta (key, value) VALUES ('action_seq', '1')")
         mailbox.observe("reminder", "Renew the passport.", path=path)
         again = Journal(path).open()
         assert len(again.read("SELECT * FROM requests")) == 5 and mailbox.items(path=path)[0]["kind"] == "reminder"
+        assert [tuple(row) for row in again.read("SELECT key, state FROM actions")] == [("act-1", "confirmed")]
         # Events: each beside the change it describes, published after the commit in order, two for a turn.
         record = Journal(Path(folder) / "events/mailbox.db").open()
         heard = []

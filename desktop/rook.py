@@ -71,7 +71,6 @@ else:
     except ImportError:
         InputDevice = ecodes = list_devices = None
 
-import actions  # The silent outbox: {do: ...} orders, run in an agent session of their own, kept in a ledger.
 import constellation  # The diagram mark's parser; the overlay draws the diagram.
 import harness  # How Rook starts its main agent, writes to it, and reads from it.
 import journal  # The durable record of each request, and the notices the owner is owed after a restart.
@@ -144,10 +143,7 @@ LABELS = {"inbox": f"Message from a T3 thread, not something {OWNER} said.",
                   "for it just now.",
           "batch": f"Messages that waited, not something {OWNER} said.",
           "back": f"You are back online after being dark, not something {OWNER} said.",
-          "nudge": f"Rook's own reminder of something that waits on {OWNER}, not something {OWNER} said.",
-          "action": f"A report from your silent outbox, not something {OWNER} said. When {OWNER} waits for its answer, "
-                    f"give it in a sentence or two. A failed, stuck or blocked action: tell {pn('him')} in one short "
-                    "sentence when it matters, and otherwise answer PASS."}
+          "nudge": f"Rook's own reminder of something that waits on {OWNER}, not something {OWNER} said."}
 # Who each request came from in the replay, by the source its request row names. A source missing here is never
 # The owner: only spoken and typed requests are their words.
 SPEAKERS = {"spoken": f"{OWNER_START} said", "typed": f"{OWNER_START} typed", "test": f"A typed test from the build thread, not {OWNER}",
@@ -158,8 +154,7 @@ SPEAKERS = {"spoken": f"{OWNER_START} said", "typed": f"{OWNER_START} typed", "t
             "show": f"A T3 thread showed {OWNER} a picture or a video, not {OWNER}",
             "batch": f"Messages that waited reached you together, not {OWNER}",
             "back": f"You came back online after being dark, not {OWNER}",
-            "nudge": f"You reminded {OWNER} of something that waits, not {OWNER}",
-            "action": f"Your silent outbox reported, not {OWNER}"}
+            "nudge": f"You reminded {OWNER} of something that waits, not {OWNER}"}
 # Messages that are news, not tasks: thread messages, watcher news, and Rook's notes about its parts. One that
 # waited longer than BATCH_AFTER_SECONDS between coming in and its hand-over goes in one turn with every other such
 # message waiting then, oldest first, for Claude to judge what still matters. A fresh one goes alone at once.
@@ -710,8 +705,8 @@ def spoken_lead(answer):
 
 
 def undiagrammed(text):
-    """text with every diagram mark and outbox mark taken out, and the opener of a mark too long to be one."""
-    return actions.parse_do_marks(DIAGRAM_OPENER.sub("", DIAGRAM_MARK.sub("", text)))[0]
+    """text with every diagram mark taken out, and the "{diagram" of a mark too long to be one."""
+    return DIAGRAM_OPENER.sub("", DIAGRAM_MARK.sub("", text))
 
 
 def unmarked(text):
@@ -2033,7 +2028,7 @@ class Inbox(asyncio.Queue):
     status notes, task timers that came due, threads' media shows, and the note of a startup report also stay in the
     durable store (or inbox.json without one) until they are delivered, so a restart loses none. Watcher news is not
     kept, since the watcher repeats it after a restart, and game events are stale by then."""
-    KEPT = ("inbox", "status", "timer", "show", "startup", "action")
+    KEPT = ("inbox", "status", "timer", "show", "startup")
 
     def __init__(self, path, run_write=None, run_write_async=None, initial=None):
         super().__init__()
@@ -2418,12 +2413,6 @@ class Companion:
     held_timers = ()  # (arrived, text) -> timer metadata for due task timers waiting in inbox; a dict in __init__.
     cancelled_inbox = ()  # (arrived, text) of held task timers cancelled before delivery; a set in __init__.
     deliver_hold_reason = None  # Current hold reason in deliver_one, for relay.py timer list.
-    action_agent = False  # Whether the silent outbox runs in this start (the action_agent setting).
-    outbox = None  # The silent outbox's worker (actions.ActionOutbox) while it runs.
-    last_ledger_seq = 0  # The highest outbox ledger seq a turn of the owner's carried and finished cleanly.
-    ledger_turns = {}  # turn -> the ledger seq it carries, until it ends; a dict in __init__ when the outbox runs.
-    agent_servers = {}  # The tool servers of the main agent's last launch, which the outbox's session shares.
-    turn_orders = ()  # Outbox orders the streamed answer carried, dispatched when its turn ends.
     timer_tick_at = 0.0  # Wall-clock time of the last run_timers tick; initialized to self.started.
     last_matt_wall = 0.0  # Wall-clock time of the owner's latest desk request, for releasing video-held updates.
     matt_turn_seq = 0  # Counter incremented on each desk request from the owner.
@@ -2661,8 +2650,6 @@ class Companion:
         self.harness, problem = harness.pick(self.agent_choice)
         self.speak_thoughts = relay.speak_thoughts_in_force(saved_settings)[0]
         self.beats_started = self.speak_thoughts in ("beats", "both")
-        # The silent outbox, read once per start like the agent: its prompt paragraph and worker go together.
-        self.action_agent = relay.settings.action_agent_in_force(saved_settings)[0] == "on"
         self.harness.narrate_thoughts = self.speak_thoughts in ("thoughts", "both")
         self.harness.narrate_beats = self.beats_started
         self.agent_name = self.agent_choice.get("agent", "claude")  # Its name in the agent setting.
@@ -3042,18 +3029,6 @@ class Companion:
                   "names. name:icon picks an icon, * marks the main node, > is an arrow, - a plain line, a comma "
                   "fans out, and ; starts another chain. The mark is never spoken, and each node lights as your "
                   "voice names it.\n"))
-        if self.action_agent:
-            prompt += render(
-                "\nYou have a silent outbox: a second agent of yours that carries out orders in the background while "
-                "you keep talking. To hand it an action, such as a message to send or a setting to change, put one "
-                "mark in your spoken answer, such as {do: turn off the desk lamp}. For a lookup whose answer "
-                f"{OWNER} wants to hear, write {{do wake: look up the build status}}. The mark is never spoken. Say "
-                "only that you are on it, never that it is done: a routine result reaches you silently, in a ledger "
-                f"block at the end of {OWNER}'s next request, and a failure, a stuck action or a lookup's answer "
-                "comes to you as a report. Never claim an action is done before the ledger says confirmed. Never "
-                "mention the outbox or your agent unless an action failed or is stuck. Anything you must answer now "
-                f"you still do with your own tools. {_desk.python_exe()} {ROOT}/desktop/relay.py actions lists the open "
-                f"actions, and actions cancel with a key stops one when {OWNER} asks.\n")
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
@@ -3067,7 +3042,6 @@ class Companion:
         if t3 := t3_server():
             servers["t3"] = t3
         servers.update(plugin_loader.server_configs())  # Active plugins' tool servers, after Rook's own.
-        self.agent_servers = servers
         self.t3_status = None
         workspace = Path(self.args.workspace)
         if not workspace.is_dir():
@@ -3282,7 +3256,6 @@ class Companion:
         at the desk. A device's request returns False, unsent, when a turn started while it waited here: it never
         joins another turn."""
         report, mail, release, carried, checkin_ids, lines, prefs_update = None, None, False, [], [], "", ""
-        ledger, ledger_seq = (), 0
         given = text  # As it came, for the watchdog to give again: the held report and fresh lines are added anew.
         spend = []  # What the mailbox lines use up, such as a check-in: it runs only once the turn really goes.
         self.end_listen_after()  # A new turn closes a listen window at once.
@@ -3302,12 +3275,6 @@ class Companion:
             # Every await of the mailbox comes before the turn is registered, so nothing can come between the two.
             lines, checkin_ids, release = await self.mailbox_lines(self.held_note is not None, spend)
             carried = carried + checkin_ids
-            if self.outbox:  # The outbox's ledger rows that changed since the last delta, appended to this turn alone.
-                try:
-                    ledger, ledger_seq = await asyncio.wait_for(self.outbox.unread(self.last_ledger_seq), MAILBOX_SECONDS)
-                except Exception as exc:
-                    self.log("action_error", error=repr(exc))
-                    ledger = ()
         if not self.agent or self.agent.returncode is not None:
             await self.launch_agent()
         # A question sent during the warm-up can be folded into it and lost. Wait for it to end.
@@ -3445,9 +3412,6 @@ class Companion:
             now += "\n" + prefs_update
         # Every part passes as it is: whoever made it filled the owner tokens in Rook's own words, and the data inside,
         # such as a thread's message, a mailbox line, the preferences file, a window title or game data, is never rendered.
-        if ledger:  # At the end of the turn, so nothing before it changes and the agent's cached prefix holds.
-            text += "\n\n" + actions.format_ledger_delta(ledger)
-            self.ledger_turns[self.latest_turn] = ledger_seq  # Seen only once this turn ends cleanly.
         self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
                           steer)
         silent = (self.latest_turn, given, label, shots, source, once, client, report, time.monotonic())
@@ -3515,7 +3479,6 @@ class Companion:
                             self.last_reply = {"spoken": failed, "details": error}
                             self.speak()
                         continue
-                live = bool(self.pending_turns.intersection(completed)) or completed == [None] and len(self.pending_turns) == 1
                 self.pending_turns.difference_update(completed)
                 if completed == [None] and len(self.pending_turns) == 1:
                     completed = list(self.pending_turns)
@@ -3531,18 +3494,6 @@ class Companion:
                     answer = failed
                 if not message.get("is_error"):
                     answer = self.strip_pass(answer)
-                # The streamed blocks' marks, and any in the written part the stream did not read, once each.
-                orders, self.turn_orders = (*self.turn_orders, *actions.parse_do_marks(answer)[1]), ()
-                # Only a live turn that ran to its end dispatches: a stopped turn is no longer pending, even if agy
-                # releases a held turn with terminal_reason completed.
-                clean = live and not message.get("is_error") and (message.get("terminal_reason")
-                                                                  or message.get("subtype")) in ("completed", "success")
-                if self.outbox and orders and clean:  # The voice turn does not wait for them.
-                    self.loop.create_task(self.dispatch_orders(orders, completed[-1]))
-                for turn in completed:  # A ledger delta counts as seen once its turn ends cleanly, and only then.
-                    if (seq := self.ledger_turns.pop(turn, None)) is not None and clean and seq > self.last_ledger_seq:
-                        self.last_ledger_seq = seq
-                        self.journal_write("seen_actions", seq)
                 # The diagram mark leaves the spoken text too, so it matches what the stream spoke.
                 diagram, marked, answer = DIAGRAM_MARK.search(answer), undiagrammed(answer), unmarked(answer)
                 muted = self.latest_turn in completed and (self.dark_muted() or self.latest_turn in self.phone_turns)
@@ -3645,8 +3596,6 @@ class Companion:
                         self.stream_text = self.strip_pass(self.stream_text + event["delta"]["text"])
                         if "{" in self.stream_text:
                             self.take_diagram()
-                            self.stream_text, orders = actions.take_closed_marks(self.stream_text)  # Never spoken.
-                            self.turn_orders = (*self.turn_orders, *orders)
                         if (self.phone and self.phone.subscribers and not self.warming
                                 and self.latest_turn in self.pending_turns):
                             self.phone.draft(self.latest_turn, unmarked(self.stream_text))
@@ -3661,8 +3610,6 @@ class Companion:
                         elif self.stream_prefix is None:
                             self.speak_first()
                     case "content_block_stop" if self.stream_text:
-                        self.stream_text, orders = actions.parse_do_marks(self.stream_text)  # A mark the block closed.
-                        self.turn_orders = (*self.turn_orders, *orders)
                         self.speak_stream(answer=False)
             elif kind == "assistant":
                 self.turn_tools += [block.get("name") for block in message["message"]["content"]
@@ -3809,7 +3756,6 @@ class Companion:
         self.pending_turns.clear()
         self.silent_turns = ()
         self.stream_text = None
-        self.turn_orders = ()  # The orders of a turn the agent never finished never run.
         self.finish_deferred(heard=False)
         # A warm-up that never finished must not hold back typed and unprompted turns. The next turn
         # starts a new Claude Code, as a spoken turn does.
@@ -3966,63 +3912,6 @@ class Companion:
             if report is not None and self.held_note is None:  # The held report goes along as it did, not as words.
                 self.held_note = report
             await self.submit(text, label, shots, source=source, note=note or None, turn=turn)
-
-    async def start_hands(self):
-        """Start the silent outbox's own agent session: a new instance of the chosen agent, with the main agent's
-        tool servers but none that draws on the screen. It shares nothing with the main session but the record."""
-        # The agent Rook runs on now: after a fallback, Claude Code with its defaults, as the main session.
-        choice = self.agent_choice if not self.fallback else {
-            "agent": "claude", "permission_mode": self.agent_choice.get("permission_mode")}
-        hands, problem = harness.pick(choice)
-        if problem:
-            self.log("outbox_fallback", reason=problem)
-        hands.plain_prompt, hands.runtime_tag = True, "-hands"  # Hands' prompt is not Rook's. Its files are its own.
-        hands.workspace = getattr(self.harness, "workspace", None) or str(Path.home())
-        session = str(uuid4())
-        servers = {name: spec for name, spec in self.agent_servers.items() if name not in ("render", "wow")}
-        prompt = actions.HANDS_PROMPT + (f"\n\nRook's command tool is {_desk.python_exe()} {ROOT}/desktop/relay.py, "
-                                         "and --help lists its commands. Never run its tell, ask or dark commands.")
-        process = await asyncio.create_subprocess_exec(
-            *hands.command(prompt, servers, session, ROOT / "plugin", T3_DENIED), cwd=hands.workspace,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env={**os.environ, "ROOK_AGENT": "1"})
-        self.log("outbox_started", agent=hands.name, model=hands.model)
-        return actions.HarnessSession(hands, process, session, messages, self.name_skills(hands.setup({}, [], False)))
-
-    async def dispatch_orders(self, orders, turn):
-        """Write each order's dispatched row and hand it to the outbox, once each, in the answer's order. The send
-        cue shows it pending: Rook is on it, and only the ledger says it is done."""
-        given = set()
-        for order in orders:
-            if order["order"] in given:  # A paragraph said again, as a dive's repeat, dispatches once.
-                continue
-            given.add(order["order"])
-            try:
-                row = await self.outbox.dispatch(order["order"], wake=order["wake"], conversation=self.session,
-                                                 turn=turn)
-            except Exception as exc:
-                self.log("action_error", error=repr(exc))
-                self.inbox.put_nowait(("action", f"URGENT: Your silent outbox could not take the order "
-                                                 f"\"{order['order']}\" ({type(exc).__name__}), so it never ran."))
-                continue
-            self.show(None, send=[{"id": row["key"], "name": row["description"], "outcome": "pending"}])
-
-    def action_woke(self, row):
-        """An outbox row Rook judges now, as an action turn: urgent for a failed, stuck or blocked action."""
-        self.inbox.put_nowait(("action", ("URGENT: " if row["state"] in actions.WAKE_STATES else "")
-                               + actions.wake_text(row)))
-
-    async def actions_request(self, command, key):
-        """relay.py actions: the outbox's open or latest rows, or a cancel."""
-        if not self.journal:
-            return {"ok": False, "error": "Rook's record is unavailable, so there is no outbox ledger."}
-        if command == "cancel":
-            row = await (self.outbox.cancel(key) if self.outbox else asyncio.to_thread(
-                self.journal.action_transition, key, "cancelled", result="Cancelled before it began."))
-            row = row or await asyncio.to_thread(self.journal.get_action, key)
-            return {"ok": True, "actions": [row]} if row else {"ok": False, "error": f"No action has the key {key}."}
-        if command not in ("list", "all"):
-            return {"ok": False, "error": "Usage: relay.py actions [list|all|cancel KEY]"}
-        return {"ok": True, "actions": await asyncio.to_thread(self.journal.list_actions, open_only=command == "list")}
 
     def answer_permission(self, allowed, answers=None, card=None):
         """Answer the shown card. card is the id of the card the answer was given to, on every client: an answer
@@ -4190,7 +4079,6 @@ class Companion:
         self.stop_voice()
         self.end_listen_after()
         self.turn_timing = None
-        self.turn_orders = ()  # A stopped turn's orders never run.
         if self.staged:  # The owner pressed Stop, so the staged scene never shows.
             self.show(None, render={"reveal": self.staged, "drop": True})
             self.staged = None
@@ -5096,8 +4984,6 @@ class Companion:
             return {"ok": True, "threads": self.roster.listing()}
         if verb == "timer":
             return self.timer_request(arg.strip(), body.strip())
-        if verb == "actions":
-            return await self.actions_request(arg.strip(), body.strip())
         if verb == "dark":
             return self.dark_request(arg.strip(), body.strip())
         if verb == "idle":  # relay.py daily-restart restarts Rook only when idle says so.
@@ -8369,17 +8255,6 @@ class Companion:
         inbox = await asyncio.start_unix_server(self.receive, INBOX)
         INBOX.chmod(0o600)
         await self.launch_agent()
-        if self.journal:  # Actions an earlier Rook left open end now, and the first delta tells of them.
-            try:
-                self.last_ledger_seq = await asyncio.to_thread(self.journal.recover_actions)
-            except Exception as exc:
-                print(f"rook: the outbox ledger could not be recovered: {type(exc).__name__}", file=sys.stderr)
-            else:
-                if self.action_agent:  # Its session starts at the first order, on the agent Rook runs on.
-                    self.outbox = actions.ActionOutbox(self.journal, self.start_hands, self.action_woke, self.log)
-                    self.ledger_turns = {}
-                    self.keep("outbox", self.outbox.work, optional=True)
-                    self.keep("outbox watch", self.outbox.watch, optional=True)
         if self.journal:  # The phone's server, on loopback, a task of its own: it never holds the start up.
             self.phone_task = self.loop.create_task(self.phone.start())
         mac_helper_path = getattr(self.args, "mac_helper", None) or os.environ.get("ROOK_MAC_HELPER")
@@ -8444,10 +8319,8 @@ class Companion:
             await self.shutdown_media_duck()
             for device in list(devices.values()):
                 drop(device)
-            hands = self.outbox and self.outbox.session and self.outbox.session.process
             await asyncio.gather(*(self.stop_child(process) for process in
-                                   (self.overlay, getattr(self, "mac_helper", None), self.voice, self.agent, hands)
-                                   if process))
+                                   (self.overlay, getattr(self, "mac_helper", None), self.voice, self.agent) if process))
 
     async def stop_child(self, process):
         """End a child at shutdown. Each child exits at the end of its input. Only one that does not is
@@ -9598,7 +9471,7 @@ def check_agent():
             prefs_path = Path(folder) / "model-preferences.md"
             MODEL_PREFERENCES = prefs_path
             antigravity_home.HOME = Path(folder) / "agy"
-            antigravity_home.build = lambda wow=False, home=None: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
+            antigravity_home.build = lambda wow=False: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
             antigravity_home.memory = lambda workspace: "machine: oak"
             codex_harness.HOME = Path(folder) / "codex"
             codex_harness.memory = lambda workspace, agents_dir=None: "machine: oak"
@@ -9926,30 +9799,6 @@ def check_agent():
                 procs[0].feed({"type": "result", "user_message_uuids": [c.latest_turn], "result": "PASS",
                                "terminal_reason": "completed"})
                 await until(lambda: not c.pending_turns)
-                # The silent outbox: only a turn that ran to its end dispatches its orders and counts its ledger delta
-                # as seen. agy reports a stopped turn as cancelled with no error, and a stop drops the streamed orders.
-                c, procs, sent, lines, rows = await silent_session()
-                given, row = [], {"updated": time.time(), "actor": "rook-agent", "key": "act-1", "state": "confirmed",
-                                  "description": "Water the plants", "result": None, "ledger_seq": 5}
-                c.outbox, c.ledger_turns = SimpleNamespace(unread=lambda seq: asyncio.sleep(0, ([row], 5))), {}
-                c.dispatch_orders = lambda orders, turn: asyncio.sleep(0, given.append([o["order"] for o in orders]))
-                for reason in ("cancelled", "interrupted", "completed"):
-                    await c.submit("Turn off the lamp.", source="spoken")
-                    assert "act-1 confirmed" in sent[-1][2] and c.last_ledger_seq == 0, (reason, c.last_ledger_seq)
-                    procs[0].feed({"type": "result", "user_message_uuids": [c.latest_turn], "terminal_reason": reason,
-                                   "result": "On it. {do: turn off the lamp}"})
-                    await until(lambda: not c.pending_turns)
-                await asyncio.sleep(0.05)
-                assert given == [["turn off the lamp"]] and c.turn_orders == () and c.last_ledger_seq == 5, given
-                await c.submit("Dim the lights.", source="spoken")
-                stopped_turn = c.latest_turn
-                c.turn_orders = ({"wake": False, "kind": "task", "order": "dim the lights"},)
-                await c.submit("Stop.", source="spoken")
-                await until(lambda: not c.pending_turns)
-                procs[0].feed({"type": "result", "user_message_uuids": [stopped_turn], "terminal_reason": "completed",
-                               "result": "Dimming them. {do: dim the lights}"})
-                await asyncio.sleep(0.05)
-                assert c.turn_orders == () and given == [["turn off the lamp"]], (c.turn_orders, given)
                 # The owner's stop word. Point 1: the rule, as a table: the reviewer's sentences, the owner's own two, and more.
                 # A stop phrase counts only before a pause or a joining word; an opening no only when repeated or
                 # followed by a stop. Filler first is skipped. A stop later in the words or after a negation never counts.
@@ -19907,7 +19756,7 @@ def check_desktop():
                 MODEL_PREFERENCES = base / "no-prefs.md"
                 t3_server = lambda: None
                 antigravity_home.HOME = base / "agy-prompt"
-                antigravity_home.build = lambda wow=False, home=None: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
+                antigravity_home.build = lambda wow=False: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
                 antigravity_home.memory = lambda workspace: ""
                 antigravity_home.AGENTS = base / "no-agents"
                 antigravity_home.GEMINI_SKILLS = base / "no-gemini-skills"
