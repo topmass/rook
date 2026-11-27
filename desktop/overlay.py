@@ -55,12 +55,12 @@ Protocol, stdin (one JSON object per line):
     turn shows nothing while Rook is dark.
     {"stage": true} draws diagrams and the answer panel in the stage host (stage/host.py) instead of the swarm and the
     panel window, with the same messages and answers; when the host cannot start or dies, the overlay draws as before.
-    {"render": {"id": "7", "scene": {...}}} has the swarm form a scene of the render tool (see desktop/render.py);
-    {"render": {"id": "8", "step": 2}} lights its second step (0 for none), and {"render": {"id": "9", "clear": true}}
-    ends it. A scene sent with "stage": true is baked and answered but not shown. {"render": {"reveal": "7"}} shows it,
-    and {"render": {"reveal": "7", "drop": true}} drops it. The overlay checks every scene before it draws anything. A
-    scene holds over the turn's other forms and stays SCENE_SECONDS (render.py) after the turn ends; the owner's next turn
-    ends it.
+    {"render": {"id": "7", "diagram": {"graph": "a > b", "title": ""}}} has the swarm form a constellation (see
+    desktop/constellation.py); {"render": {"id": "8", "step": 2}} lights its second node (0 for none, a list for
+    several), and {"render": {"id": "9", "clear": true}} ends it. A diagram sent with "stage": true is answered but not
+    shown. {"render": {"reveal": "7"}} shows it, and {"render": {"reveal": "7", "drop": true}} drops it. An old
+    {"render": {"scene": ...}} gets a refusal. A diagram holds over the turn's other forms and stays SCENE_SECONDS
+    (render.py) after the turn ends; the owner's next turn ends it.
     {"send": [{"id": "k1", "name": "Rook build", "project": "rook", "machine": "oak", "outcome": "pending"}, ...]}
     starts or updates the multi-thread dispatch fan. Each object in the list has:
       - "name" (required string; "thread" accepted as alias): plain-text thread title, control chars stripped, capped at
@@ -154,12 +154,10 @@ import devs_pack  # Data-driven Devs theme pack manifest and 3D form registry.
 import pack_player  # Switchable theme pack loader and flipbook atlas player (FORMAT.md).
 import constellation  # A diagram the model writes as one line, drawn by the presence's own grains.
 import filament  # How a constellation looks: filament lines its grains build, light and carry home.
-import render as scenes  # The render tool's scene format, checker and sampler, beside this file.
+import render as scenes  # The dust scene format; the overlay reads its label type and timings.
 import stage_link  # The stage host's link, for diagrams and the panel when the stage setting is on.
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango, PangoCairo
 from gi.repository import Gtk4LayerShell as LayerShell
-import settings  # noqa: E402
-OWNER = settings.OWNER_TOKEN  # The owner's name, filled in when the text leaves Rook.
 
 # The media viewer plays video with GStreamer when it is there; without it the viewer shows pictures only.
 try:
@@ -705,8 +703,6 @@ VIEW_DUST = os.environ.get("ROOK_VIEW_DUST", "gl")
 DUST_SURFACE = os.environ.get("ROOK_DUST_SURFACE") == "1"
 # For a live test: ROOK_DUST_FRAMES=<file> logs each frame of the dust surface (when, the gap since the last, its cost).
 DUST_FRAMES = os.environ.get("ROOK_DUST_FRAMES")
-# Diagram living-grains GL mode: "direct" blends in hardware, "bbox" clips union resolve, "full" resolves all.
-DIAGRAM_LIVE_MODE = os.environ.get("ROOK_DIAGRAM_LIVE", "direct")
 VIEW_DUCK = 0.25  # A video's sound drops to this during a turn, so Rook hears the owner over it.
 VIEW_AUDIO_SINK = None  # None plays through the desktop's sound; a test sets "fakesink".
 
@@ -3712,8 +3708,6 @@ RENDER_HOLD = 1.2  # The overlay keeps its larger canvas this long after a scene
 RENDER_FPS = 30  # How often a scene moves once it has formed, so a scene on screen costs the game less.
 RENDER_TYPE = {kind: (_font("Noto Serif", px, Pango.Weight.HEAVY), spacing)
                for kind, (px, spacing, _) in scenes.LABEL_TYPE.items()}
-scenes._measure_label_px("A", "diagram")  # Warm Pango label measurement off the first scene's validate() path.
-RENDER_LINE = 520  # The line under a scene (its title or the step's caption) wraps at this or the drawing's width.
 RENDER_TOP = 12  # A tall scene moves down until its top, labels too, sits this far below the canvas's top.
 
 
@@ -3728,6 +3722,11 @@ def _interleave(form):
         if key in form:
             form[key] = [form[key][k] for k in order]
     form["parents"] = list(range(GRAINS)) + [k * GRAINS // n for k in order[GRAINS:]]
+
+
+# The answer to an old scene request: the filament diagram replaced the scene tool (2026-11-27).
+SCENE_GONE = ("show_scene and show_step are gone. Call show_diagram with a graph such as \"browser > dns > server\", or "
+              "start your answer with the {diagram} mark.")
 
 
 def _scene_step_answer(steps, step):
@@ -5252,10 +5251,9 @@ class Scene:
 
     # ---- the render tool's scenes ----
     def render_command(self, spec, now):
-        """Show a scene, light a step of the scene on screen, or clear it. The scene is checked here, before anything
-        is drawn: a scene with problems shows nothing, and the answer lists every problem with its fix."""
+        """Show a diagram, light a step of the diagram on screen, or clear it."""
         if not isinstance(spec, dict):
-            return {"ok": False, "error": "A render request needs a scene, a step, or clear."}
+            return {"ok": False, "error": "A render request needs a diagram, a step, or clear."}
         shown = self.render is not None and self.render_end is None
         if spec.get("clear"):
             self.end_render(now)
@@ -5266,24 +5264,15 @@ class Scene:
                 return {"ok": False, "error": "No scene is on screen. Show one first."}
             steps = self.render["scene"]["steps"]
             answer = _scene_step_answer(steps, step)
-            if answer["ok"] and self.render_form.get("kind") == "constellation":
+            if answer["ok"]:
                 self.render_form["con"].light(step, now)
-            elif answer["ok"]:
-                step = step[-1] if isinstance(step, list) else step
-                self._render_set(scenes.sample(self.render["scene"], step=step - 1 if step else None,
-                                               previous=self.render_form), now)
             return answer
         if "diagram" in spec:
             scene, form = self.diagram_form(spec["diagram"])
             if form is None:
                 return {"ok": False, "error": "A diagram needs two nodes joined by > or -."}
             return self.render_commit(scene, form, now)
-        scene, errors = scenes.validate(spec.get("scene"))
-        if errors:
-            return {"ok": False, "errors": errors}
-        form = scenes.sample(scene, previous=self.render_form if shown else None, entrance=self.diagram_entrance,
-                             dance=self.diagram_dance)
-        return self.render_commit(scene, form, now)
+        return {"ok": False, "error": SCENE_GONE}
 
     def diagram_form(self, doc):
         """A constellation's scene and form from {"graph", "title"} or a mark's inside, its names measured in their
@@ -5309,7 +5298,6 @@ class Scene:
                 "budget": len(con.recs), "recs": con.recs, "size": con.plan["size"], "step": None,
                 "parts": [], "labels": [], "notes": []}
         _interleave(form)  # The swarm's own grains spread over every node; the extra ones are born beside them.
-        form["part"] = form["move"] = []  # No stencil parts, so nothing for scenes._moving to fly.
         form["con"] = constellation.Constellation(con.plan, nodes, form["recs"])
         return scene, form
 
@@ -5370,15 +5358,8 @@ class Scene:
 
     @staticmethod
     def render_said(scene, form):
-        """The answer for a scene that shows, or that is staged to show at the reveal."""
-        if scene.get("nodes"):
-            return {"ok": True, "said": f"Showing {scene['nodes']} nodes."}
-        steps = len(scene["steps"])
-        said = (f"Showing {scene['name']} as {'a diagram' if scene['size'] == 'diagram' else 'an icon'} of "
-                f"{form['budget']} grains, with {len(scene['parts'])} parts"
-                + (f" and {steps} steps; call show_step to light each." if steps else ".")
-                + f" It stays until {scenes.SCENE_SECONDS} seconds after your answer ends, or until {OWNER} talks.")
-        return {"ok": True, "said": said + "".join(" " + note for note in form["notes"])}
+        """The answer for a diagram that shows, or that is staged to show at the reveal."""
+        return {"ok": True, "said": f"Showing {scene['nodes']} nodes."}
 
     def drop_render(self, now):
         """Drop a failed scene at once and return the swarm to its normal size."""
@@ -5408,63 +5389,27 @@ class Scene:
                 self.render_end = now - RENDER_FADE - 0.01
             elif self.render_end is None:
                 self.render_end = now
-            if self.render_form.get("kind") == "constellation":
-                self.render_form["con"].end(self.render_end)  # The lines hand the drawing back to the grains.
+            self.render_form["con"].end(self.render_end)  # The lines hand the drawing back to the grains.
 
     def _render_set(self, form, now):
         """Make form the scene's form. A form that follows a form on screen morphs, with a small arrival burst."""
         old = self.render_form
-        if form.get("kind") == "constellation":
-            if self.form == "render":
-                self.render_old, self.prev, self.form_at = old, "render_old", now
-                self.loosen, self.delay_scale = RENDER_LOOSEN, 1.0
-            form["start"] = now - self.render_since
-            self.render_form = form
-            h = form["size"][1] - 2 * constellation.PAD
-            # Centred on Rook, and moved down only as far as its top needs to stay on the canvas.
-            self.render["dy"] = dy = max(0.0, h / 2 - (self.lift + ORB / 2 - RENDER_TOP))
-            self.render["bottom"] = h / 2 + dy
-            self.render["lit"] = None
-            return
-        if form["budget"] > GRAINS and (old is None or old["budget"] != form["budget"]):
-            _interleave(form)
-        else:
-            form["parents"] = old.get("parents") if old else None
-        same_scene = old is not None and form.get("scene") is old.get("scene") and form.get("material")
-        if same_scene:
-            # Preserve each part's current lit level so rapid step changes never flash.
-            _, _, prev_lits, _, _ = scenes.material_state(old, now - self.render_since)
-            for p, lv in zip(form["parts"], prev_lits):
-                p["was_lit"] = lv
         if self.form == "render":
             self.render_old, self.prev, self.form_at = old, "render_old", now
-            self.loosen = 0.0 if same_scene else RENDER_LOOSEN
-            # Stagger swarm lift-off on same-scene steps, and reset when a new scene replaces it.
-            self.delay_scale = scenes.SWARM_SPREAD / 0.3 if same_scene else 1.0
-        form["start"] = now - self.render_since  # When a step's moved parts begin to fly (see scenes.flights).
-        if self._render_flying(form, now):
-            # A loose grain would trail far behind a moving part, so every grain holds tight while parts fly.
-            self.loose_until = [-math.inf] * len(self.x)
-            self.spring_unloose = True
+            self.loosen, self.delay_scale = RENDER_LOOSEN, 1.0
+        form["start"] = now - self.render_since
         self.render_form = form
-        # How far a tall scene moves down to stay on the canvas, the line under it, and how far the canvas must reach.
-        w, h = form["size"]
-        top = max([h / 2] + [-label["span"][1] for label in form["labels"]])
-        self.render["dy"] = dy = max(0.0, top - (self.lift + ORB / 2 - RENDER_TOP))
-        # The line sits 26 px under the drawing and its labels, so a title never reads as one more node label.
-        self.render["bottom"] = max([h / 2] + [label["span"][3] for label in form["labels"]]) + 26 + dy
-        self.render["lit"] = None if form["step"] is None else {
-            part["id"] for part in self.render["scene"]["parts"]
-            if scenes._lit(part, self.render["scene"]["steps"][form["step"]]["light"])}
+        h = form["size"][1] - 2 * constellation.PAD
+        # Centred on Rook, and moved down only as far as its top needs to stay on the canvas.
+        self.render["dy"] = dy = max(0.0, h / 2 - (self.lift + ORB / 2 - RENDER_TOP))
+        self.render["bottom"] = h / 2 + dy
+        self.render["lit"] = None
 
     def render_reach(self, now):
         """How far below the working centre the canvas must reach while a scene shows, or None."""
-        if self.render is not None and self.render_form.get("kind") == "constellation":
+        if self.render is not None:
             self.render_reach_px = int(self.render["bottom"] + constellation.PAD)  # Its own bounds and a margin.
             self.render_width_px = min(WIDTH, self.render_form["size"][0])
-        elif self.render is not None:
-            self.render_reach_px = int(self.render["bottom"] + 60)  # Room for three lines under the scene.
-            self.render_width_px = WIDTH
         elif now - self.render_gone > RENDER_HOLD:
             return None
         return self.render_reach_px
@@ -5516,43 +5461,13 @@ class Scene:
             self.blue_rank.append(rng.random())
         self.big_idx, self.grown_at = list(range(need)), now
 
-    def _render_pad(self, tx, ty, tb, bright):
-        """Targets for every grain from a form with fewer: each extra grain takes its parent's place and brightness
-        times bright."""
-        parents = (self.render_form or {}).get("parents") or [i % GRAINS for i in range(len(self.x))]
-        tx, ty, tb = list(tx), list(ty), list(tb)
-        for i in range(len(tx), len(self.x)):
-            p = parents[i] if i < len(parents) else i % GRAINS
-            tx.append(tx[p])
-            ty.append(ty[p])
-            tb.append(tb[p] * bright)
-        return tx, ty, tb
-
     def _render_targets(self, form, now):
-        """A scene's form now, by scenes.targets. A turning grain leads its target by the time its spring trails it,
-        so a gear's teeth stay sharp. A diagram's extra grains come in, and fade out, over RENDER_FADE. A constellation's
-        targets come from its own light state, with depth, as a presence form's do."""
-        if form.get("kind") == "constellation":
-            tx, ty, tb, self._target_z = form["con"].targets(now - self.render_since - form["start"], now,
-                                                              (self.render or {}).get("dy") or 0.0)
-            if len(self.x) > GRAINS and (level := self.render_level(now)) < 1.0:
-                tb = tb[:GRAINS] + [b * level for b in tb[GRAINS:]]
-            return tx, ty, tb
-        lead = None
-        if any(part["motion"] == "turn" for part in form["parts"]) or self._render_flying(form, now):
-            w = self.omega  # The swarm may have fewer grains than the form while it grows or after it shrinks.
-            n_w, pace, cohesion = len(w), self.pace, self.cohesion
-            lead = [1.1 / (w[i % n_w] * pace * cohesion) for i in range(len(form["x"]))]
-        tx, ty, tb = scenes.targets(form, now - self.render_since, lead)
-        dy = (self.render or {}).get("dy") or 0.0
-        if dy:
-            ty = [y + dy for y in ty]
-        if len(tx) < len(self.x):
-            tx, ty, tb = self._render_pad(tx, ty, tb, 1.0)
-        if len(self.x) > GRAINS:
-            level = self.render_level(now)
-            for i in range(GRAINS, len(tb)):
-                tb[i] *= level
+        """A constellation's form now: its targets come from its own light state, with depth, as a presence form's do.
+        A diagram's extra grains come in, and fade out, over RENDER_FADE."""
+        tx, ty, tb, self._target_z = form["con"].targets(now - self.render_since - form["start"], now,
+                                                          (self.render or {}).get("dy") or 0.0)
+        if len(self.x) > GRAINS and (level := self.render_level(now)) < 1.0:
+            tb = tb[:GRAINS] + [b * level for b in tb[GRAINS:]]
         return tx, ty, tb
 
     def render_level(self, now):
@@ -5562,94 +5477,19 @@ class Scene:
             level *= max(0.0, 1 - (now - self.fade_at) / RENDER_FADE)
         return level
 
-    def material_frame(self, now):
-        """Return active material render state for a diagram, or None when no material layer applies."""
-        if self.form != "render" or self.render is None or self.render_form is None:
-            return None
-        mat = self.render_form.get("material")
-        if mat is None:
-            return None
-        d = now - self.render_since
-        mats, glows, lits, reveal, fade = scenes.material_state(self.render_form, d)
-        if self.render_end is not None:
-            fade *= max(0.0, 1.0 - (now - self.render_end) / RENDER_FADE)
-        fade *= self.intensity
-        if fade <= 0.002:
-            return None
-        return (mat, mats, glows, lits, reveal, fade, (self.render or {}).get("dy") or 0.0,
-                self.render_form.get("material_overrides") or {}, d, self.render_form.get("dance"))
-
-    def _render_flying(self, form, now):
-        """True while a step's moved parts fly to their new pose."""
-        return form is not None and now - self.render_since - form.get("start", 0.0) < scenes.FLIGHT and any(
-            "flight" in part for part in form["parts"])
-
-    def _render_label_alpha(self, now):
-        """How strongly _render_labels draws the scene's labels, outlines and line at now."""
-        # Labels appear once the dust forms so text never precedes its lines.
-        late = scenes.LABELS_AFTER if self.render_form.get("material") else 0.0
-        alpha = LABEL_ALPHA * _ease_out(min(1.0, max(0.0, now - self.render["at"] - late) / 0.5))
-        if self.render_end is not None:
-            alpha *= max(0.0, 1 - (now - self.render_end) / RENDER_FADE)
-        return alpha
-
     def _render_labels_moment(self, now):
         """What of now _render_labels draws: nothing while its alpha is too low to draw, else that alpha and where the
         moved parts fly. Equal moments draw the same pixels."""
-        if self.render_form.get("kind") == "constellation":
-            return repr([(text, round(alpha, 3)) for text, _, _, alpha, _ in self.diagram_names(now)])
-        alpha = self._render_label_alpha(now)
-        if alpha <= 0.01:
-            return "hidden"
-        form = self.render_form
-        return alpha, self._render_flying(form, now), repr(scenes.flights(form, now - self.render_since))
+        return repr([(text, round(alpha, 3)) for text, _, _, alpha, _ in self.diagram_names(now)])
 
     def _render_labels(self, cr, cx, cy):
-        """The scene's labels as letter outlines with no plate, as the state labels are, and its title or the step's
-        caption under it. Labels of parts a step does not light are dimmer."""
-        r, form, now = self.render, self.render_form, self.last
-        if form.get("kind") == "constellation":
-            scale = cr.get_target().get_device_scale()[0]
-            for text, x, y, alpha, grow in self.diagram_names(now):
-                sprite = self._diagram_sprite(cr, text, scale, grow)
-                cr.set_source_surface(sprite, *_device_round(cr, cx + x - 14, cy + r["dy"] + y - 14))
-                cr.paint_with_alpha(alpha)
-            return
-        alpha = self._render_label_alpha(now)
-        if alpha <= 0.01:
-            return
-        scenes.draw_outline(cr, form, cx, cy + r["dy"], PALETTE["label"], alpha / LABEL_ALPHA, now - self.render_since)
-        fly = scenes.flights(form, now - self.render_since) if self._render_flying(form, now) else {}
-        index = {part["id"]: k for k, part in enumerate(form["parts"])} if fly else {}
-        for label in form["labels"]:
-            sprite, w, h = self._render_sprite(cr, label["text"].upper(), form["kind"])
-            text_w = w - 28  # The sprite's padding is 14 on each side.
-            left = label["x"] - (text_w / 2 if label["align"] == 0 else text_w if label["align"] < 0 else 0)
-            top = label["y"]
-            if index.get(label["id"]) in fly:  # A moved part's label travels with its centre.
-                k = index[label["id"]]
-                px, py = form["parts"][k]["centre"]
-                fx, fy = scenes._apply(fly[k], px, py)
-                left, top = left + fx - px, top + fy - py
-            cr.set_source_surface(sprite, *_device_round(cr, cx + left - 14, cy + r["dy"] + top - h / 2))
-            cr.paint_with_alpha(alpha * (1.0 if r["lit"] is None or label["id"] in r["lit"] else 0.45))
-        line = form["caption"] or form["title"]
-        if line:
-            sprite, w, h = self._render_sprite(cr, line.upper(), "icon", max(RENDER_LINE, min(700, form["size"][0])))
-            cr.set_source_surface(sprite, *_device_round(cr, cx - w / 2, cy + r["bottom"] - 14))
-            cr.paint_with_alpha(alpha * (1.0 if form["caption"] else 0.85))  # A title ranks below the node names.
-
-    def _render_sprite(self, cr, text, kind, wrap=None):
-        """A cached label sprite in the scene's label type, and its width and height in logical pixels."""
+        """A constellation's names and title, each a cached sprite at its own alpha."""
+        r, now = self.render, self.last
         scale = cr.get_target().get_device_scale()[0]
-        key = ("render", text, kind, wrap, scale)
-        if key not in self.label_sprites:
-            font, spacing = RENDER_TYPE[kind]
-            self.label_sprites[key] = _word_sprite(cr, text, scale, font, PALETTE["label"], spacing,
-                                                   PALETTE["label_halos"], PALETTE["label_halo"],
-                                                   PALETTE["label_outline"], wrap)[0]
-        sprite = self.label_sprites[key]
-        return sprite, sprite.get_width() / scale, sprite.get_height() / scale
+        for text, x, y, alpha, grow in self.diagram_names(now):
+            sprite = self._diagram_sprite(cr, text, scale, grow)
+            cr.set_source_surface(sprite, *_device_round(cr, cx + x - 14, cy + r["dy"] + y - 14))
+            cr.paint_with_alpha(alpha)
 
     def handle(self, msg, now):
         pack = msg.get("pack")
@@ -6653,34 +6493,12 @@ class Scene:
             old = self._targets(self.prev, now)
             old_z = self._target_z
         self._helix_arrival(now, tx, ty)
-        transit = self.render_form.get("transit") if self.form == "render" and self.render_form else None
-        if old is not None and self.form == "render" and self.prev == "render_old":
-            # Moved parts track immediately, except highlight swarm grains arriving from another part.
-            for i in scenes._moving(self.render_form)[1]:
-                if i < len(old[0]) and (not transit or i not in transit):
-                    old[0][i], old[1][i], old[2][i] = tx[i], ty[i], tb[i]
-        # Grains of moved parts fly straight, without the curl a new form gives the others.
-        straight = (set(scenes._moving(self.render_form)[1]) if self.form == "render"
-                    and self._render_flying(self.render_form, now) else None)
-        if straight and transit:
-            straight.difference_update(transit)
         # A long step is split into steps of at most 0.034 s, so the springs stay stable at a low frame rate.
         # Stiffer springs, such as the speaking globe's, take shorter steps.
         limit = min(0.034, 0.075 / self.pace)
         steps = 1 if dt <= limit else math.ceil(dt / limit)
         pace, dscale = self.pace, self.delay_scale
         self.carry_loose(now, dt)
-        # Diagram living dance runs inside the spring step (zero extra per-grain Python when on GPU).
-        dance = (0.0, 0.0, 0.0)
-        if self.form == "render" and self.render_form and self.render_form.get("material"):
-            d_el = now - self.render_since
-            ent = self.render_form.get("entrance", scenes.DIAGRAM_ENTRANCE)
-            ramp = (scenes._ease(d_el, scenes.DRAW_START + scenes.DRAW_SECONDS,
-                                 scenes.DRAW_START + scenes.DRAW_SECONDS + 0.3)
-                    if ent == "draw" else scenes._ease(d_el, 0.45, 0.95))
-            if ramp > 0.0:
-                dp = scenes.dance_preset(self.render_form.get("dance"))
-                dance = (dp["live_amp"] * ramp, dp["live_shimmer"] * ramp, dp["wisp"] * ramp)
         if self.springs_on_gpu:
             # The chip runs this step (see _DustGL.step_springs): the targets and settings below, for the grains drawn.
             # The old form may hold fewer grains than a scene's grown swarm; the new ones take their own target.
@@ -6689,14 +6507,9 @@ class Scene:
                 (old[0][i], old[1][i], old[2][i], old_z[i] if i < n_oz else 0.0)
                 if i < n_old else (tx[i], ty[i], tb[i], tz[i] if i < n_tz else 0.0))]
             goals = [v for i in self.idx for v in (tx[i], ty[i], tb[i], tz[i] if i < n_tz else 0.0)]
-            if straight:  # Each flying grain's row on the chip, as Python zeroes its curl by grain.
-                row = {g: k for k, g in enumerate(self.idx)}
-                for i in straight:
-                    if i in row:
-                        goals[4 * row[i] + 3] = 2.0
             self.spring_steps.append((now, dt / steps, steps, pace, self.cohesion,
                                       (30 + 580 * self.loosen) * pace * pace, self.extra, self.spring_kicks,
-                                      goals, held, self.form_at, dscale, self.spring_unloose, dance))
+                                      goals, held, self.form_at, dscale, self.spring_unloose))
             self.spring_kicks, self.spring_unloose = [], False
             # At rest the grains ride their targets (the loop has no loose grains), and once a scene has settled they
             # keep to them but for a few loose ones: then the vignette follows the targets, and the chip's grains
@@ -6710,14 +6523,8 @@ class Scene:
         z_glide = _glide(glide, 0.14)
         x, y, vx, vy, depth, z = self.x, self.y, self.vx, self.vy, self.depth, self.z
         omega, delay, curl, freq, phase, loose = self.omega, self.delay, self.curl, self.freq, self.phase, self.loose_until
-        if straight:
-            curl = list(curl)
-            for i in straight:
-                if i < len(curl):
-                    curl[i] = 0.0
         cohesion, start = self.cohesion, self.form_at
         jitter = (30 + 580 * self.loosen) * self.pace * self.pace
-        d_amp, d_shim, d_wisp = dance
         sin, cos = math.sin, math.cos
         n_tz = len(tz)
         n_oz = len(old_z) if old_z is not None else 0
@@ -6732,17 +6539,6 @@ class Scene:
             z[i] += (gz - z[i]) * z_glide
             w = omega[i] * cohesion * pace
             k = w * w * (0.03 if loose[i] > now else 1.0)
-            if d_amp > 0.0 and not (straight and i in straight):
-                # Mirror GPU living dance in the Cairo fallback for diagram grains.
-                awake = min(1.0, max(0.0, (depth[i] - 0.45) / 0.75))
-                spd = 0.55 + 0.60 * awake
-                t1 = now * freq[i] * 0.32 * spd + phase[i]
-                t2 = now * freq[i] * 0.74 * spd + 2.0 * phase[i]
-                rad = (1.35 + 2.25 * awake) * d_amp
-                sign = 1.0 if curl[i] >= 0.0 else -1.0
-                gx += rad * (0.70 * sin(t1) + 0.30 * cos(t2))
-                gy += rad * (0.70 * sign * cos(t1) + 0.30 * sin(t2 * 1.17))
-                depth[i] *= max(0.0, 1.0 + (0.30 + 0.70 * awake) * d_shim * sin(now * freq[i] * 0.95 * spd + phase[i]))
             bend = curl[i] * k * 0.5 * (1 - since * 2 * pace) if 0 < since < 0.5 / pace else 0.0
             p = now * freq[i] + phase[i]
             jx, jy = jitter * sin(p), jitter * cos(p * 2)
@@ -6795,7 +6591,7 @@ class Scene:
     def carry_loose(self, now, dt):
         """A few percent of grains are always slipping loose and drifting back, once a form has settled.
         Never in the resting loop, which repeats exactly."""
-        if self.home or self.loosen > 0.05 or (self.form == "render" and self._render_flying(self.render_form, now)):
+        if self.home or self.loosen > 0.05:
             return
         self.loose_carry += GRAINS * 0.025 * dt
         rng = self.loose_rng
@@ -6862,7 +6658,6 @@ class Scene:
                     cr.paint()
             else:
                 _scrim(cr, cx + vx, cy + vy, rx, ry, alpha)
-        self._paint_material_cairo(cr, cx, cy, now, zoom)
         if PARTICLE_VARIANT != "baseline" and use_soft:
             self._paint_grains_soft(cr, cx, cy, zoom, now)
         elif PARTICLE_VARIANT != "baseline":
@@ -6992,34 +6787,6 @@ class Scene:
                 rect(cx + x[i] - h, cy + y[i] - h, d, d)
             cr.set_source_rgba(sr_c, sg_c, sb_c, min(1.0, sp_alpha * intensity))
             cr.fill()
-        cr.restore()
-
-    def _paint_material_cairo(self, cr, cx, cy, now, zoom=1.0):
-        """Draw the baked material dust in Cairo using a cached per-step stipple for fallback and stills."""
-        frame = self.material_frame(now)
-        if frame is None:
-            return
-        mat, mats, glows, lits, reveal, fade, dy, overrides, _, _ = frame
-        light = PALETTE["operator"] != cairo.OPERATOR_ADD
-        order = sorted(range(len(mat["parts"])), key=lambda k: lits[k])
-        cr.save()
-        cr.translate(cx, cy + dy)
-        if zoom != 1.0:
-            cr.scale(1.0 / zoom, 1.0 / zoom)
-        cr.set_operator(cairo.OPERATOR_OVER if light else cairo.OPERATOR_ADD)
-        for k in order:
-            b = overrides.get(k, mat["parts"][k])
-            rev = round(reveal, 2) if reveal < 1.05 else None
-            surf = _cairo_stipple_part(b, light, round(lits[k], 2), round(glows[k], 2), rev)
-            x0, y0, _, _ = b["box"]
-            cr.save()
-            cr.transform(cairo.Matrix(*mats[k]))
-            cr.set_source_surface(surf, x0, y0)
-            if fade < 0.999:
-                cr.paint_with_alpha(fade)
-            else:
-                cr.paint()
-            cr.restore()
         cr.restore()
 
     def rest_scrim(self, scale, cx, cy):
@@ -8258,132 +8025,6 @@ def _paint_portal(cr, scene, now, centre, frame=None, leaving=None, line="", mar
         cr.restore()
 
 
-_CAIRO_TILES = None
-
-
-def _cairo_stipple_tiles():
-    """Build two tileable 128x128 stipple noise masks once for the Cairo material fallback."""
-    global _CAIRO_TILES
-    if _CAIRO_TILES is not None:
-        return _CAIRO_TILES
-    size = 128
-    rng = random.Random(42)
-    core = cairo.ImageSurface(cairo.FORMAT_A8, size, size)
-    spark = cairo.ImageSurface(cairo.FORMAT_A8, size, size)
-    cc, cs = cairo.Context(core), cairo.Context(spark)
-    # Three jittered grids give organic granular density without repeating patterns.
-    for pitch, r_lo, r_hi, a_lo, a_hi in ((1.6, 0.50, 0.72, 0.45, 0.95),
-                                          (2.1, 0.46, 0.68, 0.40, 0.90),
-                                          (2.7, 0.48, 0.75, 0.35, 0.85)):
-        n = int(size / pitch)
-        for iy in range(n):
-            for ix in range(n):
-                gx = (ix + 0.5 + (rng.random() - 0.5) * 0.85) * pitch
-                gy = (iy + 0.5 + (rng.random() - 0.5) * 0.85) * pitch
-                r = rng.uniform(r_lo, r_hi)
-                a = rng.uniform(a_lo, a_hi)
-                target = cs if rng.random() < 0.35 else cc
-                target.set_source_rgba(1, 1, 1, a)
-                for ox in (0, -size, size):
-                    for oy in (0, -size, size):
-                        if -2 <= gx + ox <= size + 2 and -2 <= gy + oy <= size + 2:
-                            target.arc(gx + ox, gy + oy, r, 0, 2 * math.pi)
-                            target.fill()
-    core.flush()
-    spark.flush()
-    _CAIRO_TILES = (core, spark)
-    return _CAIRO_TILES
-
-
-def _cairo_part_masks(baked, reveal=None):
-    """Extract 1x Cairo A8 stroke and fill masks from a baked RGB24 part, gated by reveal."""
-    if reveal is None and "_cairo_masks" in baked:
-        return baked["_cairo_masks"]
-    tw, th = baked["tex_w"], baked["tex_h"]
-    scale = baked["bake_scale"]
-    bw, bh = int(baked["box"][2]), int(baked["box"][3])
-    src = bytes(baked["surface"].get_data())
-    sstride = baked["surface"].get_stride()
-    stroke = cairo.ImageSurface(cairo.FORMAT_A8, bw, bh)
-    fill = cairo.ImageSurface(cairo.FORMAT_A8, bw, bh)
-    d_st, d_fi = stroke.get_data(), fill.get_data()
-    ostride = stroke.get_stride()
-    has_fill = False
-    rev_byte = int(min(1.0, max(0.0, reveal)) * 255) if reveal is not None else 256
-    for y in range(bh):
-        sy = min(th - 1, y * scale)
-        srow = sy * sstride
-        orow = y * ostride
-        for x in range(bw):
-            si = srow + min(tw - 1, x * scale) * 4
-            if rev_byte < 256 and src[si + 1] > rev_byte:
-                continue
-            r, b = src[si + 2], src[si]
-            if r:
-                d_st[orow + x] = r
-            if b:
-                d_fi[orow + x] = b
-                has_fill = True
-    stroke.mark_dirty()
-    fill.mark_dirty()
-    out = (stroke, fill if has_fill else None)
-    if reveal is None:
-        baked["_cairo_masks"] = out
-    return out
-
-
-def _cairo_stipple_part(baked, light, lit, glow, reveal=None):
-    """Render and cache one part's fixed Cairo stipple surface for its current lighting state."""
-    key = (light, lit, glow, reveal)
-    cache = baked.setdefault("_cairo_cache", {})
-    if key in cache:
-        return cache[key]
-    bw, bh = int(baked["box"][2]), int(baked["box"][3])
-    stroke_mask, fill_mask = _cairo_part_masks(baked, reveal)
-    tile_core, tile_spark = _cairo_stipple_tiles()
-    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, bw, bh)
-    cr = cairo.Context(out)
-
-    def stamp(mask, tile, rgb, alpha, ox=0.0, oy=0.0):
-        tmp = cairo.ImageSurface(cairo.FORMAT_ARGB32, bw, bh)
-        tcr = cairo.Context(tmp)
-        pat = cairo.SurfacePattern(tile)
-        pat.set_extend(cairo.EXTEND_REPEAT)
-        m = cairo.Matrix()
-        m.translate(-ox, -oy)
-        pat.set_matrix(m)
-        tcr.set_source_rgba(*rgb, min(1.0, alpha))
-        tcr.mask(pat)
-        cr.set_source_surface(tmp, 0, 0)
-        cr.mask_surface(mask, 0, 0)
-
-    if light:
-        cr.set_operator(cairo.OPERATOR_OVER)
-        rgb = _mix((0.02, 0.02, 0.02), (0.48, 0.32, 0.05), lit)
-        for mask, gain in ((stroke_mask, 1.0), (fill_mask, 0.34)):
-            if mask is None:
-                continue
-            # Three slightly offset passes match the GL shader's bold ink_gold density.
-            stamp(mask, tile_core, rgb, 1.0 * gain, 0.0, 0.0)
-            stamp(mask, tile_spark, rgb, 1.0 * gain, 0.9, 0.6)
-            stamp(mask, tile_core, rgb, (0.75 + 0.25 * lit) * gain, -0.5, 0.5)
-    else:
-        cr.set_operator(cairo.OPERATOR_ADD)
-        for mask, gain in ((stroke_mask, 1.0), (fill_mask, 0.30)):
-            if mask is None:
-                continue
-            stamp(mask, tile_core, AMBER, 0.78 * glow * gain, 0.0, 0.0)
-            stamp(mask, tile_spark, PALE_GOLD, 0.72 * glow * gain, 0.5, 0.3)
-            if lit > 0.05:
-                stamp(mask, tile_core, IVORY, 0.85 * lit * gain, -0.3, 0.4)
-    out.flush()
-    if reveal is None:
-        if len(cache) > 8:
-            cache.clear()
-        cache[key] = out
-    return out
-
-
 _FRAME_GLSL = """
 uniform int turn;
 uniform float rr, rr_arc, per, ends[8], drift, wave, head, bottom, band;
@@ -8517,7 +8158,7 @@ layout(std430, binding = 2) buffer Springs { Spring grain[]; };
 layout(std430, binding = 3) buffer Rows { float row[]; };  // Instance rows for _DUST_VERT, 11 floats each.
 layout(std430, binding = 4) buffer Kicks { vec4 kick[]; };  // instance, dvx, dvy, loose until
 layout(std430, binding = 5) buffer Targets { vec4 target[]; };  // x, y, glow, straight per grain; then the old form's
-uniform float now_t, dt, pace, cohesion, jitter, extra, start_t, dscale, dance_amp, dance_shim, dance_wisp;
+uniform float now_t, dt, pace, cohesion, jitter, extra, start_t, dscale;
 uniform int steps, count, kicks, rest_every, has_old, unloose;
 // Scene._move: each grain's spring pulls it to its target, after its own delay (the old form's target until then),
 // along a slight curve at first, with its own shimmer of jitter; a grain kicked loose has a weak spring for a while.
@@ -8532,23 +8173,6 @@ void main() {
     vec4 goal = has_old == 1 && since < 0.0 ? target[uint(count) + i] : target[i];
     float w = g.spring.x * cohesion * pace;
     float k = w * w * (g.more.z > now_t ? 0.03 : 1.0);
-    float shim = 1.0;
-    if (dance_amp > 0.0 && goal.w < 1.5) {
-        // Diagram living dance: orbital wander, occasional loose wisps on lit parts, and shimmer.
-        float awake = smoothstep(0.45, 1.20, goal.z);
-        float spd = mix(0.55, 1.15, awake);
-        float t1 = now_t * g.spring.y * 0.32 * spd + g.spring.z;
-        float t2 = now_t * g.spring.y * 0.74 * spd + g.spring.w;
-        float rad = mix(1.35, 3.6, awake) * dance_amp;
-        float dir = g.more.y >= 0.0 ? 1.0 : -1.0;
-        vec2 orbit = rad * vec2(0.70 * sin(t1) + 0.30 * cos(t2), 0.70 * dir * cos(t1) + 0.30 * sin(t2 * 1.17));
-        float wisp_wave = sin(now_t * 0.85 + g.spring.z * 3.7 + g.spring.w * 1.9);
-        float wisp = awake * dance_wisp * smoothstep(0.84, 0.98, wisp_wave);
-        k *= mix(1.0, 0.22, wisp);
-        orbit += wisp * 3.8 * vec2(cos(t2 * 1.3), sin(t2 * 1.1));
-        goal.xy += orbit;
-        shim = max(0.0, 1.0 + mix(0.30, 1.0, awake) * dance_shim * sin(now_t * g.spring.y * 0.95 * spd + g.spring.w));
-    }
     float bend = since > 0.0 && since < 0.5 / pace && goal.w < 1.5 ? g.more.y * k * 0.5 * (1.0 - since * 2.0 * pace)
                                                                    : 0.0;  // w >= 1.5 is a grain that flies straight.
     vec2 jit = jitter * vec2(sin(now_t * g.spring.y + g.spring.z), cos(2.0 * now_t * g.spring.y + g.spring.w));
@@ -8562,218 +8186,12 @@ void main() {
     uint index = uint(g.more.w);
     row[i * 11u] = g.pos.x;
     row[i * 11u + 1u] = g.pos.y;
-    row[i * 11u + 2u] = goal.z * shim * (index % uint(rest_every) == 0u ? 1.0 : extra);  // As draw_swarm dims it.
+    row[i * 11u + 2u] = goal.z * (index % uint(rest_every) == 0u ? 1.0 : extra);  // As draw_swarm dims it.
     float target_z = goal.w < 1.5 ? goal.w : 0.0;
     float zg = 1.0 - exp(-dt * float(steps) / 0.14);
     row[i * 11u + 3u] = mix(row[i * 11u + 3u], target_z, zg);
     row[i * 11u + 4u] = g.pos.z;
     row[i * 11u + 5u] = g.pos.w;
-}
-"""
-
-# Procedural three-layer jittered cell dust material shader (runs in part-local space).
-_MATERIAL_VERT = """#version 430 core
-uniform vec4 u_box;       // x0, y0, bw, bh in part-local form pixels
-uniform vec4 u_mat;       // xx, yx, xy, yy
-uniform vec2 u_trans;     // x0, y0 translation in form pixels
-uniform vec2 u_origin;    // form centre in logical pixels
-uniform vec2 u_viewport;  // logical width, height
-out vec2 v_local;
-out vec2 v_uv;
-void main() {
-    vec2 corner = vec2(gl_VertexID & 1, gl_VertexID >> 1);
-    vec2 local = u_box.xy + corner * u_box.zw;
-    mat2 M = mat2(u_mat.x, u_mat.y, u_mat.z, u_mat.w);
-    vec2 screen = u_origin + M * local + u_trans;
-    // Match _DUST_VERT orientation: y=0 at FBO bottom, which GTK shows at top.
-    gl_Position = vec4(screen / u_viewport * 2.0 - 1.0, 0.0, 1.0);
-    v_local = local;
-    v_uv = corner;
-}
-"""
-
-_MATERIAL_FRAG = """#version 430 core
-in vec2 v_local;
-in vec2 v_uv;
-uniform sampler2D u_tex;      // R stroke coverage, G arrival u, B fill coverage
-uniform vec4 u_box;
-uniform float u_time, u_glow, u_lit, u_reveal, u_fade, u_scale, u_cell_scale, u_part_seed;
-uniform float u_mat_drift, u_mat_twinkle, u_mat_glint;
-uniform int u_light_theme;
-out vec4 out_color;
-
-vec4 hash4(ivec2 p, uint seed) {
-    uvec4 v = uvec4(uint(p.x) * 1664525u + 1013904223u, uint(p.y) * 22695477u + 1u,
-                    seed * 747796405u + 2891336453u, uint(p.x ^ (p.y * 374761393u)) + seed);
-    v.x += v.y * v.w; v.y += v.z * v.x; v.z += v.x * v.y; v.w += v.y * v.z;
-    v ^= v >> 16u;
-    v.x += v.y * v.w; v.y += v.z * v.x; v.z += v.x * v.y; v.w += v.y * v.z;
-    return vec4(v >> 8u) * (1.0 / 16777216.0);
-}
-
-void eval_layer(vec2 local_pos, float cell, mat2 rot, mat2 inv_rot, uint seed, float gain,
-                ivec2 tex_size, inout vec3 acc_rgb, inout float acc_a) {
-    vec2 p = (rot * local_pos) / cell;
-    ivec2 base_cell = ivec2(floor(p));
-    vec2 f = fract(p);
-    int sx = (f.x < 0.5) ? -1 : 1;
-    int sy = (f.y < 0.5) ? -1 : 1;
-    float aa = 0.58 / max(1.0, u_scale);
-    vec2 inv_box = 1.0 / u_box.zw;
-    float grain_r = 0.54 * u_cell_scale;
-
-    for (int j = 0; j < 2; j++) {
-        int dy = (j == 0) ? 0 : sy;
-        for (int i = 0; i < 2; i++) {
-            int dx = (i == 0) ? 0 : sx;
-            ivec2 cid = base_cell + ivec2(dx, dy);
-            vec4 h1 = hash4(cid, seed);
-            vec4 h2 = hash4(cid + ivec2(37, -19), seed ^ 0x9E3779B9u);
-
-            vec2 c_grid = vec2(cid) + 0.5 + (h1.xy - 0.5) * 0.68;
-            vec2 c_local = (inv_rot * c_grid) * cell;
-            float freq = 1.6 + h2.x * 4.2;
-            float phase = h2.y * 6.2831853;
-            vec2 c_uv = (c_local - u_box.xy) * inv_box;
-            if (c_uv.x < 0.0 || c_uv.x > 1.0 || c_uv.y < 0.0 || c_uv.y > 1.0) continue;
-
-            vec4 samp = textureLod(u_tex, c_uv, 0.0);
-            float eff_cov = max(samp.r, samp.b * 0.28);
-            if (eff_cov < 0.04 || h1.z > eff_cov) continue;
-
-            float reveal_mul = 1.0;
-            float tip = 0.0;
-            if (u_reveal < 1.5) {
-                ivec2 tc = clamp(ivec2(c_uv * vec2(tex_size)), ivec2(0), tex_size - ivec2(1));
-                float arr = clamp(texelFetch(u_tex, tc, 0).g + (h2.w - 0.5) * 0.025, 0.0, 1.0);
-                float ahead = u_reveal - arr;
-                if (ahead <= 0.0) continue;
-                float seen = smoothstep(0.0, 0.05, ahead);
-                tip = exp(-pow(ahead / 0.030, 2.0));
-                reveal_mul = seen * (1.0 + 3.2 * tip);
-            }
-
-            float rate = mix(0.72, 1.25, u_lit);
-            float drift_k = u_mat_drift * u_cell_scale * mix(0.72, 1.25, u_lit) * (u_light_theme == 1 ? 0.55 : 1.0);
-            vec2 drift = drift_k * vec2(
-                sin(u_time * freq * rate + phase), cos(u_time * freq * rate * 1.27 + phase * 1.37));
-            float r = grain_r * (0.78 + 0.44 * h1.w) * (1.0 + 0.50 * tip);
-            // Match ink_gold twin thickness in light theme by slightly expanding each grain dot.
-            if (u_light_theme == 1) r *= 1.18;
-            float dist = length(local_pos - (c_local + drift));
-            if (dist > r + aa) continue;
-            float dot_mask = smoothstep(r + aa, max(0.0, r - aa), dist);
-
-            float base_b = (h2.z > 0.92) ? (1.05 + 0.35 * h1.w)
-                         : (h2.z > 0.65) ? (0.72 + 0.32 * h1.w)
-                         : (0.45 + 0.32 * h1.w);
-            float tw = 1.0 + u_mat_twinkle * mix(0.80, 1.35, u_lit) * sin(u_time * freq * rate * 1.4 + phase);
-            float glint = (h2.z > 0.86) ? u_mat_glint * mix(0.60, 1.50, u_lit)
-                          * pow(max(0.0, sin(u_time * freq * rate * 1.1 + phase * 2.1)), 5.0) : 0.0;
-            float cov_w = mix(0.68, 1.0, smoothstep(0.08, 0.80, eff_cov));
-            float strength = dot_mask * base_b * (tw + glint) * cov_w * gain * reveal_mul;
-
-            if (u_light_theme == 0) {
-                vec3 col = mix(vec3(0.95, 0.70, 0.28), vec3(1.0, 0.92, 0.70), h2.w);
-                col = mix(col, vec3(1.0, 0.98, 0.90), clamp(tip * 0.80 + glint * 0.55, 0.0, 1.0));
-                float s = strength * u_glow * u_fade;
-                acc_rgb += col * s;
-                acc_a = min(1.0, acc_a + s);
-            } else {
-                vec3 ink_col = vec3(0.0 + 0.10 * h2.w);
-                vec3 gld_col = mix(vec3(0.46, 0.30, 0.04), vec3(0.60, 0.41, 0.08), h2.w);
-                vec3 col = mix(ink_col, gld_col, u_lit);
-                col = mix(col, vec3(0.86, 0.58, 0.12), clamp(tip * 0.85, 0.0, 1.0));
-                // Match LIGHT_LOOKS['ink_gold'] bold contrast over white and grey paper.
-                float a = clamp(dot_mask * clamp(0.68 + 0.32 * base_b * cov_w, 0.0, 1.0)
-                                * min(1.0, reveal_mul) * mix(1.0, 1.18, u_lit) * u_fade, 0.0, 1.0);
-                acc_rgb = col * a + acc_rgb * (1.0 - a);
-                acc_a = a + acc_a * (1.0 - a);
-            }
-        }
-    }
-}
-
-void main() {
-    vec4 coarse = textureLod(u_tex, v_uv, 2.0);
-    if (coarse.r + coarse.b < 0.002) discard;
-    ivec2 tex_size = textureSize(u_tex, 0);
-    vec3 acc_rgb = vec3(0.0);
-    float acc_a = 0.0;
-    uint seed = uint(u_part_seed * 131.0) + 17u;
-    float base_cell = 1.36 * u_cell_scale;
-    mat2 I = mat2(1.0, 0.0, 0.0, 1.0);
-    eval_layer(v_local, base_cell, I, I, seed, 0.62, tex_size, acc_rgb, acc_a);
-    float c1 = 0.79863551, s1 = 0.60181502;
-    eval_layer(v_local, base_cell * 1.21, mat2(c1, s1, -s1, c1), mat2(c1, -s1, s1, c1),
-               seed ^ 0x517CC1B7u, 0.58, tex_size, acc_rgb, acc_a);
-    float c2 = 0.29237170, s2 = 0.95630476;
-    eval_layer(v_local, base_cell * 1.47, mat2(c2, s2, -s2, c2), mat2(c2, -s2, s2, c2),
-               seed ^ 0xA2F19B3Du, 0.54, tex_size, acc_rgb, acc_a);
-    if (u_light_theme == 0) {
-        if (max(acc_rgb.r, max(acc_rgb.g, acc_rgb.b)) < 0.003) discard;
-        out_color = vec4(acc_rgb, min(1.0, acc_a));
-    } else {
-        if (acc_a < 0.004) discard;
-        out_color = vec4(acc_rgb, acc_a);
-    }
-}
-"""
-
-# Direct hardware-blended living grains for diagrams (skips per-pixel linked lists and resolve).
-_DIRECT_VERT = """#version 430 core
-layout(location = 0) in vec4 a0;  // x, y, depth, 0
-layout(location = 1) in vec4 a1;  // 0, 0, 0, base
-layout(location = 2) in vec3 a2;  // size, tone, blue rank
-uniform int spark, twins;
-uniform float k, share, grow, scale, dance_grow, spark_cut;
-uniform vec2 origin, twin, size_px;
-uniform vec4 direct_colour[29];
-flat out vec2 centre;
-flat out float half_size;
-flat out vec4 col;
-void main() {
-    float base = a1.w;
-    int level = int(base * a0.z * k);
-    float awake = smoothstep(0.45, 1.20, a0.z);
-    int g = spark == 1 ? 28 : (a2.z < share ? 3 : int(a2.y)) * 7 + min(7, level) - 1;
-    centre = origin + a0.xy * scale;
-    float boost = 1.0 + dance_grow * awake;
-    half_size = 0.5 * (spark == 1 ? 3.6 : a2.x * grow * boost) * scale;
-    col = direct_colour[clamp(g, 0, 28)] / 255.0;
-    vec2 corner = vec2(gl_VertexID & 1, gl_VertexID >> 1);
-    vec2 reach_px = vec2(half_size + 1.0) + (twins == 1 ? abs(twin) : vec2(0.0));
-    gl_Position = vec4((centre + (corner * 2.0 - 1.0) * reach_px) / size_px * 2.0 - 1.0, 0.0, 1.0);
-    float cut = mix(0.85, spark_cut, awake);
-    if (level <= 0 || (spark == 1 && base <= cut)) gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
-}
-"""
-
-_DIRECT_FRAG = """#version 430 core
-flat in vec2 centre;
-flat in float half_size;
-flat in vec4 col;
-uniform int twins;
-uniform vec2 twin;
-out vec4 result;
-
-float box_area(vec2 lo, vec2 hi, vec2 px) {
-    vec2 a = max(lo, px), b = min(hi, px + 1.0);
-    return max(0.0, b.x - a.x) * max(0.0, b.y - a.y);
-}
-
-void main() {
-    vec2 px = floor(gl_FragCoord.xy);
-    vec2 lo = centre - half_size, hi = centre + half_size;
-    float cov = box_area(lo, hi, px);
-    if (twins == 1) {
-        vec2 lo2 = lo + twin, hi2 = hi + twin;
-        float cov2 = box_area(lo2, hi2, px);
-        vec2 olo = max(lo, lo2), ohi = min(hi, hi2);
-        cov = min(1.0, cov + cov2 - box_area(olo, ohi, px));
-    }
-    if (cov <= 0.0) discard;
-    result = col * cov;
 }
 """
 
@@ -9336,8 +8754,6 @@ class _DustGL:
         self.dust_prog = self._program((0x8B31, _DUST_VERT), (0x8B30, _DUST_FRAG))
         self.resolve_prog = self._program((0x8B31, _RESOLVE_VERT), (0x8B30, _RESOLVE_FRAG))
         self.spring_prog = self._program((0x91B9, _SPRING_COMP))  # GL_COMPUTE_SHADER
-        self.mat_prog = self._program((0x8B31, _MATERIAL_VERT), (0x8B30, _MATERIAL_FRAG))
-        self.direct_prog = self._program((0x8B31, _DIRECT_VERT), (0x8B30, _DIRECT_FRAG))
         self.soft_prog = self._program((0x8B31, _SOFT_VERT), (0x8B30, _SOFT_FRAG))
         self.strand_prog = self._program((0x8B31, _STRAND_VERT), (0x8B30, _STRAND_FRAG))
         self.fil_prog = self._program((0x8B31, _FILAMENT_VERT), (0x8B30, _FILAMENT_FRAG))
@@ -9364,7 +8780,6 @@ class _DustGL:
         gl.VertexAttribPointer(0, 4, 0x1406, 0, 28, ctypes.c_void_p(0))
         gl.EnableVertexAttribArray(1)
         gl.VertexAttribPointer(1, 3, 0x1406, 0, 28, ctypes.c_void_p(16))
-        self.mat_key, self.mat_base, self.mat_over = None, [], {}  # Base and override textures for the active diagram.
         under = (ctypes.c_uint * 1)()
         gl.GenTextures(1, under)
         self.under_tex, self.under_key = under[0], None
@@ -9552,7 +8967,7 @@ class _DustGL:
         place = None
         count, epoch = len(self.spring_idx), self.spring_epoch
         self._set(prog, count=count, rest_every=_rest_every())
-        for now, dt, steps, pace, cohesion, jitter, extra, kicks, targets, old, start, dscale, unloose, dance in scene.spring_steps:
+        for now, dt, steps, pace, cohesion, jitter, extra, kicks, targets, old, start, dscale, unloose in scene.spring_steps:
             if kicks:
                 place = place or {i: k for k, i in enumerate(self.spring_idx)}
                 self._upload(self.kick_buf, [v for i, kx, ky, until in kicks
@@ -9561,84 +8976,10 @@ class _DustGL:
             self._set(prog, now_t=float(now - epoch), dt=float(dt), steps=steps, pace=float(pace),
                       cohesion=float(cohesion), jitter=float(jitter), extra=float(extra), kicks=len(kicks),
                       start_t=float(start - epoch), dscale=float(dscale), has_old=1 if old else 0,
-                      unloose=1 if unloose else 0, dance_amp=float(dance[0]), dance_shim=float(dance[1]),
-                      dance_wisp=float(dance[2]))
+                      unloose=1 if unloose else 0)
             gl.DispatchCompute((count + 63) // 64, 1, 1)
             gl.MemoryBarrier(0xFFFFFFFF)
         scene.spring_steps.clear()
-
-    def _upload_baked(self, baked):
-        """Upload one Cairo RGB24 baked part to a mipmapped GL texture."""
-        gl = self.gl
-        tid = (ctypes.c_uint * 1)()
-        gl.GenTextures(1, tid)
-        tex = tid[0]
-        surf = baked["surface"]
-        surf.flush()
-        gl.BindTexture(0x0DE1, tex)
-        gl.PixelStorei(0x0CF2, surf.get_stride() // 4)
-        pixels = ctypes.c_char.from_buffer(surf.get_data())
-        gl.TexImage2D(0x0DE1, 0, 0x8058, baked["tex_w"], baked["tex_h"], 0, 0x80E1, 0x1401, ctypes.addressof(pixels))
-        gl.PixelStorei(0x0CF2, 0)
-        gl.TexParameteri(0x0DE1, 0x2801, 0x2703)  # GL_LINEAR_MIPMAP_LINEAR
-        gl.TexParameteri(0x0DE1, 0x2800, 0x2601)  # GL_LINEAR
-        gl.TexParameteri(0x0DE1, 0x2802, 0x812F)  # GL_CLAMP_TO_EDGE
-        gl.TexParameteri(0x0DE1, 0x2803, 0x812F)
-        gl.GenerateMipmap(0x0DE1)
-        return tex
-
-    def _ensure_material(self, mat, overrides):
-        """Keep the active diagram's baked part textures on the GPU and drop replaced ones."""
-        gl = self.gl
-        if self.mat_key is not mat:
-            old = list(self.mat_base) + [tex for _, tex in self.mat_over.values()]
-            if old:
-                arr = (ctypes.c_uint * len(old))(*old)
-                gl.DeleteTextures(len(old), arr)
-            self.mat_base.clear()
-            self.mat_over.clear()
-            self.mat_key = mat
-            if mat is None:
-                return
-            self.mat_base = [self._upload_baked(b) for b in mat["parts"]]
-        # Drop any override texture whose part is no longer overridden or holds a different bake object.
-        stale = [k for k, (obj, _) in self.mat_over.items() if k not in overrides or overrides[k] is not obj]
-        if stale:
-            arr = (ctypes.c_uint * len(stale))(*(self.mat_over.pop(k)[1] for k in stale))
-            gl.DeleteTextures(len(stale), arr)
-        for k, b in overrides.items():
-            if k not in self.mat_over:
-                self.mat_over[k] = (b, self._upload_baked(b))
-
-    def _draw_material(self, gl, palette, frame, w, h, centre, scale):
-        """Draw the baked material dust quads into the currently bound FBO."""
-        mat, mats, glows, lits, reveal, fade, dy, overrides, d, dance = frame
-        self._ensure_material(mat, overrides)
-        light = palette["operator"] != cairo.OPERATOR_ADD
-        gl.Enable(0x0BE2)  # GL_BLEND
-        gl.BlendFunc(1, 0x0303 if light else 1)  # Premultiplied over for light; additive for dark.
-        prog = self.mat_prog
-        gl.UseProgram(prog)
-        gl.BindVertexArray(self.empty_vao)
-        gl.ActiveTexture(0x84C0)
-        dp = scenes.dance_preset(dance)
-        self._set(prog, u_origin=(float(centre[0]), float(centre[1] + dy)), u_viewport=(float(w), float(h)),
-                  u_time=float(d), u_reveal=float(reveal), u_fade=float(fade), u_scale=float(scale),
-                  u_mat_drift=float(dp["mat_drift"]), u_mat_twinkle=float(dp["mat_twinkle"]),
-                  u_mat_glint=float(dp["mat_glint"]), u_light_theme=1 if light else 0, u_tex=0)
-        # Draw quiet parts before lit parts so light-theme ink never covers lit gold.
-        order = sorted(range(len(mat["parts"])), key=lambda k: lits[k])
-        for k in order:
-            if k in overrides:
-                b, tex = overrides[k], self.mat_over[k][1]
-            else:
-                b, tex = mat["parts"][k], self.mat_base[k]
-            m = mats[k]
-            gl.BindTexture(0x0DE1, tex)
-            self._set(prog, u_box=b["box"], u_mat=(float(m[0]), float(m[1]), float(m[2]), float(m[3])),
-                      u_trans=(float(m[4]), float(m[5])), u_glow=float(glows[k]), u_lit=float(lits[k]),
-                      u_cell_scale=float(b["cell_scale"]), u_part_seed=float(k + 1))
-            gl.DrawArrays(5, 0, 4)
 
     def _draw_under(self, gl, under, scale):
         """Draw the Cairo scrim texture under the dust, or clear to transparent when none is active."""
@@ -9946,29 +9287,6 @@ class _DustGL:
             gl.DrawArraysInstanced(5, 0, 4, len(drows) // 11)
         self._filament(gl, scene, W, H, centre, scale, 2, light=True)  # A constellation's lines, in amber.
         gl.Disable(0x0BE2)
-
-    def _draw_direct_live(self, gl, palette, scene, W, H, centre, scale):
-        """Draw diagram living grains with direct hardware blending, skipping linked lists and resolve."""
-        prog = self.direct_prog
-        gl.UseProgram(prog)
-        twins = [(dx * scale, dy * scale) for dx, dy in palette.get("twins") or ()]
-        dp = scenes.dance_preset((scene.render_form or {}).get("dance"))
-        self._set(prog, share=float(scene.share), grow=float(palette["size"]), scale=float(scale),
-                  k=float(scene.intensity * 7), dance_grow=float(dp["live_grow"]),
-                  spark_cut=float(dp["spark_cut"]), twins=1 if twins else 0,
-                  twin=twins[0] if twins else (0.0, 0.0), origin=(centre[0] * scale, centre[1] * scale),
-                  size_px=(float(W), float(H)))
-        gl.Uniform4fv(self._u(prog, "direct_colour"), 29, self.fill_cache[1])
-        gl.Enable(0x0BE2)
-        gl.BindVertexArray(self.main_vao)
-        add = palette["operator"] == cairo.OPERATOR_ADD
-        gl.BlendFunc(1, 1 if add else 0x0303)
-        self._set(prog, spark=0)
-        gl.DrawArraysInstanced(5, 0, 4, len(self.spring_idx))
-        if self.spring_sparks and self.fill_cache[3]:
-            gl.BlendFunc(1, 1)  # Sparks always add light.
-            self._set(prog, spark=1)
-            gl.DrawArraysInstanced(5, 0, 4, len(self.spring_idx))
 
     def _spring_state(self, scene, buf=None):
         """Copy the chip's grains into the scene's x, y, vx and vy: from buf (poll_springs' copy), or from the chip's
@@ -10334,9 +9652,6 @@ class _DustGL:
         if not self.springs_owned:
             self._upload_springs(scene, scene.last)
         self.step_springs(scene)
-        mat_frame = scene.material_frame(scene.last)
-        if mat_frame is None and self.mat_key is not None:
-            self._ensure_material(None, {})
         # The fills' colours change only with the palette, the error tint and the intensity: kept between frames.
         key = (palette["alpha_floor"], palette["alpha_gain"], palette["operator"], tuple(palette["tones"]),
                palette["blue"], palette["ember"], palette["spark"], palette["spark_alpha"], scene.err, scene.intensity)
@@ -10352,13 +9667,7 @@ class _DustGL:
         gl.FramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, tex, 0)
         gl.Viewport(0, 0, W, H)
 
-        if mat_frame is not None and DIAGRAM_LIVE_MODE == "direct":
-            # Diagram fast path: paint under scrim or clear, draw material quads, then blend living grains.
-            self._draw_under(gl, under, scale)
-            self._draw_material(gl, palette, mat_frame, w, h, centre, scale)
-            self._draw_direct_live(gl, palette, scene, W, H, centre, scale)
-            gl.Disable(0x0BE2)
-        elif mat_frame is None and PARTICLE_VARIANT != "baseline":
+        if PARTICLE_VARIANT != "baseline":
             if palette["operator"] == cairo.OPERATOR_ADD or scene.dispatch_nova_standin(scene.last):
                 # Variants A/B/C dark (or Nova dispatch stand-in): HDR sprites + Kawase bloom + tone map.
                 self._draw_soft_hdr(gl, palette, scene, W, H, centre, scale, under, tex)
@@ -10376,40 +9685,23 @@ class _DustGL:
             gl.Uniform2fv(self._u(prog, "origins"), 4, (ctypes.c_float * 8)(centre[0] * scale, centre[1] * scale, *[0.0] * 6))
             gl.Uniform4fv(self._u(prog, "clips"), 4, (ctypes.c_float * 16)(0.0, 0.0, W, H, *[0.0] * 12))
             rx0, ry0, rx1, ry1 = 0, 0, W, H
-            if mat_frame is not None:
-                self._draw_under(gl, under, scale)
-                self._draw_material(gl, palette, mat_frame, w, h, centre, scale)
-                gl.Disable(0x0BE2)
-                gl.UseProgram(self.resolve_prog)
-                gl.Uniform4fv(self._u(self.resolve_prog, "colour"), self.FILLS, self.fill_cache[1])
-                gl.Uniform1iv(self._u(self.resolve_prog, "add"), self.FILLS, self.fill_cache[2])
-                self._set(self.resolve_prog, has_under=0, skip_dust=0)
-                if DIAGRAM_LIVE_MODE == "bbox":
-                    fw, fh = scene.render_form["size"]
-                    dy = mat_frame[6]
-                    pad = 48.0
-                    rx0 = max(0, math.floor((centre[0] - fw / 2 - pad) * scale))
-                    ry0 = max(0, math.floor((centre[1] + dy - fh / 2 - pad) * scale))
-                    rx1 = min(W, math.ceil((centre[0] + fw / 2 + pad) * scale))
-                    ry1 = min(H, math.ceil((centre[1] + dy + fh / 2 + pad) * scale))
+            gl.UseProgram(self.resolve_prog)
+            gl.Uniform4fv(self._u(self.resolve_prog, "colour"), self.FILLS, self.fill_cache[1])
+            gl.Uniform1iv(self._u(self.resolve_prog, "add"), self.FILLS, self.fill_cache[2])
+            if under is not None:
+                image, (ux, uy) = under
+                if self.under_key is not image:
+                    image.flush()
+                    gl.BindTexture(0x0DE1, self.under_tex)
+                    gl.PixelStorei(0x0CF2, image.get_stride() // 4)  # GL_UNPACK_ROW_LENGTH
+                    pixels = ctypes.c_char.from_buffer(image.get_data())
+                    gl.TexImage2D(0x0DE1, 0, 0x8058, image.get_width(), image.get_height(), 0, 0x80E1, 0x1401,
+                                  ctypes.addressof(pixels))  # GL_RGBA8 from GL_BGRA bytes, as Cairo keeps them
+                    gl.PixelStorei(0x0CF2, 0)
+                    self.under_key = image
+                self._set(self.resolve_prog, has_under=1, skip_dust=0, under=0, under_at=(ux * scale, uy * scale))
             else:
-                gl.UseProgram(self.resolve_prog)
-                gl.Uniform4fv(self._u(self.resolve_prog, "colour"), self.FILLS, self.fill_cache[1])
-                gl.Uniform1iv(self._u(self.resolve_prog, "add"), self.FILLS, self.fill_cache[2])
-                if under is not None:
-                    image, (ux, uy) = under
-                    if self.under_key is not image:
-                        image.flush()
-                        gl.BindTexture(0x0DE1, self.under_tex)
-                        gl.PixelStorei(0x0CF2, image.get_stride() // 4)  # GL_UNPACK_ROW_LENGTH
-                        pixels = ctypes.c_char.from_buffer(image.get_data())
-                        gl.TexImage2D(0x0DE1, 0, 0x8058, image.get_width(), image.get_height(), 0, 0x80E1, 0x1401,
-                                      ctypes.addressof(pixels))  # GL_RGBA8 from GL_BGRA bytes, as Cairo keeps them
-                        gl.PixelStorei(0x0CF2, 0)
-                        self.under_key = image
-                    self._set(self.resolve_prog, has_under=1, skip_dust=0, under=0, under_at=(ux * scale, uy * scale))
-                else:
-                    self._set(self.resolve_prog, has_under=0, skip_dust=0)
+                self._set(self.resolve_prog, has_under=0, skip_dust=0)
             self._heads(W, H)
             gl.Disable(0x0BE2)
             gl.BindBufferBase(0x90D2, 0, self.count_buf)
@@ -10424,9 +9716,6 @@ class _DustGL:
             gl.ColorMask(0, 0, 0, 0)
             gl.UseProgram(prog)
             self._set(prog, mode=1, k=float(scene.intensity * 7))
-            if DIAGRAM_LIVE_MODE == "bbox" and mat_frame is not None:
-                gl.Uniform4fv(self._u(prog, "clips"), 4, (ctypes.c_float * 16)(
-                    float(rx0), float(ry0), float(rx1), float(ry1), *[0.0] * 12))
             gl.BindVertexArray(self.main_vao)
             # Skip the spark pass when no grain qualifies or the spark colour is zero.
             for spark in ((0, 1) if self.spring_sparks and self.fill_cache[3] else (0,)):
@@ -10435,16 +9724,10 @@ class _DustGL:
             gl.MemoryBarrier(0xFFFFFFFF)
             gl.ColorMask(1, 1, 1, 1)
             gl.UseProgram(self.resolve_prog)
-            if mat_frame is None and under is not None:
+            if under is not None:
                 # Bound only now: making the output texture above binds over texture unit 0.
                 gl.ActiveTexture(0x84C0)
                 gl.BindTexture(0x0DE1, self.under_tex)
-            if mat_frame is not None:
-                gl.Enable(0x0BE2)
-                gl.BlendFunc(1, 1 if palette["operator"] == cairo.OPERATOR_ADD else 0x0303)
-                if DIAGRAM_LIVE_MODE == "bbox" and rx1 > rx0 and ry1 > ry0:
-                    gl.Enable(0x0C11)  # GL_SCISSOR_TEST
-                    gl.Scissor(rx0, ry0, rx1 - rx0, ry1 - ry0)
             gl.BindVertexArray(self.empty_vao)
             gl.DrawArrays(5, 0, 4)
             gl.Disable(0x0C11)
@@ -11086,7 +10369,7 @@ class Overlay(Gtk.Application):
         self.scene = Scene(time.monotonic())
         if self._initial_pack:
             self.scene.set_pack(self._initial_pack, self.scene.last)
-        self._render_seq, self._render_busy, self._render_pending_id, self._render_queue = 0, False, None, []
+        self._render_seq, self._render_queue = 0, []
         self._staged = None  # (request id, scene, form) of a baked scene that waits for Rook's reveal.
         self._name_textures = {}  # A constellation's names as textures, per text, scale and lettering.
         self._probe_cr = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
@@ -12119,8 +11402,7 @@ class Overlay(Gtk.Application):
         guide = scene.guide_key() if scene.guide_shown and scene.guide_shown[2] else None
         if state is not None or render is not None or guide is not None:
             fading = render is not None and (scene.last - render["at"] < 0.5 + scenes.LABELS_AFTER
-                                             or scene.render_end is not None
-                                             or scene._render_flying(scene.render_form, scene.last))
+                                             or scene.render_end is not None)
             key = (state, round(scene.label_alpha, 3),
                    min(REVEAL_SECONDS, round(scene.last - scene.label_at, 3)) if LETTERING else None,
                    scene.label_anchor, id(PALETTE), id(scene.label_sprites), w, h,
@@ -12472,7 +11754,7 @@ class Overlay(Gtk.Application):
         if self.scene.pack_name != prev_pack:
             self.area.queue_draw()
             self._stage_context()
-        if self.scene.state == "listening" and (self._render_busy or self._staged) and "render" not in msg:
+        if self.scene.state == "listening" and self._staged and "render" not in msg:
             # The owner spoke while a scene was baking or staged, so cancel the stale scene and reply.
             self._cancel_render()
         if self.scene.state != previous and self.opacity == 0 and self._should_show(time.monotonic()):
@@ -12501,39 +11783,39 @@ class Overlay(Gtk.Application):
             self._replace(f"the state {self.scene.state} came while the overlay was off screen")
 
     def _cancel_render(self):
-        """Cancel an in-flight bake, a staged scene and queued steps, replying to each cancelled request. Return whether
-        a staged scene was dropped."""
+        """Cancel a staged diagram and its queued steps, replying to each cancelled request. Return whether a staged
+        diagram was dropped."""
         staged, self._staged = self._staged is not None, None
-        if not self._render_busy and not staged:
+        if not staged:
             return False
         self._render_seq += 1
-        self._render_busy = False
-        cancelled = [self._render_pending_id] + [
-            item.get("id") if isinstance(item, dict) else None for item in self._render_queue]
-        self._render_pending_id = None
+        cancelled = [item.get("id") if isinstance(item, dict) else None for item in self._render_queue]
         self._render_queue.clear()
         for req_id in cancelled:
             self._emit({"event": "rendered", "id": req_id, "ok": False, "error": "Replaced before it showed."})
         return staged
 
     def _handle_render(self, spec):
-        """Handle a render request, baking new scenes off the main thread before their entrance starts."""
+        """Handle a render request: a diagram shows or waits staged for the reveal, and steps wait with it."""
         req_id = spec.get("id") if isinstance(spec, dict) else None
+        if isinstance(spec, dict) and "scene" in spec and not spec.get("clear"):  # The old scene tool.
+            self._emit({"event": "rendered", "id": req_id, "ok": False, "error": SCENE_GONE})
+            return
         if isinstance(spec, dict) and "reveal" in spec:
-            staged = self._staged and self._staged[0] == spec["reveal"] and not self._render_busy
-            if spec.get("drop") and (staged or self._render_busy and self._render_pending_id == spec["reveal"]):
-                self._cancel_render()  # A drop also stops the bake that would stage it.
+            staged = self._staged and self._staged[0] == spec["reveal"]
+            if spec.get("drop") and staged:
+                self._cancel_render()
             elif staged:
                 self._reveal_render()
             return
-        if self._render_busy or self._staged:
-            if isinstance(spec, dict) and (spec.get("clear") or "scene" in spec or "diagram" in spec):
+        if self._staged:
+            if isinstance(spec, dict) and (spec.get("clear") or "diagram" in spec):
                 if self._cancel_render() and spec.get("clear"):  # The model was told it shows, so it is cleared.
                     self.scene.end_render(time.monotonic())
                     self._emit({"event": "rendered", "id": req_id, "ok": True, "said": "Cleared."})
                     return
             else:
-                if not self._render_busy and isinstance(spec, dict) and "step" in spec:
+                if isinstance(spec, dict) and "step" in spec:
                     # The model may wait on this step before it speaks, so it is answered now and lit at the reveal.
                     answer = _scene_step_answer(self._staged[1]["steps"], spec["step"])
                     self._emit({"event": "rendered", "id": req_id, **answer})
@@ -12558,29 +11840,6 @@ class Overlay(Gtk.Application):
                             **self._commit_scene(req_id, scene, form, time.monotonic())})
                 self._apply_state()
             return
-        if isinstance(spec, dict) and "scene" in spec and not spec.get("clear"):
-            scene, errors = scenes.validate(spec.get("scene"))
-            if errors:
-                self._emit({"event": "rendered", "id": req_id, "ok": False, "errors": errors})
-                return
-            self._raw_scenes = {req_id: spec.get("scene")}  # One scene bakes or waits staged at a time.
-            shown = self.scene.render is not None and self.scene.render_end is None
-            prev = self.scene.render_form if shown else None
-            entrance = self.scene.diagram_entrance
-            dance = self.scene.diagram_dance
-            seq, stage = self._render_seq, spec.get("stage") is True
-            self._render_busy = True
-            self._render_pending_id = req_id
-
-            def bake():
-                try:
-                    form = scenes.sample(scene, previous=prev, entrance=entrance, dance=dance)
-                    GLib.idle_add(self._finish_render, seq, req_id, scene, form, None, stage)
-                except Exception as error:
-                    GLib.idle_add(self._finish_render, seq, req_id, scene, None, error, stage)
-
-            threading.Thread(target=bake, daemon=True).start()
-            return
         if self._stage_scene is not None and isinstance(spec, dict) and (spec.get("clear") or "step" in spec):
             if spec.get("clear"):
                 self._stage_hide()
@@ -12594,43 +11853,21 @@ class Overlay(Gtk.Application):
             return
         try:
             answer = self.scene.render_command(spec, time.monotonic())
-        except Exception as error:  # A scene the checker passed but the sampler could not draw; Rook goes on.
-            answer = {"ok": False, "error": f"The scene could not be drawn: {error!r}. Simplify it and try again."}
+        except Exception as error:  # A diagram that could not be drawn; Rook goes on.
+            answer = {"ok": False, "error": f"The diagram could not be drawn: {error!r}. Simplify it and try again."}
         self._emit({"event": "rendered", "id": req_id, **answer})
-
-    def _finish_render(self, seq, req_id, scene, form, error, stage=False):
-        """Commit a background-baked scene on the main loop, or stage it for the reveal, and drain queued step
-        commands."""
-        if seq != self._render_seq:
-            return False
-        self._render_busy = False
-        self._render_pending_id = None
-        if error is not None:
-            answer = {"ok": False, "error": f"The scene could not be drawn: {error!r}. Simplify it and try again."}
-        elif stage:  # Answered as if shown. Rook reveals it when its voice starts the answer.
-            self._staged = (req_id, scene, form)
-            answer = self.scene.render_said(scene, form)
-        else:
-            try:
-                answer = self._commit_scene(req_id, scene, form, time.monotonic())
-                self._apply_state()
-            except Exception as commit_error:
-                answer = {"ok": False, "error": f"The scene could not be drawn: {commit_error!r}. Simplify it and try again."}
-        self._emit({"event": "rendered", "id": req_id, **answer})
-        return self._drain_render(self._render_seq)
 
     def _drain_render(self, seq):
         """Run the queued step commands, unless a cancel came first."""
         if seq != self._render_seq:
             return False
-        self._render_busy = False
         queued, self._render_queue = self._render_queue, []
         for item in queued:
             self._handle_render(item)
         return False
 
     def _reveal_render(self):
-        """Show the staged scene. Steps wait for its entrance, so no highlight flies before the drawing is there."""
+        """Show the staged diagram, then light the steps that waited for it."""
         req_id, scene, form = self._staged
         self._staged = None
         now = time.monotonic()
@@ -12641,11 +11878,7 @@ class Overlay(Gtk.Application):
             self._drop_bad_scene("reveal", error, now)
             self._drain_render(self._render_seq)
             return
-        if form.get("kind") == "constellation":
-            self._drain_render(self._render_seq)
-            return
-        self._render_busy = True
-        GLib.timeout_add(round((scenes.DRAW_START + scenes.DRAW_SECONDS) * 1000), self._drain_render, self._render_seq)
+        self._drain_render(self._render_seq)
 
     # ---- the stage host ----
     def _staging(self):
@@ -14019,10 +13252,9 @@ def render(path, scale=2):
 
 
 def _render_diagram(folder):
-    """Write diagram.png showing a settled material diagram (quiet and lit) in both themes."""
-    doc = {"title": "A four-stroke engine", "parts": [{"id": "e", "stencil": "engine", "at": [50, 50], "size": 90}],
-           "steps": [{"light": ["e.piston"], "caption": "Only the piston is lit"}]}
-    w, h, lift = 520, 620, 172
+    """Write diagram.png showing a settled constellation (quiet and with a node lit) in both themes."""
+    doc = {"title": "Web", "graph": "browser > dns:globe > server* > page:file"}
+    w, h, lift = 740, 620, 172
     out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w * 2, h * 2)
     cr = cairo.Context(out)
     kept = PALETTE
@@ -14032,7 +13264,7 @@ def _render_diagram(folder):
             s = Scene(0.0)
             s.lift = lift
             s.handle({"state": "speaking"}, 0.0)
-            s.render_command({"scene": doc}, 0.0)
+            s.render_command({"diagram": doc}, 0.0)
             t = 0.0
             while t < 2.2:
                 s.step(t)
@@ -14052,7 +13284,7 @@ def _render_diagram(folder):
                 cr.set_source_rgb(0.075, 0.075, 0.09)
                 cr.paint()
             s.draw_swarm(cr, w, t, lift)
-            _note(cr, f"{theme}: {'piston lit' if step else 'quiet'}", 10, 8)
+            _note(cr, f"{theme}: {'browser lit' if step else 'quiet'}", 10, 8)
             cr.restore()
     _use_theme("light" if kept is THEMES["light"] else "dark")
     out.write_to_png(os.path.join(folder, "diagram.png"))
@@ -14960,8 +14192,8 @@ def _check_placement():
 
 
 def _check_render():
-    """The render tool's scenes in the engine, on a virtual clock: a diagram grows the swarm and the swarm shrinks back,
-    steps and morphs answer, activity forms do not wipe a scene, and the scene's life follows the turn."""
+    """The render tool's diagrams in the engine, on a virtual clock: an old scene gets a refusal, a diagram grows the
+    swarm and the swarm shrinks back, steps answer, activity forms do not wipe a diagram, and its life follows the turn."""
     _check_placement()
     scene, clock = Scene(0.0), [0.0]
 
@@ -15067,96 +14299,40 @@ def _check_render():
     finally:
         FORM_FOR_STATE["listening"] = saved_listen
 
-    icon = {"parts": [{"id": "g", "rect": [30, 30, 40, 10], "motion": "turn"}]}
-    labelled = {"parts": [{"id": "a", "circle": [30, 50, 15], "label": "in"},
-                          {"id": "b", "arrow": [50, 50, 90, 50], "motion": "flow"}],
-                "steps": [{"light": ["a"], "caption": "First."}, {"light": ["b"]}]}
+    web = {"diagram": {"title": "Web", "graph": "browser > dns:globe > server* > page"}}
     scene.handle({"state": "thinking"}, 0.0)
     run(0.5)
-    assert not scene.render_command({"scene": {"parts": []}}, clock[0])["ok"] and scene.render is None
+    # An old scene request gets a refusal that names show_diagram, and nothing shows.
+    gone = scene.render_command({"scene": {"parts": [{"id": "a", "circle": [50, 50, 10]}]}}, clock[0])
+    assert gone == {"ok": False, "error": SCENE_GONE} and "show_diagram" in SCENE_GONE and scene.render is None, gone
     assert scene.render_command({"step": 1}, clock[0])["error"].startswith("No scene")
-    (icon_grains, _), (diagram_grains, _) = scenes.SIZE_FORM["icon"], scenes.SIZE_FORM["diagram"]
     sizes = list(scene.size)
-    assert f"an icon of {icon_grains}" in scene.render_command({"scene": icon}, clock[0])["said"]
+    assert scene.render_command(web, clock[0])["ok"]
     run(1)
-    assert scene.form == "render" and len(scene.x) == icon_grains
-    assert f"a diagram of {diagram_grains}" in scene.render_command({"scene": labelled}, clock[0])["said"]
-    run(1)
-    assert len(scene.x) == len(scene.idx) == len(scene.size) == diagram_grains and scene.label_text(clock[0]) == ""
-    assert scene.size[0] == sizes[0] * scenes.GRAIN_SCALE["diagram"]
-    assert "Caption: First." in scene.render_command({"step": 1}, clock[0])["said"] and scene.loosen <= RENDER_LOOSEN
-    assert not scene.render_command({"step": 3}, clock[0])["ok"]
     scene.handle({"state": "thinking", "activity": "WebSearch"}, clock[0])
     run(1)
-    assert scene.form == "render", "an activity form of the same turn wiped the scene"
-    scene.render_command({"scene": icon}, clock[0])  # A smaller scene: the extra grains fade, then go.
-    run(RENDER_FADE + 0.2)
-    assert scene.form == "render" and len(scene.x) == icon_grains
-    scene.render_command({"scene": labelled}, clock[0])
+    assert scene.form == "render", "an activity form of the same turn wiped the diagram"
     scene.handle({"state": "speaking"}, clock[0])
     run(2)
     scene.handle({"state": "result"}, clock[0])
     run(scenes.SCENE_SECONDS - 1)
-    assert scene.form == "render", "the scene left before its time"
+    assert scene.form == "render", "the diagram left before its time"
     run(2 + RENDER_FADE)
     assert scene.form == "loop" and scene.render is None and len(scene.x) == GRAINS and scene.size == sizes
-    scene.render_command({"scene": labelled}, clock[0])
+    scene.render_command(web, clock[0])
     run(1)
     scene.handle({"state": "listening"}, clock[0])
     run(RENDER_FADE + 0.1)
     assert scene.form != "render" and len(scene.x) == len(scene.loose_until) == GRAINS
     assert scene.render_command({"clear": True}, clock[0])["said"] == "Nothing was on screen."
-    # A step moves a part: its grains fly there together, and the whole scene brings it back.
-    moved = {"view": [160, 100], "parts": [{"id": "a", "rect": [10, 40, 30, 20]},
-                                           {"id": "b", "rect": [120, 40, 30, 20]},
-                                           {"id": "p", "circle": [25, 50, 4], "fill": True}],
-             "steps": [{"light": ["p"], "move": {"p": {"to": [110, 0]}}}]}
-    scene.handle({"state": "speaking"}, clock[0])
-    scene.render_command({"scene": moved}, clock[0])
-    run(1.5)
-    mine = [i for i, o in enumerate(scene.render_form["owner"]) if o == "p"]
-    dy = scene.render["dy"]
-
-    def packet():
-        xs = [scene.x[i] for i in mine]
-        mid = sum(xs) / len(xs)
-        return mid, max(abs(x - mid) for x in xs), sum(scene.y[i] for i in mine) / len(mine) - dy
-
-    x0, size, y0 = packet()
-    scene.render_command({"step": 1}, clock[0])
-    widest = 0.0
-    for _ in range(int(scenes.FLIGHT * 1000 / TICK_MS)):
-        run(TICK_MS / 1000)
-        widest = max(widest, packet()[1])
-    run(0.8)
-    x1, _, y1 = packet()
-    step = scene.render_form["box"] / 160
-    assert abs(x1 - x0 - 110 * step) < 2 and abs(y1 - y0) < 2, (x0, x1, y0, y1)
-    assert widest < size + 6, (size, widest)  # It flies whole, not as a cloud.
-    scene.render_command({"step": 0}, clock[0])
-    run(1.8)
-    assert abs(packet()[0] - x0) < 2
-    # Plain rows of four and nine boxes never freeze the swarm, and a bad scene commit leaves state clean.
-    for count in (4, 9):
-        row_doc = {"name": f"voiceflow{count}", "layout": "row",
-                   "nodes": [{"id": f"n{k}", "label": "voice in"} for k in range(count)]}
-        out = scene.render_command({"scene": row_doc}, clock[0])
-        assert out["ok"], (count, out)
-        run(0.5)
-        assert scene.render is not None and len(scene.x) == scene.render_form["budget"]
-    scene.render_command({"clear": True}, clock[0])
     run(RENDER_FADE + 0.5)
-    assert scene.render is None
     scene.drop_render(clock[0])
     assert scene.render is None and scene.render_form is None
-    bad = {"name": "bad", "title": "", "kind": "diagram", "budget": 1201, "box": 560, "size": (100, 100),
-           "scene": {"steps": [], "parts": [], "name": "bad", "size": "diagram"}, "drawn": [], "step": None,
-           "caption": "", "x": [0.0], "y": [0.0], "part": [0], "move": [None], "bright": [1.0], "owner": ["a"],
-           "parts": [], "labels": [], "grains": {}, "notes": []}
+    # A form that fails as it commits leaves the state clean.
     try:
-        scene.render_commit(bad["scene"], bad, clock[0])
-        assert False, "expected bad form commit to fail"
-    except IndexError:
+        scene.render_commit({"steps": [], "nodes": 1}, {"kind": "constellation"}, clock[0])
+        assert False, "expected a bad form's commit to fail"
+    except KeyError:
         pass
     assert scene.render is None and scene.render_form is None
     run(0.2)
@@ -16452,8 +15628,7 @@ def _send_turns():
         return {"send": [{"id": f"m{k}", "outcome": "landed"} for k in range(n)]}
 
     go = {"state": "thinking", "activity": "t3_thread_send"}
-    diagram = {"scene": {"name": "motion", "size": "diagram", "view": [160, 100],
-                         "parts": [{"id": "a", "circle": [50, 50, 18]}, {"id": "b", "circle": [110, 50, 18]}]}}
+    diagram = {"diagram": {"graph": "a > b"}}
     return [
         ("one", [(0.0, {"state": "thinking"}), (2.0, go), (2.0, {"send": names(1)}), (3.6, landed(1)),
                  (9.0, {"state": "speaking"}), (11.0, {"state": "ready"})], 14.0),
