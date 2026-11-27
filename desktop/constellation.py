@@ -32,7 +32,7 @@ RAMP, RUN = 0.35, 0.6  # s: a node's light ramp, and its incoming thread's light
 STAGGER, LAND = 0.07, 0.55  # s: between nodes leaving Rook, and each node's flight.
 NAME_FADE = 0.45  # s
 DUST_FADE, HANDBACK = 0.45, 0.25  # s: a node's grains fade as its line draws on, and come back at the exit.
-SPARKS, FLOW = 34, 5  # Grains that gather on a lit node, and motes that run along a lit thread.
+SPARKS = 34  # Spark records per constellation; they stay dark (the lit node glows in its filament line).
 
 ICONS = frozenset(filament.ICONS) - {"dot"}  # Only icons the filament set draws; any other name is a ring.
 SYNONYMS = {
@@ -481,8 +481,8 @@ class Constellation:
     """One laid-out constellation: its light state, the grains' per-frame targets, and the filament layer's state.
 
     The drawing is the filament layer (lines()). The grains only move: they fly out from Rook and land on each icon's
-    strokes, go dark as its line draws on, run along a thread as its node lights, gather on the lit node as sparks,
-    and light again to carry the drawing home at the exit (end()). targets() recomputes only what moves, so a settled
+    strokes, go dark as its line draws on, and light again to carry the drawing home at the exit (end()). Lighting a
+    node is the lines' work alone: no loose grain flutters over them. targets() recomputes only what moves, so a settled
     constellation costs a few grains a frame."""
 
     def __init__(self, plan, nodes, recs):
@@ -592,7 +592,7 @@ class Constellation:
         if dy != self.dy:
             self.dy, self.drawn = dy, {}
         tx, ty, tb, tz = self.tx, self.ty, self.tb, self.tz
-        recs, pos, out = self.recs, self.plan["pos"], self._out(now)
+        recs, pos = self.recs, self.plan["pos"]
         back = 0.0 if self.ending is None else _smooth((now - self.ending) / HANDBACK)
         for k in range(self.n):
             end = STAGGER * k + 0.12 + LAND
@@ -616,64 +616,18 @@ class Constellation:
             for i in self.by_node[k]:
                 _, _, ox, oy, w, _ = recs[i]
                 tx[i], ty[i], tb[i], tz[i] = px + ox, py + oy, level * w, 0.0
-        for e, (a, _, arrow) in enumerate(self.plan["links"]):
-            hot, _, run = self._link(e, now)
-            pts, idx = self.curves[e], self.by_link[e]
-            if hot is None or out <= 0.0:  # Dark, waiting at the thread's start or on it.
-                if self.drawn.get(("l", e)) is not None:
-                    continue
-                self.drawn[("l", e)] = True
-                for j, i in enumerate(idx):
-                    x, y = _on(pts, 0.0 if j < 3 + FLOW else recs[i][2])
-                    tx[i], ty[i], tb[i], tz[i] = x, y + dy, 0.0, 0.0
+        for e in range(len(self.plan["links"])):  # The threads' grains wait dark on them: the lines carry the light.
+            if self.drawn.get(("l", e)):
                 continue
-            self.drawn[("l", e)] = None
-            back_run = hot == a and not arrow  # A plain line lit at its start runs back.
-            since = now - self.lit_at
-            flow, ramp = since * 70.0 / self.lengths[e], _smooth((since - 0.3) / 0.4) * out
-            for j, i in enumerate(idx[:3 + FLOW]):
-                if j < 3:  # The head of the light: a small knot of grains, while the light runs.
-                    u, bright = run, (1.4 * out if run < 1.0 else 0.0)
-                else:  # Then motes flow along it toward the node it lights, dark while they wrap round.
-                    u = (flow + (j - 3) / FLOW) % 1.0
-                    bright = 0.9 * math.sin(math.pi * u) * ramp if 0.1 < u <= run else 0.0
-                x, y = _on(pts, 1.0 - u if back_run else u)
-                tx[i], ty[i], tb[i], tz[i] = x, y + dy, bright, 0.0
-        self._sparks(now, dy, out)
+            self.drawn[("l", e)] = True
+            for i in self.by_link[e]:
+                x, y = _on(self.curves[e], recs[i][2])
+                tx[i], ty[i], tb[i], tz[i] = x, y + dy, 0.0, 0.0
+        if not self.drawn.get("s"):  # So do the sparks: a lit node glows in its own line, never in loose grains.
+            self.drawn["s"] = True
+            for i in self.sparks:
+                tb[i] = 0.0
         return tx, ty, tb, tz
-
-    def _sparks(self, now, dy, out):
-        """When a node lights, sparks from round it gather onto its strokes and flare; then two glints run round it."""
-        tx, ty, tb, tz, recs = self.tx, self.ty, self.tb, self.tz, self.recs
-        k = self.focal
-        since = now - self.lit_at
-        if k is None or out <= 0.0:
-            if self.drawn.get("s") != "dark":
-                self.drawn["s"] = "dark"
-                for i in self.sparks:
-                    tb[i] = 0.0
-            return
-        px, py, rr = self.plan["pos"][k][0], self.plan["pos"][k][1] + dy, self.plan["r"][k]
-        u, name = rr * filament.GRID, self.icons[k]
-        settled = since > 1.1
-        if self.drawn.get("s") != (k, self.lit_at, settled):
-            self.drawn["s"] = (k, self.lit_at, settled) if settled else None
-            q = _smooth(since / 0.65)
-            flare = 1.0 if since < 0.65 else max(0.0, 1.0 - (since - 0.65) / 0.45)
-            fade_in = _smooth((since - 0.1) / 0.25)  # Dark while the springs carry them over from the last node.
-            for j, i in enumerate(self.sparks[2:SPARKS]):
-                _, _, ang, reach, share, _ = recs[i]
-                gx, gy = filament.point_at(name, share)
-                swirl = (1.0 - q) * 0.9
-                sx, sy = px + rr * reach * math.cos(ang + swirl), py + 0.8 * rr * reach * math.sin(ang + swirl)
-                tx[i], ty[i] = sx + (px + gx * u - sx) * q, sy + (py + gy * u - sy) * q
-                tb[i], tz[i] = 1.1 * (0.25 + 0.75 * q) * flare * fade_in * out, 0.0
-            for i in self.sparks[SPARKS:]:
-                tx[i], ty[i], tb[i] = px, py, 0.0
-        glint = _smooth((since - 0.65) / 0.5) * out
-        for j, i in enumerate(self.sparks[:2]):
-            gx, gy = filament.point_at(name, 0.16 * since + 0.5 * j)
-            tx[i], ty[i], tb[i], tz[i] = px + gx * u, py + gy * u, 1.2 * glint, 0.0
 
 
 def make(line, measure=_estimate, budget=BUDGET, measure_title=None):
@@ -769,7 +723,8 @@ def _check():
     assert con.focal == 1 and st[12 + 3] > st[24 + 3] + 0.3  # Lit, and white-hot:
     assert all(abs(a - b) < 1e-6 for a, b in zip(st[12:15], filament.HOT))
     assert st[12 * 3 + 5] == 1.0 and st[12 * 4 + 5] == -1.0  # The thread into b has run its light; b to c has none.
-    assert sum(1 for i in con.sparks if con.tb[i] > 0) >= SPARKS - 2  # The sparks gather on b.
+    lit = [i for i in con.sparks + [i for e in con.by_link for i in e] if con.tb[i] > 0]
+    assert not lit, lit  # Lighting b lights no loose grain: the lines alone carry the light.
     con.light(3, 5.0)
     con.light([1, 2], 6.0)
     assert con.lit == {0, 1} and con.focal == 1 and 2 in con.known
