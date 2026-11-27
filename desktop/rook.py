@@ -10279,8 +10279,8 @@ def check_agent():
                 try:
                     claude_named = None
                     for kind in ("claude", "antigravity", "codex", "pi"):
-                        # The public copy has no game part, so its check runs with no game.
-                        c, sp, written = await start_session(kind, game=game_ns if (ROOT / "wow").is_dir() else None)
+                        # A copy without the game part, or a worktree whose wow/ holds only a cache, runs the check with no game.
+                        c, sp, written = await start_session(kind, game=game_ns if (ROOT / "wow/skills/wow/SKILL.md").is_file() else None)
                         assert "Call ⟦owner⟧ by ⟦his⟧ first name." in sp and "Send ⟦owner⟧'s builds to Opus." in sp, kind
                         assert sp.count("⟦") == 3, (kind, relay.settings.TOKEN.findall(sp))
                         assert all(text in sp for text in person), (kind, [s for s in person if s not in sp])
@@ -10300,7 +10300,7 @@ def check_agent():
                         assert not harness._has_skill("wow") or (  # The public tree ships no wow skill.
                             ("load the wow skill" in setup and "rook:wow" not in setup) if bare else (
                                 "load the rook:wow skill" in setup)), (kind, setup[:300])
-                        assert not (ROOT / "wow").is_dir() or game_ns.SKILL == ("wow" if bare else "rook:wow"), (kind, game_ns.SKILL)
+                        assert not (ROOT / "wow/skills/wow/SKILL.md").is_file() or game_ns.SKILL == ("wow" if bare else "rook:wow"), (kind, game_ns.SKILL)
                         assert c.name_skills("the rook:show skill") == ("the show skill" if bare else "the rook:show skill")
                         await c.submit(said, source="spoken")
                         assert said in turn_text(kind, written), (kind, turn_text(kind, written)[-200:])
