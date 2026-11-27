@@ -1012,7 +1012,7 @@ def bounded(argv, timeout, env=None):
 
 
 def install_again():
-    return "Run the install command again: curl -fsSL https://raw.githubusercontent.com/topmass/rook/main/install/get.sh | sh"
+    return "Run the install again, as in step 3 of INSTALL.md."
 
 
 def row_python(ctx):
@@ -1044,10 +1044,17 @@ def row_models(ctx):
     for repo in ("models--gradium--phonon-31m-en", "models--gradium--phonon-voices"):
         if not any((hub / repo / "snapshots").glob("*/*")):
             missing.append(f"the small voice ({repo.split('--')[-1]})")
-    if saved.get("voice_engine") == "medium" and desk.IS_LINUX:
+    # Rook speaks with the medium voice at medium_voice_url. The installer points it at its own server on loopback;
+    # any other address is a server on another computer, which needs no model here.
+    from urllib.parse import urlparse
+    host = urlparse(settings.medium_voice_url(saved)).hostname
+    medium = saved.get("voice_engine") == "medium"
+    remote = medium and host not in (None, "127.0.0.1", "localhost", "::1")
+    local = medium and not remote
+    if local and desk.IS_LINUX:
         if not any((settings.DATA / "rook/medium-voice/models").glob("*.gguf")):
             missing.append("the medium voice")
-    if saved.get("voice_engine") == "medium" and desk.IS_MAC and os.environ.get("ROOK_MEDIUM_QUANT", "8bit") == "8bit":
+    if local and desk.IS_MAC and os.environ.get("ROOK_MEDIUM_QUANT", "8bit") == "8bit":
         # The 8-bit model's files at their pinned sizes; the install checked their SHA-256 when it fetched them.
         pinned = json.loads((ROOK_ROOT / "install/medium-voice-model-8bit.json").read_text())
         snapshot = (settings.DATA / "rook/medium-voice/models" / ("models--" + pinned["repo"].replace("/", "--"))
@@ -1058,6 +1065,9 @@ def row_models(ctx):
             missing.append(f"the medium voice ({wrong[0]})")
     if missing:
         return False, "Missing on disk: " + ", ".join(missing) + ".", install_again()
+    if remote:
+        return True, (f"Every model is on disk. The medium voice runs on another computer ({host}), so it needs "
+                      "none here."), None
     return True, "Every model is on disk.", None
 
 
@@ -1160,7 +1170,7 @@ def row_agent(ctx):
     if state == "in":
         return True, f"{name} is signed in, checked {where}.", None
     return None, (f"{name}'s status command gave no plain answer." if name in ("Claude Code", "Codex") else
-                  f"{name} has no sign-in status to check."), "Step 10's relay.py verify --talk proves it with one real turn."
+                  f"{name} has no sign-in status to check."), "Step 10's relay.py verify --only talk proves it with one real turn."
 
 
 def row_output(ctx):
@@ -1312,7 +1322,7 @@ def row_talk(ctx):
         for row in rows:
             event = row.get("event")
             if event == "mic_silent" and not turns:  # Pure digital silence, as the turn path measures it.
-                return False, desk.silence_sentence(), "Pick a real microphone, then run relay.py verify --talk again."
+                return False, desk.silence_sentence(), "Pick a real microphone, then run relay.py verify --only talk again."
             if event == "empty_transcript":
                 empty = True  # A press with no words: a short or quiet press. Keep waiting for a real one.
             if event == "request" and row.get("source") == "spoken":
@@ -1555,6 +1565,21 @@ def check_verify():
             got = by_id(verify(["speech"], say=said.append, settle=0))
             assert got["speech"]["ok"] is False and "needs every model on disk" in got["speech"]["detail"], got
             model_file.write_text("x")
+            # The medium voice on a server elsewhere: no local model is asked for. On loopback it is this computer's.
+            os.environ.pop("ROOK_MEDIUM_VOICE_URL", None)
+            settings_file, real_url = base / "config/rook/settings.json", settings.MEDIUM_VOICE_URL
+            settings.MEDIUM_VOICE_URL = ""
+            for url in ("https://voice.example:8090", "http://127.0.0.1:8090"):
+                settings_file.write_text(json.dumps({"agent": "claude", "talk_keys": ["RightAlt"], "voice_engine": "medium",
+                                                     "medium_voice_url": url}) + "\n")
+                got = by_id(verify(["models", "speech"], say=said.append, settle=0))
+                if url.startswith("https"):
+                    assert got["models"]["ok"] is True and "another computer (voice.example)" in got["models"]["detail"] \
+                        and got["speech"]["ok"] is True, got
+                else:
+                    assert got["models"]["ok"] is False and "the medium voice" in got["models"]["detail"], got
+            settings.MEDIUM_VOICE_URL = real_url
+            settings_file.write_text('{"agent": "claude", "talk_keys": ["RightAlt"]}\n')
             muted = json.dumps([{"name": "mic", "description": "USB Mic", "mute": True, "properties": {"device.api": "alsa"}},
                                 {"name": "spk", "description": "Speakers", "mute": True, "properties": {"device.api": "alsa"}}])
             script(bin_dir / "pactl", f'case "$1" in get-default-source) echo mic ;; get-default-sink) echo spk ;; '
