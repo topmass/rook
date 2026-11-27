@@ -663,7 +663,7 @@ FIXTURE_FILES = {
     "relay_commands.py": 'HELP = """relay.py fixture-hello       Print the fixture\'s line."""\n'
                          'COMMANDS = {"fixture-hello": lambda argv: print("The fixture plugin says hello.")}\n',
     "skills/fixture-skill/SKILL.md": "---\nname: fixture-skill\ndescription: Say hello through the fixture.\n---\n\n"
-                                     "Run relay.py fixture-hello.\n",
+                                     "Run ⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py fixture-hello for ⟦owner⟧.\n",
     "prompts/slot.md": "Fixture line one.\n  Two spaces, a tab\there, no final newline",
     "server.py": "",
 }
@@ -746,7 +746,10 @@ def check():
         on = surface()
         for agent, key in (("claude", "rook-user:fixture-skill"), ("antigravity", "user:fixture-skill"),
                            ("codex", "fixture-skill")):
-            assert on[agent][key] == FIXTURE_FILES["skills/fixture-skill/SKILL.md"], agent
+            # Rendered as Rook's own skills are, so the plugin needs no path to Rook of its own.
+            python = "/usr/bin/python" if os.path.exists("/usr/bin/python") else sys.executable
+            assert on[agent][key] == FIXTURE_FILES["skills/fixture-skill/SKILL.md"].replace(
+                "⟦python⟧ ${CLAUDE_PLUGIN_ROOT}", f"{python} {root}/plugin").replace("⟦owner⟧", "the person"), agent
             assert {k: v for k, v in on[agent].items() if k != key} == bare[agent], agent
         assert on["fragment"] == FIXTURE_FILES["prompts/slot.md"] and on["entries"] == [["fixture", on["fragment"]]]
         assert on["claude_denied"] == ["mcp__fixture__secret"] and on["codex_mcp"] == bare["codex_mcp"] + 1

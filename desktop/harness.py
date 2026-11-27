@@ -28,6 +28,7 @@ Rook's tool servers, such as mcp__t3__t3_thread_send. Other names show as the ac
 """
 from abc import ABC, abstractmethod
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -60,8 +61,37 @@ def skill_sources(wow=False, plugin_skills=None):
 
 
 def plugin_user_skills():
-    """Return the skills folders of active user plugins. Their skills join the user's own, as rook-user:<name>."""
-    return tuple(Path(folder) for folder in plugin_loader.skill_dirs()[1])
+    """Return the skills folders of active user plugins. Their skills join the user's own, as rook-user:<name>.
+    A folder whose skills hold Rook's tokens comes back as a copy in the runtime folder, filled in as Rook's own
+    skills are: ${CLAUDE_SKILL_DIR}, ${CLAUDE_PLUGIN_ROOT} and the owner tokens."""
+    copies = desk.runtime_dir() / "rook-user-plugins"
+    folders = tuple(_rendered_skills(Path(folder), copies) for folder in plugin_loader.skill_dirs()[1])
+    for old in sorted(copies.iterdir()) if copies.is_dir() else ():
+        if old not in folders:  # A copy for a plugin turned off or removed since.
+            shutil.rmtree(old, ignore_errors=True)
+    return folders
+
+
+def _rendered_skills(folder, copies):
+    try:
+        files = [file for file in sorted(folder.rglob("*"))
+                 if file.is_file() and "__pycache__" not in file.relative_to(folder).parts]
+        raw = {file: file.read_text() for file in files if file.suffix == ".md"}
+        texts = {file: settings.render(text.replace("${CLAUDE_SKILL_DIR}", str(folder / file.relative_to(folder).parts[0]))
+                                       .replace("${CLAUDE_PLUGIN_ROOT}", str(Path(__file__).resolve().parent.parent / "plugin")))
+                 for file, text in raw.items()}
+        if texts == raw:
+            return folder
+        target = copies / hashlib.sha1(str(folder).encode()).hexdigest()[:12]
+        shutil.rmtree(target, ignore_errors=True)
+        for file in files:
+            out = target / file.relative_to(folder)
+            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            out.write_text(texts[file]) if file in texts else shutil.copy2(file, out)
+        return target
+    except (OSError, ValueError) as error:  # Rook still starts, with the skills as written.
+        print(f"plugin skills: rendering {folder} failed ({type(error).__name__})", file=sys.stderr)
+        return folder
 
 
 def _has_skill(name):
