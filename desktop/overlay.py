@@ -48,6 +48,11 @@ Protocol, stdin (one JSON object per line):
     The guide never shows while Rook is dark or hidden.
     {"dark": true} hides Rook whenever no turn shows: no resting loop, captions, or labels. A turn shows as usual
     and fades away when it ends. {"dark": false} shows Rook again.
+    "quiet" with "thinking" (true or false) says whether the turn is one the owner did not ask for. With true, Rook
+    stays at rest on its loop, in the same place with the same grains, and a comet of light laps the loop (see
+    QUIET_LAP). It shows no label, no activity form, and no send fan. Thinking without it, or with false (a steer), shows
+    the turn as usual. Any other state ends it: "speaking" pulls the swarm down, and "hidden" leaves it at rest. A quiet
+    turn shows nothing while Rook is dark.
     {"stage": true} draws diagrams and the answer panel in the stage host (stage/host.py) instead of the swarm and the
     panel window, with the same messages and answers; when the host cannot start or dies, the overlay draws as before.
     {"render": {"id": "7", "scene": {...}}} has the swarm form a scene of the render tool (see desktop/render.py);
@@ -187,6 +192,10 @@ FALLBACK_TOP, FALLBACK_LIFT = 72, 124
 # While this window is focused, Rook steps aside for WoW's own overlay.
 GAME_TITLE = "World of Warcraft"
 LOOP_PERIOD = 10.5
+# A quiet turn (see the protocol): a comet laps the resting loop once every QUIET_LAP s. Its head adds QUIET_PEAK to
+# the grains' brightness, and the whole loop adds QUIET_LIFT. The GL tonemap compresses these: on screen the head is
+# about 1.3 times as bright and the loop about 5% brighter. It fades in over QUIET_IN s and out over QUIET_OUT s.
+QUIET_LAP, QUIET_PEAK, QUIET_LIFT, QUIET_IN, QUIET_OUT = 2.4, 2.2, 0.18, 0.4, 0.3
 REST_EVERY = 3
 # Particle engine prototype variant: "baseline", "A" (soft HDR + depth), "B" (+ Kawase glow), "C" (+ 3D forms).
 PARTICLE_VARIANT = "C"
@@ -4541,6 +4550,7 @@ class Scene:
         self.next_gesture = now + 4.0
         self.vignette = (0.0, 0.0, 50.0, 50.0)
         self.home = False
+        self.quiet, self.quiet_mix = False, 0.0  # A quiet turn thinks now, and how far its comet has faded in.
         self.extra = 1.0
         self.lift = FALLBACK_LIFT
         self.rest_pad = REST_PAD  # How far below the canvas top the resting loop's centre sits.
@@ -5241,12 +5251,14 @@ class Scene:
             elif state in ("result", "error", "hidden"):
                 for c in self.captions:
                     c.ended = True
+        if state in STATES:
+            self.quiet = state == "thinking" and msg.get("quiet") is True
         if "send" in msg:
             raw_send = msg.get("send")
             items = [raw_send] if isinstance(raw_send, dict) else (raw_send if isinstance(raw_send, list) else [])
             if self.state != "thinking" and not self.dark and self.dispatch_active(now):
                 pass  # The fan's teardown plays out; nothing joins it.
-            elif not items or self.state != "thinking" or self.dark:
+            elif not items or self.state != "thinking" or self.dark or self.quiet:
                 # While speaking (or any state other than active thinking), never show a send fan over the active form.
                 self.dispatch = None
             elif self.dispatch is not None and self.dispatch.active(now) and self.dispatch.update_outcomes(items, now):
@@ -5321,7 +5333,7 @@ class Scene:
     def is_home(self, now, held=False):
         """True when no turn is showing: the swarm rests in the loop at the top of the monitor."""
         s = self.state
-        if s in ("ready", "hidden"):
+        if s in ("ready", "hidden") or (s == "thinking" and self.quiet):
             return True
         if s == "result":
             return not (held or self.resting(now))
@@ -5353,6 +5365,8 @@ class Scene:
             return "LAST ANSWER"
         if self.home and self.waiting:
             return self.waiting
+        if self.quiet:
+            return ""
         if self.reading is not None and now < self.reading + READ_ZOOM + READ_HOLD:
             return self.reading_label
         if self.state == "thinking" and self.activity and not (
@@ -5405,8 +5419,11 @@ class Scene:
         goal = (1.05 if self.rest_hint else 0.85) if self.home else {"listening": 0.8 + 0.4 * self.level, "speaking": 0.9 + 0.3 * self.voice,
                                        "error": 0.45, "result": 0.75 + 0.06 * math.sin(t * 2 * math.pi / 5.5)}.get(s, 0.9)
         self.intensity += (goal - self.intensity) * _glide(dt, 0.25)
+        if self.quiet or self.quiet_mix:
+            on = self.quiet and self.form == "loop" and not self.dark
+            self.quiet_mix = min(1.0, self.quiet_mix + dt / QUIET_IN) if on else max(0.0, self.quiet_mix - dt / QUIET_OUT)
         self.err += ((1.0 if s == "error" and not self.home else 0.0) - self.err) * _glide(dt, 0.8)
-        share = 0.09 if s == "thinking" and self.activity else 0.06 if s == "thinking" else 0.035
+        share = 0.035 if self.quiet else 0.09 if s == "thinking" and self.activity else 0.06 if s == "thinking" else 0.035
         self.share += (share - self.share) * _glide(dt, 0.8)
         self.cohesion += ((0.4 if s == "error" else 1.0) - self.cohesion) * _glide(dt, 0.3)
         if self.reading is not None and now > self.reading + READ_ZOOM + READ_HOLD + READ_RETURN + 0.3:
@@ -5612,6 +5629,14 @@ class Scene:
                 ty[i] = rest_y + 26 * 2 * sa * ca + offset
                 # The strand through the crossing at a = 0 is in front; the other passes behind it.
                 tb[i] = 0.55 + 0.225 * (ca + 1)
+            if self.quiet_mix:
+                # A quiet turn: only brightness changes. The comet keys on each grain's place on the loop, so it follows
+                # the figure eight through the crossing: a soft head 0.24 rad ahead of it and a tail 1.2 rad behind.
+                glow, head, tau, exp = _smooth(self.quiet_mix), now * 2 * math.pi / QUIET_LAP, 2 * math.pi, math.exp
+                for i in self.idx:
+                    d = (points[i][0] + flow - head + math.pi) % tau - math.pi
+                    pulse = exp(-(d / 0.24) ** 2) if d > 0 else (1 + d / 1.2) ** 3 if d > -1.2 else 0.0
+                    tb[i] *= 1 + glow * (QUIET_LIFT + QUIET_PEAK * pulse)
             return tx, ty, tb
         if name in SHAPE_MOTION:
             return self._shape_motion(name, points, now - self.form_at)
@@ -15111,6 +15136,36 @@ def _check_render():
     assert caption[1] + 8 < guide[0] and guide[1] < CAPTION_H + GUIDE_ROOM - 24 and 0 < guide[2] < guide[3] < WIDTH - 1, (
         caption, guide)
     print("onboarding guide (shows, listens, clears, expires, dark, caps, send fan, worst case): ok")
+    # A quiet turn: Rook stays at rest with no label, form, or send fan, and only a comet lights the loop. Speaking
+    # pulls it down, hidden leaves it at rest, a steer (quiet false) drops it down, and dark shows nothing.
+    ready, quiet = (0.0, {"state": "ready"}), (0.5, {"state": "thinking", "quiet": True})
+    plain = _simulate([ready], 2.0)[0]
+    work = [ready, quiet, (0.6, {"activity": "WebSearch"}), (1.0, {"send": [{"id": "k1", "name": "Rook build"}]})]
+    q = _simulate(work, 2.0)[0]
+    assert q.home and q.form == "loop" and q.label_text(2.0) == "" and q.dispatch is None and q.quiet_mix == 1.0
+    assert (q.x, q.y) == (plain.x, plain.y), "a quiet turn moved the grains"
+    lit = [b / a for a, b in zip(plain.depth, q.depth)]
+    top = max(range(GRAINS), key=lit.__getitem__)
+    gap = (_form("loop")[top][0] + 2.0 * 2 * math.pi / LOOP_PERIOD - 2.0 * 2 * math.pi / QUIET_LAP + math.pi) % (
+        2 * math.pi) - math.pi
+    assert min(lit) > 1.07 and lit[top] > 1.75 and abs(gap) < 0.1, (min(lit), lit[top], gap)
+    for end, home in (({"state": "speaking"}, False), ({"state": "hidden"}, True),
+                      ({"state": "thinking", "quiet": False}, False)):
+        q, ref = _simulate(work, 2.0)[0], _simulate([ready], 2.0)[0]  # ref: the same end with no quiet turn before.
+        q.handle(end, 2.0)
+        ref.handle(end, 2.0)
+        for t in (2.1, 2.2, 2.3, 2.35, 2.6):
+            was = q.quiet_mix
+            q.step(t)
+            ref.step(t)
+            assert q.quiet_mix < was or t == 2.6, (end, t, q.quiet_mix)  # A fade, not a snap.
+        assert q.quiet_mix == 0.0 and q.home == home and (q.form == "loop") == home, (end, q.form)
+        assert not home or (q.x, q.y) == (ref.x, ref.y), "a pass moved the grains"
+    q = _simulate([ready, (0.5, {"state": "thinking", "quiet": False})], 2.0)[0]
+    assert not q.home and q.form != "loop" and q.label_text(2.0) == "THINKING" and q.quiet_mix == 0.0
+    q = _simulate([ready, (0.2, {"dark": True}), quiet], 2.0)[0]
+    assert q.home and q.quiet_mix == 0.0  # At rest while dark, so the window shows nothing (see _should_show).
+    print("quiet turn (parked, comet, no label, activity or fan; speaking, pass, steer, normal, dark): ok")
     print("render scenes in the engine: ok")
 
 

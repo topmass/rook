@@ -195,6 +195,34 @@ SETUP_SECONDS = 30
 FIRST_OUTPUT_SECONDS = 90
 STALL_AGAIN = "My agent stalled, so I started it again. I am on your request now."
 STALL_ASK = "My agent stalled, so I stopped it. Please say that again."
+# The sign-in errors each agent prints. Claude Code: "Failed to authenticate: OAuth session expired and could not be
+# refreshed", "Not logged in · Please run /login", "OAuth token revoked", "Invalid API key", "API Error: 401". Codex:
+# "your refresh token has expired. Please log out and sign in again", "Not logged in", "codex login". Antigravity:
+# "You are not logged into Antigravity.", "Please sign in", "No browser is available here". Pi: "Authentication failed
+# for ...", "No API key found for ...". A status probe can say signed in while the turn fails, so only the text counts.
+SIGNIN_ERROR = re.compile(r"/login|oauth|expired|revoked|not (?:signed|logged) in|sign in again|please sign in|"
+                          r"codex login|login required|refresh token|api key|authenticat|unauthori[sz]ed|\b401\b|"
+                          r"no browser is available", re.IGNORECASE)
+SIGNIN_FIX = {"claude": "Run claude auth login in a terminal to sign in again.",
+              "antigravity": "Run agy in a terminal and finish the Google sign-in.",
+              "codex": "Run codex login in a terminal to sign in again.",
+              "pi": "Run pi in a terminal and type /login to sign in again."}
+# A recording whose loudest block RMS stays under this is digital silence: the input gives no sound at all. A real
+# microphone's noise floor sits far above it, near AirType's silence floor of 0.008.
+MIC_SILENT_PEAK = 1e-5
+MIC_SILENT_REPEAT = 600  # The microphone line is said at most once in this many seconds.
+
+
+def failure_line(agent, name, error):
+    """The one sentence Rook says for a failed turn: how to sign in again, or a plain line. Never the raw error."""
+    if SIGNIN_ERROR.search(error or ""):
+        return f"I couldn't reach {name}: its sign-in expired. {SIGNIN_FIX.get(agent, 'Sign in to it again.')}"
+    return f"{name} hit an error, so I couldn't finish that. Please try again."
+
+
+def mic_silent_line():
+    """The sentence for a recording that is pure digital silence."""
+    return "I'm not getting any sound from your microphone. Check which input your computer is using."
 # The owner's stop words: a spoken request that opens with one cuts the running turn at once. stop_intent reads them, in
 # this order. Longer phrases come first.
 STOP_FILLER = ("hold on", "hang on", "all right", "alright", "hey", "okay", "ok", "rook", "wait", "please", "um", "uh",
@@ -2499,6 +2527,7 @@ class Companion:
 
     def level_changed(self, value):
         self.level, self.level_at = value, time.monotonic()
+        self.level_peak = max(getattr(self, "level_peak", None) or 0.0, value)  # The loudest block of this recording.
 
     async def watch_stuck(self):
         """The stuck-state watchdog: see RECORDING_STALL_SECONDS and TURN_QUIET_SECONDS. It logs loudly and recovers
@@ -2582,6 +2611,8 @@ class Companion:
                                                                "words, such as \"Your phone's in.\"")))
 
     def show(self, state, **fields):
+        if state == "thinking":  # A turn the owner did not ask for thinks quietly: the overlay stays at rest until speech.
+            fields = {"quiet": not self.matt_turn, **fields}
         entering_speaking = False
         if state and state != self.overlay_last.get("state"):
             self.state_at = time.monotonic()
@@ -3257,6 +3288,14 @@ class Companion:
                     # Drop the result only when it answers no pending question.
                     self.warming = False
                     if not self.pending_turns.intersection(completed):
+                        error = message.get("result") or "\n".join(message.get("errors") or [])
+                        if (message.get("is_error") and SIGNIN_ERROR.search(error)
+                                and self.latest_turn in self.pending_turns and self.capture_finished.is_set()):
+                            self.stop_turn()  # The setup turn failed its sign-in: the owner's turn would fail the same.
+                            self.last_reply = {"spoken": failure_line(getattr(self, "agent_name", None),
+                                                                         self.harness.name, error),
+                                               "details": error}
+                            self.speak()
                         continue
                 self.pending_turns.difference_update(completed)
                 if completed == [None] and len(self.pending_turns) == 1:
@@ -3265,11 +3304,12 @@ class Companion:
                 if self.phone and (self.phone.lines or self.phone.draft_timer) and not self.pending_turns:
                     self.phone.turn_ended()
                 answer = message.get("result") or "\n".join(message.get("errors") or [])
-                # A signed-out agent: the person hears how to sign in, and a typed request prints it.
-                signin = (message.get("is_error") and "/login" in answer and getattr(self, "agent_name", None) == "claude"
-                          and "Claude Code is not signed in. Run claude auth login in a terminal, then ask again.")
-                if signin:  # "Not logged in · Please run /login".
-                    answer = signin
+                # A failed turn is said in one sentence. A signed-out agent: the person hears how to sign in, and a
+                # typed request prints it.
+                failed = message.get("is_error") and failure_line(getattr(self, "agent_name", None), self.harness.name,
+                                                                  answer)
+                if failed and SIGNIN_ERROR.search(answer):
+                    answer = failed
                 if not message.get("is_error"):
                     answer = self.strip_pass(answer)
                 marked, answer = answer, unmarked(answer)
@@ -3306,8 +3346,8 @@ class Companion:
                     self.finish_turn_timing(completed)
                     continue
                 self.show(None, activity="")
-                if signin and not (self.silenced_turn in completed or muted):
-                    self.last_reply = {"spoken": answer, "details": answer}
+                if failed and not (self.silenced_turn in completed or muted):
+                    self.last_reply = {"spoken": failed, "details": answer or failed}
                     self.speak()
                 elif message.get("is_error"):
                     self.show("error", details=answer or f"{self.harness.name} could not finish the request.")
@@ -5712,7 +5752,7 @@ class Companion:
         self.stop_voice()
         self.capture_finished.clear()
         gen = self.recording_gen = self.recording_gen + 1
-        self.level = 0
+        self.level, self.level_peak = 0, None
         self.recording = True
         self.recording_started.set()
         self.show("listening", level=0.0)
@@ -5782,7 +5822,16 @@ class Companion:
             self.log("empty_transcript")
             # A press with nothing said silences Rook. It never cancels the turn: a press can be an accident.
             self.silence(speaking)  # Its stop_voice() also resumes a video Rook paused: no reply follows.
-            self.show_resting()
+            # One exception: pure digital silence means the input gives no sound, which a real microphone never does.
+            peak, now = getattr(self, "level_peak", None), time.monotonic()
+            if peak is not None and peak < MIC_SILENT_PEAK and now - getattr(self, "mic_told_at", -MIC_SILENT_REPEAT) \
+                    >= MIC_SILENT_REPEAT:
+                self.mic_told_at = now
+                self.log("mic_silent", peak=peak)
+                self.last_reply = {"spoken": mic_silent_line(), "details": mic_silent_line()}
+                self.speak()
+            else:
+                self.show_resting()
 
     def show_resting(self):
         """After a talk that sends nothing, show what Rook showed before it: the turn in progress, the last reply,
@@ -10309,17 +10358,54 @@ def check_speech():
         await reader
         assert lit == ["9", 1, 2, 0], lit
 
-        # 9. Error turn speaks nothing.
-        c, sent, _, _, _, _, _ = make_companion()
-        await c.submit("Fail.", source="spoken")
+        # 9. A failed turn says one plain sentence, never the raw error, and the panel leaves thinking.
+        async def fail_turn(error, agent="claude", name="Claude Code", warm=False):
+            c, sent, _, states, _, _, _ = make_companion()
+            c.agent_name, c.harness.name = agent, name
+            await c.submit("Fail.", source="spoken")
+            c.warming = warm  # The setup turn is still running, and its own result fails.
 
-        async def errored(_):
-            yield {"type": "result", "user_message_uuids": sorted(c.pending_turns),
-                   "errors": ["Quota exceeded."], "is_error": True, "terminal_reason": "error"}
+            async def errored(_):
+                yield {"type": "result", "user_message_uuids": ["setup"] if warm else sorted(c.pending_turns),
+                       "errors": [error], "is_error": True, "terminal_reason": "error"}
 
-        c.harness.read = errored
+            c.harness.read = errored
+            await c.read_stream()
+            panel = [state for state, _ in states if state is not None]
+            return [m["text"] for _, m in sent if m["type"] == "speak"], panel, c
+
+        said, panel, _ = await fail_turn("Quota exceeded.")
+        assert said == ["Claude Code hit an error, so I couldn't finish that. Please try again."], said
+        assert panel[-1] == "speaking", panel
+        signin = f"I couldn't reach Claude Code: its sign-in expired. {SIGNIN_FIX['claude']}"
+        for error in ("Failed to authenticate: OAuth session expired and could not be refreshed",  # The Mac's.
+                      "Not logged in · Please run /login", "OAuth token revoked · Please run /login",
+                      'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}'):
+            said, panel, _ = await fail_turn(error)
+            assert said == [signin], (error, said)
+            assert panel[-1] == "speaking", (error, panel)
+        for agent, name, error in (
+                ("codex", "Codex", "Your access token could not be refreshed because your refresh token has expired. "
+                                   "Please log out and sign in again."),
+                ("antigravity", "Antigravity", "Antigravity refused the request: You are not logged into Antigravity."),
+                ("pi", "Pi", 'Authentication failed for "anthropic". Credentials may have expired.')):
+            said, _, _ = await fail_turn(error, agent, name)
+            assert said == [f"I couldn't reach {name}: its sign-in expired. {SIGNIN_FIX[agent]}"], (agent, said)
+        # The setup turn fails its sign-in while the owner's turn waits: the turn ends, and the line is said at once.
+        said, panel, c = await fail_turn("Failed to authenticate: OAuth session expired and could not be refreshed",
+                                         warm=True)
+        assert said == [signin] and panel[-1] == "speaking" and not c.pending_turns, (said, panel)
+        # PASS is silence, and the panel leaves thinking.
+        c, sent, _, states, _, _, _ = make_companion()
+        await c.submit("Anything?", source="spoken")
+
+        async def passing(_):
+            yield {"type": "result", "user_message_uuids": sorted(c.pending_turns), "result": "PASS",
+                   "terminal_reason": "completed"}
+
+        c.harness.read = passing
         await c.read_stream()
-        assert sent == [], sent
+        assert sent == [] and [state for state, _ in states if state][-1] == "hidden", (sent, states)
 
         # 10. Steered turn mid-paragraph resets block state and speaks the new answer cleanly.
         c, sent, _, _, _, _, _ = make_companion()
@@ -12389,7 +12475,7 @@ def check_journal():
             agent=SimpleNamespace(returncode=None, stdout=None), turn_tools=[], step_task=None, step_lit=False,
             voice=SimpleNamespace(returncode=None, stdin=SimpleNamespace(write=lambda line: None)),
             log=lambda event, **fields: rows.append((event, fields)), show=lambda state, **fields: None,
-            harness=SimpleNamespace(turn=turn, short="Claude", permit=lambda *a: None, interrupt=lambda *a: None),
+            harness=SimpleNamespace(turn=turn, name="Claude Code", short="Claude", permit=lambda *a: None, interrupt=lambda *a: None),
             last_key=time.monotonic(), talking=lambda: False)
         c.capture_finished.set()
 
@@ -17631,6 +17717,36 @@ def check_desktop():
             rel.set()
             await rec_task
             assert sent_rec and sent_rec[0][0].startswith("Mode: World of Warcraft."), sent_rec
+
+            # An empty press stays silent, except when the recording is pure digital silence: then the microphone line,
+            # at most once in ten minutes.
+            c_mic, sent_mic = _make_companion(game=fake_game)
+            c_mic.pipeline = SimpleNamespace(start_recording=lambda: "cap",
+                                             stop_recording=lambda cap: SimpleNamespace(text="", loaded_now=False))
+            mic_said, mic_rested = [], []
+            c_mic.speak = lambda: mic_said.append(c_mic.last_reply["spoken"])
+            c_mic.show_resting = lambda: mic_rested.append(True)
+
+            async def press(levels):
+                rel = asyncio.Event()
+                task = asyncio.create_task(c_mic.record(rel))
+                await asyncio.sleep(0.05)
+                for value in levels:
+                    c_mic.level_changed(value)
+                rel.set()
+                await task
+
+            await press([0.0, 0.0, 0.0])
+            assert mic_said == [mic_silent_line()] and not mic_rested and not sent_mic, (mic_said, mic_rested)
+            await press([0.0, 0.0])  # Held: said once in ten minutes.
+            assert mic_said == [mic_silent_line()] and len(mic_rested) == 1, (mic_said, mic_rested)
+            c_mic.mic_told_at -= MIC_SILENT_REPEAT
+            await press([0.0])
+            assert mic_said == [mic_silent_line()] * 2, mic_said
+            c_mic.mic_told_at -= MIC_SILENT_REPEAT
+            await press([0.002, 0.001])  # A quiet room: a real microphone's noise. An accidental press stays silent.
+            await press([])  # No block arrived at all: too short to judge, so silent too.
+            assert mic_said == [mic_silent_line()] * 2 and len(mic_rested) == 3, (mic_said, mic_rested)
 
             # Stuck-recording watchdog, with a stand-in microphone that sends no level and a transcription that hangs.
             c_st, sent_st = _make_companion()
