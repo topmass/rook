@@ -189,7 +189,7 @@ T3_EAGER = ("t3_thread_send", "t3_thread_launch", "t3_thread_list", "t3_thread_r
 T3_QUEUE_ACTIONS = ("list", "read")
 # Rook's own tools that agy always declares to the model up front: the owner uses diagrams daily, and the wow skill calls
 # its tools by name. check() compares them with the @mcp.tool functions in each server's source.
-EAGER_TOOLS = {"render": ("show_diagram", "show_scene", "show_step", "clear_scene"),
+EAGER_TOOLS = {"render": ("show_diagram", "clear_scene"),
                **{name: tools for name, (_, tools) in _ACTIVE_OPTIONAL_SERVERS.items()}}
 SERVER_SOURCES = {"render": "desktop/render_tool.py",
                   **{name: src for name, (src, _) in _ACTIVE_OPTIONAL_SERVERS.items()}}

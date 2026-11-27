@@ -137,20 +137,6 @@
   ],
   "lazy_exceptions": [
     {
-      "from": "desktop/agy_harness.py",
-      "function": "render_guide",
-      "to": "desktop/render.py",
-      "kind": "presence",
-      "reason": "Antigravity render_guide reads render scene docs lazily (agy_harness.py:365)."
-    },
-    {
-      "from": "desktop/agy_harness.py",
-      "function": "check",
-      "to": "desktop/render.py",
-      "kind": "presence",
-      "reason": "agy_harness self-check verifies render tool guide alignment (agy_harness.py:1047)."
-    },
-    {
       "from": "desktop/relay.py",
       "function": "herdr_command",
       "to": "desktop/herdr.py",

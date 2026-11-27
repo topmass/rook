@@ -41,12 +41,11 @@ EXTENSION = Path(__file__).with_name("pi_extension.ts")
 NAMES = {"bash": "Bash", "read": "Read", "edit": "Edit", "write": "Write", "grep": "Grep", "find": "Glob",
          "ls": "LS"}  # Pi's own tools by Claude Code's names. MCP names match already.
 T3_CORE = ("t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_launch", "t3_pending_request")
-# The declared tools, with T3_CORE when T3 is on. Render's show_scene and show_step would take the list past 5,000
-# tokens (measured 2026-11-27), so scripts call them.
+# The declared tools, with T3_CORE when T3 is on. Scripts call the render tools.
 CORE = ("read", "bash", "edit", "write", "codemode")
 CODEMODE = "codemode"
 ABORTED = "MCP request aborted"  # Pi's whole result for a server call it cut off.
-SERVER_NOTES = {"t3": "T3 Code: threads, projects and pull requests.", "render": "Rook's gold-dust scenes on screen.",
+SERVER_NOTES = {"t3": "T3 Code: threads, projects and pull requests.", "render": "Rook's gold-dust diagrams on screen.",
                 "wow": "World of Warcraft game data."}
 PERSON_FILES = ("models.json", "auth.json", "mcp-auth.json")  # Linked, never copied, so sign-ins stay the person's.
 # The person's settings that carry over: documented keys (Pi 1.6.1 docs/settings.md) that load nothing. A key that

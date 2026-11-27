@@ -1201,7 +1201,7 @@ def build_hook_cases(tree: Path, scratch_env: ScratchProfileEnv) -> list[tuple[s
         cmd_case("omarchy/terminal-cwd", "omarchy-cmd-terminal-cwd"),
         cmd_case("omarchy/launch-browser", 'omarchy-launch-browser "https://example.invalid"'),
         # 8. MCP tool calls for each server & disallowed tools
-        tool_case("mcp/render-show-scene", "mcp_render_show_scene", {"scene": {}}),
+        tool_case("mcp/render-show-diagram", "mcp_render_show_diagram", {"graph": "a > b"}),
         tool_case("mcp/render-call-clear", "call_mcp_tool", {"ServerName": "render", "ToolName": "clear_scene"}),
         tool_case("mcp/t3-thread-list", "mcp_t3_t3_thread_list", {}),
         tool_case("mcp/t3-thread-send", "mcp_t3_t3_thread_send", {"threadId": "t1", "message": "hi"}),

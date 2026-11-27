@@ -344,9 +344,9 @@ def brief(text, limit=200):
 
 
 # agy's exact limit on the bytes of tools a session declares is unknown. Run 49, in the live shape (real T3's four
-# eager tools, --wow, brief show_scene), passed with 8,568 bytes of eager render and wow tools; run 47, with
-# show_scene's full description, failed at 15,158 and agy left show_scene out. check() fails above this number, so a
-# tool that grows past the room found in a real run is caught before a session drops it.
+# eager tools, --wow, and the old scene tool in brief), passed with 8,568 bytes of eager render and wow tools; run 47
+# failed at 15,158 and agy left its largest tool out. check() fails above this number, so a tool that grows past the
+# room found in a real run is caught before a session drops it.
 EAGER_BYTES_LIMIT = 9_500
 
 
@@ -374,13 +374,6 @@ def declared_sizes(command, env):
     finally:
         server.kill()
         server.wait()
-
-
-def render_guide():
-    """How to use show_scene, for Neon's system prompt: under Antigravity the tool's own description is brief, since
-    agy left the full one out of a session with T3's tools (2026-11-23)."""
-    import render  # Here, so that the harness loads fast.
-    return "\n\nRender scenes. How to use your show_scene tool:\n\n" + render.TOOL_GUIDE + render.describe()
 
 
 def failure(folder, session):
@@ -514,8 +507,6 @@ class Antigravity(Harness):
         entries = {name: {"command": server["command"], "args": server.get("args", []),
                           "tools": {tool: {"eager": True} for tool in antigravity_home.EAGER_TOOLS.get(name, eager.get(name, ()))}}
                    for name, server in self.servers.items()}
-        if "render" in entries:  # show_scene's guide goes in the system prompt, so agy can declare the tool.
-            entries["render"]["env"] = {"ROOK_RENDER_BRIEF": "1"}
         if self.t3_url:  # The sign-in, by a link: agy reads it there, and nothing else is copied out.
             (home / APP).mkdir(parents=True)
             (home / APP / "mcp_oauth_tokens.json").symlink_to(T3_TOKENS)
@@ -856,7 +847,7 @@ class Antigravity(Harness):
     def system_append(self):
         """Build the system prompt append, including project memory lines."""
         return (antigravity_home.prompt(self.prompt, self.cwd, beats=self.narrate_beats)
-                + settings.render((T3_LOST if self.t3_url else "") + (render_guide() if "render" in self.servers else "")))
+                + settings.render(T3_LOST if self.t3_url else ""))
 
     def needs_recorded(self, update):
         """Return whether this tool update needs a session-record lookup."""
@@ -1095,10 +1086,11 @@ def check():
                                  "content": {"type": "text", "text": text}})
     assert sent[-1]["method"] == "initialize" and not out({"id": 1, "result": {}})
     assert sent[-1]["method"] == "session/new"
-    assert sent[-1]["params"]["_meta"]["antigravity"]["systemPrompt"]["append"] == settings.render("PROMPT" + render_guide())
+    assert sent[-1]["params"]["_meta"]["antigravity"]["systemPrompt"]["append"] == settings.render("PROMPT")
     assert sent[-1]["params"]["mcpServers"] == []  # Every server comes from mcp_config.json, render's tools eager.
     render = json.loads((home / "config/mcp_config.json").read_text())["mcpServers"]["render"]
-    assert render["command"] == "uv" and render["tools"]["show_scene"] == {"eager": True}
+    assert render["command"] == "uv" and render["tools"]["show_diagram"] == {"eager": True}
+    assert "show_scene" not in render["tools"] and "env" not in render
     # The eager render and wow tools stay within the room a real session had (see EAGER_BYTES_LIMIT).
     # Read the generated mcp_config.json entries back and run their exact launch commands from outside the repo.
     if uv := shutil.which("uv"):
@@ -1116,15 +1108,6 @@ def check():
                                             f"room for about {EAGER_BYTES_LIMIT}")
     else:
         print("agy_harness check: uv is missing, so the declared size of the eager tools was not measured.")
-    # 2026-11-23: with T3's tools, agy left out show_scene's 6,400-character description. The brief form goes to agy,
-    # and the guide to Neon's prompt; Claude Code keeps the full description.
-    assert render["env"] == {"ROOK_RENDER_BRIEF": "1"}
-    import render as render_module
-    guide = render_guide()
-    assert render_module.TOOL_GUIDE in guide and render_module.describe() in guide
-    source = (ROOT / "desktop/render_tool.py").read_text()
-    brief_when = re.search(r'BRIEF_WHEN = \((.*?)\)\n', source, re.S)[1]
-    assert len(brief_when) < 400 and "Render scenes" in brief_when and "Render scenes." in guide
     init = out({"id": 2, "result": {"sessionId": "sid"}})
     assert init[0]["mcp_servers"] == [{"name": "render", "status": "connected"}, {"name": "t3", "status": "needs-auth"}]
     assert [(m["params"]["configId"], m["params"]["value"]) for m in sent[-4:-1]] == [
@@ -1152,9 +1135,9 @@ def check():
     assert done[0]["message"]["content"][0] == {"type": "tool_result", "tool_use_id": "c1", "content": "ok",
                                                 "is_error": False}
     # From captures/21: an MCP tool keeps its server, and a render call passes without a card.
-    mcp = {"sessionUpdate": "tool_call", "toolCallId": "c2", "name": "mcp_render_show_scene",
-           "rawInput": {"title": "t"}}
-    assert out(update(mcp))[1]["message"]["content"][0]["name"] == "mcp__render__show_scene"
+    mcp = {"sessionUpdate": "tool_call", "toolCallId": "c2", "name": "mcp_render_show_diagram",
+           "rawInput": {"graph": "a > b"}}
+    assert out(update(mcp))[1]["message"]["content"][0]["name"] == "mcp__render__show_diagram"
     assert claude_tool({"name": "call_mcp_tool", "rawInput": {"ServerName": "t3", "ToolName": "t3_thread_send",
                                                               "Arguments": {"threadId": "x"}}}, ["t3"]) \
         == ("mcp__t3__t3_thread_send", {"threadId": "x"})
@@ -1748,7 +1731,7 @@ def check():
         database.commit()
         database.close()
         # Non-delegating MCP tools skip recorded_output; T3 sends read it when output is empty.
-        for call_id, name in (("call_read", "mcp_t3_t3_thread_read"), ("call_scene", "mcp_render_show_scene")):
+        for call_id, name in (("call_read", "mcp_t3_t3_thread_read"), ("call_diagram", "mcp_render_show_diagram")):
             list(gated.handle(update({"sessionUpdate": "tool_call", "toolCallId": call_id, "name": name})))
             done = list(gated.handle(update({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
                                              "status": "completed"})))

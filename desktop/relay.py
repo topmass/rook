@@ -187,8 +187,7 @@ relay.py reload overlay [--timeout DURATION] [--reason TEXT]
                             It gives up without reloading after the limit (9m by default).
                             The smallest reload for each change:
                               desktop/overlay.py               reload overlay
-                              desktop/render.py                reload overlay; restart when describe() or
-                                                               SCENE_SECONDS changes, which the render tool tells Claude
+                              desktop/render.py                reload overlay; restart when SCENE_SECONDS changes
                               desktop/render_tool.py           restart. Each tool server runs under Claude Code. Its
                                                                mcp_reconnect control request could restart one alone,
                                                                which nothing sends yet

@@ -12,7 +12,7 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 
 ## Make a dust icon: two commands
 
-1. Pipe in a `show_scene` scene, in a 100 by 100 view, with no labels:
+1. Pipe in a dust scene in the format of `desktop/render.py`, in a 100 by 100 view, with no labels:
 
    ```
    /usr/bin/python relay.py forge new devs-mine lantern <<'JSON'

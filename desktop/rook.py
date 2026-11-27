@@ -440,6 +440,9 @@ MEDIA_MAGIC = ((b"\x89PNG\r\n\x1a\n", 0, ".png"), (b"\xff\xd8\xff", 0, ".jpg"), 
 # How long a show waits for the overlay to say it shows the file, or why not.
 SHOW_SECONDS = 30
 RENDER_SECONDS = 10  # How long a render request waits for the overlay's answer; it takes about 10 ms.
+# The answer to the old scene tool: the filament diagram replaced it (2026-11-27).
+SCENE_GONE = ("show_scene and show_step are gone. Call show_diagram with a graph such as \"browser > dns > server\", or "
+              "start your answer with the {diagram} mark.")
 # The longest a staged scene waits for Rook's voice. Then it shows, or it drops if Rook is dark or the owner is away.
 STAGE_SECONDS = 20
 # The overlay's states of a turn under way. A scene holds through them, and a reloaded overlay gets them again.
@@ -3075,7 +3078,7 @@ class Companion:
         game = self.game and uv  # --wow
         start = {"t3": T3_START if t3 else (), "wow": WOW_START if game else (),
                  **{spec["name"]: spec["eager_tools"] for spec in plugin_loader.servers() if spec["name"] in servers}}
-        later = ((["the render tools show_diagram, show_scene, show_step and clear_scene"] if uv else [])
+        later = ((["the render tools show_diagram and clear_scene"] if uv else [])
                  + (["the other T3 tools"] if t3 else []) + (["the other wow game-data tools"] if game else []))
         setup = self.name_skills(self.harness.setup(start, later, self.game))
         if replay:
@@ -4226,7 +4229,7 @@ class Companion:
 
     async def debug_replay(self, tape):
         """Play the recorded turn again for a video: a short thinking phase, its tool forms in order with time
-        compressed, its exact speech, and its diagram, scene or media. It sends nothing to the agent and runs no tool or
+        compressed, its exact speech, and its diagram or media. It sends nothing to the agent and runs no tool or
         send: it only drives the overlay and the voice, so the agent's conversation never learns of it."""
         self.replay_rec, self.turn_timing = None, None
         self.scene_steps, self.diagram_names, self.diagram_seen = 0, (), frozenset()
@@ -5093,32 +5096,31 @@ class Companion:
         return await self.present(path, title, data.get("source"))
 
     async def render_request(self, body):
-        """The render tool (desktop/render_tool.py): show a scene, light a step, or clear. The overlay checks the scene
-        before it draws anything, and answers with every problem, or with what shows."""
+        """The render tool (desktop/render_tool.py): show a diagram, light a step, or clear. The overlay answers with
+        what shows, or why nothing does."""
         try:
             data = json.loads(body)
         except ValueError:
             data = None
         if not isinstance(data, dict):
-            return {"ok": False, "error": "A render request needs a scene, a step, or clear."}
+            return {"ok": False, "error": "A render request needs a diagram, a step, or clear."}
+        if "scene" in data:  # The old scene tool, from an old session or a stale tool list.
+            return {"ok": False, "error": SCENE_GONE}
         if not (self.overlay and self.overlay.returncode is None):
             return {"ok": False, "error": "The overlay is not running, so nothing can show."}
         self.render_count += 1
         key = str(self.render_count)
         waiter = self.render_waiters[key] = self.loop.create_future()
         diagram = data.get("diagram") if isinstance(data.get("diagram"), dict) else None
-        if "scene" in data or diagram or data.get("clear"):  # The overlay drops a staged scene for each.
+        if diagram or data.get("clear"):  # The overlay drops a staged scene for each.
             self.staged = self.staged_item = None
-        self.show(None, render={**data, "id": key, **({"stage": True} if "scene" in data or diagram else {})})
+        self.show(None, render={**data, "id": key, **({"stage": True} if diagram else {})})
         try:
             answer = await asyncio.wait_for(waiter, RENDER_SECONDS)
         except TimeoutError:
-            answer = {"ok": False, "error": "The overlay did not answer. It may still show the scene."}
-            if "scene" in data:  # A late bake must not wait staged in the overlay.
-                self.show(None, render={"reveal": key, "drop": True})
+            answer = {"ok": False, "error": "The overlay did not answer. It may still show the diagram."}
         finally:
             self.render_waiters.pop(key, None)
-        scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
         if answer.get("ok") and ("step" in data or data.get("clear")):
             self.stop_loop()  # Rook's own step or clear ends the loop of steps.
         if answer.get("ok") and diagram:
@@ -5127,19 +5129,13 @@ class Companion:
             self.scene_steps, self.diagram_names, self.diagram_seen = len(nodes), [n["label"] for n in nodes], set()
             self.staged = key
             self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
-        elif answer.get("ok") and (scene or data.get("clear")):
-            self.scene_steps, self.diagram_names = len(scene.get("steps") or ()), ()
-            if scene:  # Staged: the voice's next speech, the turn's end, or the timeout reveals it.
-                self.staged = key
-                self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
-            else:
-                self.scene_at = None
+        elif answer.get("ok") and data.get("clear"):
+            self.scene_steps, self.diagram_names = 0, ()
+            self.scene_at = None
         if answer.get("ok"):
             self.replay_note("render", data)
         self.log("render", action="clear" if data.get("clear") else "step" if "step" in data else
-                 "diagram" if diagram else "scene",
-                 ok=bool(answer.get("ok")), name=scene.get("name"), step=data.get("step"),
-                 problems=len(answer.get("errors") or ()) or None)
+                 "diagram", ok=bool(answer.get("ok")), step=data.get("step"))
         return answer
 
     def overlay_off(self):
@@ -8391,6 +8387,9 @@ def check_steps():
     assert unmarked("{diagram Web | a > b, c} One. {step 2}Two.") == "One. Two."
     assert unmarked(spoken_lead("{diagram a > b}\n\nOne.\n\nWritten.")) == ""  # Streamed, the mark is taken first.
     assert voice_parts("{step 1}{step 2}One. Two.") == [([1, 2], "One. Two.")]
+    # The old scene tool, from an old session or a stale tool list, gets a plain refusal that names show_diagram.
+    gone = asyncio.run(Companion.render_request(None, json.dumps({"scene": {"name": "engine"}})))
+    assert gone == {"ok": False, "error": SCENE_GONE} and "show_diagram" in SCENE_GONE, gone
     # A mark left open at the end of the turn, or ended by a newline, never reaches speech, panel or log.
     assert unmarked("One. {diagram a > b") == "One. " and unmarked("{diagram a > b\nOne.") == "One."
     assert spoken_lead(unmarked("{diagram a > b, c\n\nOne.\n\nWritten.")) == "One."
@@ -9880,7 +9879,7 @@ def check_agent():
                                             ("Bash", {"command": "ls; rm x"}, True), ("Bash", {"command": "ls $(rm x)"}, True),
                                             ("Bash", {"command": "python3 desktop/relay.py timer 5m tea"}, True),
                                             ("Write", {}, True), ("Edit", {}, True), ("mcp__t3__t3_thread_send", {}, True),
-                                            ("mcp__render__show_scene", {}, True), ("Bash", {}, True), ("Unknown", None, True)):
+                                            ("mcp__render__show_diagram", {}, True), ("Bash", {}, True), ("Unknown", None, True)):
                     assert tool_changes(name, data) is changes, (name, data)
                 # Point 2: a bare stop while a turn runs, with only a read started: the turn is cut at once, its
                 # speech stops, nothing more goes to the agent, and nothing is said.
@@ -15178,7 +15177,7 @@ def check_phone():
                    ("mcp__t3__t3_thread_send", {"threadId": relay.BUILD_THREAD, "message": "BRIEF-SECRET"}),
                    ("mcp__t3__t3_thread_send", {"threadId": "thread-halo", "message": "BRIEF-SECRET"}),
                    ("mcp__t3__t3_thread_launch", {"title": "Research the dust", "message": "BRIEF-SECRET"}),
-                   ("mcp__render__show_scene", {"scene": {"title": "SCENE-SECRET"}}),
+                   ("mcp__render__show_diagram", {"graph": "SCENE-SECRET > b"}),
                    ("Bash", {"command": f"/usr/bin/python {ROOT}/desktop/relay.py timer set 5m tea"}),
                    ("ToolSearch", {"query": "select:x"}),
                    "Here is the final answer, in full.")

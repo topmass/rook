@@ -117,17 +117,6 @@ import threading
 import time
 
 import stencils
-import settings  # noqa: E402
-OWNER = settings.OWNER_TOKEN  # The owner's name, filled in when the text leaves Rook.
-
-
-def pn(phrase, they=None):
-    """The owner token for a phrase written with he, such as \"his\" or \"he asks\". A phrase with a verb
-    gives its they form too."""
-    return settings.token(phrase, they)
-
-
-
 try:
     import cairo
 except ImportError:  # The tool server only needs the format's words, the checker and the schema.
@@ -140,34 +129,6 @@ LIMITS = {"parts": 24, "copies": 160, "repeat": 36, "steps": 8, "path_chars": 12
           "poly_points": 64, "id": 24, "name": 32, "title": 60, "label": 24, "caption": 120, "coordinate": 10000,
           "aspect": 4, "bytes": 16000, "budget": (64, 8000)}
 SCENE_SECONDS = 30  # How long a scene stays up after the turn that showed it ends, unless it is cleared.
-# How to use the render tool: its description under Claude Code, and the system prompt under Antigravity.
-TOOL_GUIDE = (f"Show {OWNER} a scene: your swarm of gold dust forms a drawing on {pn('his')} screen while you answer. Use it for "
-        "one bold object or one machine, such as an engine. For a diagram of how things connect, write the "
-        "{diagram} mark at the start of your answer instead, or call show_diagram outside speech. One idea per scene. "
-        "Do not decorate every answer.\n\n"
-        "A clean scene, every time:\n"
-        "1. Draw things with stencils, not boxes: a mic, a server, a gear.\n"
-        "2. Place stencils in a view with \"at\" and \"size\", and join parts with \"link\": [\"from\", \"to\"], never "
-        "with arrow coordinates. \"engine\" draws a whole engine cylinder and labels its own parts.\n"
-        "3. Mark the one part that matters most \"lead\". Keep labels to one short word.\n"
-        "4. Give the scene its steps, then mark them in your spoken answer (see below).\n"
-        "5. A step can move parts too: \"move\": {\"piston\": {\"to\": [0, 20]}} moves it 20 down, since \"to\" is "
-        "how far it moves, [dx, dy]. {\"rotate\": 90, \"about\": [x, y]} turns it. A move holds until a later step "
-        "changes it. An engine moves by stroke: \"move\": {\"e\": \"intake\"}, then compression, power and exhaust.\n"
-        "Example: {\"title\": \"A four-stroke engine\", \"parts\": [{\"id\": \"e\", \"stencil\": \"engine\", "
-        "\"at\": [50, 50], \"size\": 90, \"lead\": true}], \"steps\": [{\"light\": [\"e.intake\"], \"move\": "
-        "{\"e\": \"intake\"}, \"caption\": \"Intake\"}, {\"light\": [\"e.piston\"], \"move\": {\"e\": "
-        "\"compression\"}}, {\"light\": [\"e.spark\"], \"move\": {\"e\": \"power\"}}, {\"light\": "
-        "[\"e.exhaust\"], \"move\": {\"e\": \"exhaust\"}}]}\n\n"
-        "Steps follow your voice. Call show_scene once, then write your answer. Put {step N} at the start of the "
-        "spoken sentence where step N begins. Step N lights as that sentence starts to play, and the whole scene "
-        "returns when your voice ends. Marks never show or sound. Without marks, the steps take turns by themselves "
-        "while you speak. Example answer for the scene above: \"{step 1} Air and fuel come in. {step 2} The piston "
-        "squeezes them. {step 3} A spark drives it down. {step 4} Then it pushes the gas out.\"\n\n"
-        "The scene shows at once and holds while you speak. It stays " f"{SCENE_SECONDS} seconds after your "
-        f"answer ends, and {OWNER}'s next question clears it. A scene with problems shows nothing: the answer lists each "
-        "problem with its fix. A scene that shows may come back with notes, such as a line that crosses a part or a "
-        "label on a line. Fix what they name and show the scene again before you go on.\n\n")
 DEFAULT_WIDTH = 0.035  # An outline's default width, as a share of the view's shorter side: about 4 px at today's size.
 BOX = 124  # The form's box in pixels at 640 grains: the size of the overlay's own forms (the hourglass is 116 tall).
 CANVAS = 720  # The width a scene's labels must stay inside: the overlay's canvas, 740 px, less a margin.
@@ -215,13 +176,6 @@ OUTLINES = {"hairline": (1.0, 0.3, 1.0), "clear": (1.4, 0.62, 0.72)}
 OUTLINE_LOOK = "clear"
 # The labels' font: (px, letter spacing in px, the width of one capital with its spacing), measured with Pango.
 LABEL_TYPE = {"icon": (10, 2.4, 9.6), "diagram": (13, 2.4, 12.0)}
-MOTION_WORDS = {"still": "rests. The default.",
-                "flow": "comets of dust run along the line, from its start to its end. Round a closed shape they "
-                        "circle for ever. Use it for arrows, pipes, wires, rivers and loops.",
-                "turn": "the part spins about its own centre. Use it for gears, fans, wheels and dials.",
-                "fizz": "bubbles rise from the part and pop just above it. Use it for drinks, steam and smoke.",
-                "glare": "a bright band sweeps across a filled part, as light on glass. It needs fill.",
-                "fall": "grains drop down the part, faster as they fall, as sand in an hourglass or rain."}
 LIT, UNLIT = 1.25, 0.55  # Brightness of the lit and the other parts in a step.
 # Material dust draws a diagram's fine layer from per-part baked textures instead of simulating thousands of grains.
 # A diagram starts quiet with nothing lit. A step lights the parts it names over GLOW_SECONDS.
@@ -4515,31 +4469,6 @@ def check(doc, budget=None, step=None, preview=True):
     return out
 
 
-# The words the tool's author reads: the format above, the motions, the sizes and the limits, from the same tables.
-
-def describe():
-    fmt = __doc__.split("The format ", 1)[1].split("\nLimits are in LIMITS", 1)[0]
-    for name, value in (("DEFAULT_WIDTH", f"{DEFAULT_WIDTH:.1%}"), ("MOTIONS", ", ".join(MOTIONS)),
-                        ("SPEEDS", ", ".join(SPEEDS)), ("CURVES", ", ".join(CURVES)), ("LABEL_AT", ", ".join(LABEL_AT)),
-                        ("SIZES", " or ".join(SIZES)), ("DIAGRAM_LINE", str(DIAGRAM_LINE)),
-                        ("DIAGRAM_PARTS", str(DIAGRAM_PARTS)), ("LAYOUTS", ", ".join(LAYOUTS)),
-                        ("STENCILS", ", ".join(stencils.STENCILS)),
-                        ("ENGINE", "its parts are " + ", ".join(c[0] for c in stencils.COMPOUNDS["engine"])),
-                        ("POSES", ", ".join(stencils.POSES["engine"]))):
-        fmt = fmt.replace(name, value)
-    sizes = "; ".join(f"{k} {g} grains in a {b} px box" for k, (g, b) in SIZE_FORM.items())
-    sizes += f". Labels at a diagram's sides take room from its box, so put long labels above or below"
-    L = LIMITS
-    return (f"A scene is a drawing that Rook's swarm of gold dust forms on {OWNER}'s screen. The format " + fmt
-            + "\nMotions:\n" + "".join(f"    {m}: {w}\n" for m, w in MOTION_WORDS.items())
-            + f"Sizes: {sizes}. Dust needs lines about 3 px thick at that size, so keep shapes bold and simple.\n"
-            + f"Limits: {L['parts']} parts, {L['copies']} shapes once repeats are counted, {L['repeat']} copies in a "
-            f"repeat, {L['steps']} steps, {L['poly_points']} points in a poly, {L['path_chars']} characters and "
-            f"{L['path_commands']} commands in a path, ids of {L['id']} characters, a title of {L['title']}, labels "
-            f"of {L['label']} and captions of {L['caption']}, {L['bytes']} bytes in all, and a view at most "
-            f"{L['aspect']} to 1.")
-
-
 # The self-check.
 
 EXAMPLE = {"name": "magnifier", "title": "A magnifying glass",
@@ -5117,9 +5046,6 @@ def _self_check(folder=None):
     assert sample(validate(wide)[0])["box"] < DIAGRAM_BOX  # One at the side does.
     many = {"parts": [{"id": f"p{k}", "circle": [10 + 10 * k, 50, 4]} for k in range(DIAGRAM_PARTS + 1)]}
     assert validate(many)[0]["size"] == "diagram"
-    # The tool's words carry every key, motion and size, and no name of a constant.
-    words = describe()
-    assert all(k in words for k in [*SCENE_KEYS, *PART_KEYS, *MOTIONS, *SIZES, *LABEL_AT, *CURVES]), words
     # A link finds its ends outside both parts and bows round a part in its way; a crossing arrow gets a note.
     row = [{"id": "a", "circle": [20, 50, 12]}, {"id": "b", "rect": [66, 38, 28, 24]},
            {"id": "c", "circle": [140, 50, 12]}]
@@ -5681,8 +5607,6 @@ if __name__ == "__main__":
             print(json.dumps({"ok": False, "errors": [f"The scene is not valid JSON: {e}."]}))
             sys.exit(1)
         print(json.dumps(check(doc, int(sys.argv[2]) if len(sys.argv) > 2 else None), indent=1))
-    elif sys.argv[1:2] == ["--describe"]:
-        print(describe())
     elif sys.argv[1:2] == ["--schema"]:
         print(json.dumps(SCHEMA, indent=1))
     else:

@@ -625,7 +625,7 @@ print(json.dumps({"claude": claude, "antigravity": agy, "codex": listed(codex_ho
                       ("Bash", {"command": f"{relay} fixture-hello"}), ("Bash", {"command": f"{relay} get"}),
                       ("Bash", {"command": "fixture-read"}), ("Bash", {"command": "fixture-read --all"}),
                       ("Bash", {"command": "git status"}), ("Bash", {"command": "git"}),
-                      ("mcp__fixture__ping", {}), ("mcp__fixture__secret", {}), ("mcp__render__show_scene", {}))]}))
+                      ("mcp__fixture__ping", {}), ("mcp__fixture__secret", {}), ("mcp__render__show_diagram", {}))]}))
 '''
 # What the three agents get from the bundled Omarchy plugin, printed as JSON by a child with scratch folders.
 OMARCHY_SURFACE = r'''

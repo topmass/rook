@@ -1430,7 +1430,7 @@ while True:
         t3_auth = "notLoggedIn" if mode == "t3_needs_auth" else "oAuth"
         t3_rt = "authenticationRequired" if mode == "t3_needs_auth" else "connected"
         emit({"id": rpc, "result": {"data": [
-            {"name": "render", "authStatus": "unsupported", "runtimeStatus": "connected", "tools": {"show_scene": {}}, "resources": [], "resourceTemplates": []},
+            {"name": "render", "authStatus": "unsupported", "runtimeStatus": "connected", "tools": {"show_diagram": {}}, "resources": [], "resourceTemplates": []},
             {"name": "t3", "authStatus": t3_auth, "runtimeStatus": t3_rt, "tools": {"t3_thread_send": {}} if t3_rt == "connected" else {}, "resources": [], "resourceTemplates": []},
         ]}})
     elif method == "turn/start":

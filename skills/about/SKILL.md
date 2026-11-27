@@ -33,7 +33,7 @@ Built-in skills live in `skills/`. Claude Code lists them as `rook:<name>`, and 
 
 - **Hearing.** AirType's Parakeet speech recognition runs inside `desktop/rook.py`.
 - **Voice.** `desktop/speech.py` keeps the small voice loaded on this computer. The medium voice comes from a voice server at the address in the settings, with the small voice as its fallback. `desktop/medium_voice.py` can run that server on this computer.
-- **Overlay.** `desktop/overlay.py` draws the swarm of gold dust, the captions, the media viewer and the scenes. `desktop/render.py` checks each scene, and `desktop/render_tool.py` is your show_scene tool.
+- **Overlay.** `desktop/overlay.py` draws the swarm of gold dust, the captions, the media viewer and the diagrams. `desktop/constellation.py` lays out each diagram, `desktop/filament.py` draws its lines, and `desktop/render_tool.py` is your show_diagram and clear_scene tools.
 - **Thread watcher.** `desktop/watch.py` polls the threads you handed work to about once a minute. It tells you through the inbox when one finishes, stops or needs ⟦owner⟧.
 - **Inbox.** A thread runs `relay.py tell`, which reaches you through `rook.sock`.
 - **Mailbox.** `desktop/mailbox.py` keeps what needs ⟦owner⟧ until it is settled.
