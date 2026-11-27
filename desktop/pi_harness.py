@@ -4,13 +4,14 @@ RPC mode is JSONL on stdio: commands go in, and responses and session events com
 events into the Claude Code stream-json shapes that harness.py lists, so Rook's reader, watcher and cards keep their
 code.
 
-Nothing of the conversation stays on disk: Pi runs with --no-session, and screenshots travel inline.
+Pi runs with --no-session and screenshots travel inline, so no session file is written. Pi itself saves an output
+it cuts (a script's or a tool's) in full to a file of its own in the temporary folder, such as /tmp/pi-codemode-*.txt,
+at mode 0600, and never removes it; Rook's private folder cleanup does not touch those files.
 Pi has no flag for tool servers, so pi_extension.ts registers Rook's. Their tools keep Claude Code's names,
 mcp__<server>__<tool>. Denied tools are hidden. The declared tool list is CORE, fixed before the first request and never
-changed in a session, so a local server's prompt cache holds. Every other tool is reached with the extension's
-search_tools and execute_tool. Pi has a native code mode (docs/codemode.md): Rook does not use it, because the model
-writes JavaScript for every call, Rook's watcher cannot see calls inside a script, and its models global can run hosted
-models with the person's sign-ins.
+changed in a session, so a local server's prompt cache holds. Every other tool is called from Pi's own codemode
+scripts (docs/codemode.md), loaded without its models global. Rook records each call a script makes as a direct call
+of that tool; the script itself is not a tool to Rook, and a failed script is one failed record.
 
 Pi runs self-contained: a private agent folder holds only links to the person's models.json, auth.json and
 mcp-auth.json, plus Rook's own settings.json, and the flags keep out context files, project files and extensions.
@@ -38,12 +39,13 @@ import settings
 OWNER = settings.OWNER_TOKEN
 EXTENSION = Path(__file__).with_name("pi_extension.ts")
 NAMES = {"bash": "Bash", "read": "Read", "edit": "Edit", "write": "Write", "grep": "Grep", "find": "Glob",
-         "ls": "LS", "search_tools": "ToolSearch"}  # Pi's own tools by Claude Code's names. MCP names match already.
+         "ls": "LS"}  # Pi's own tools by Claude Code's names. MCP names match already.
 T3_CORE = ("t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_launch", "t3_pending_request")
-# The declared tools, besides T3_CORE when T3 is on. Render's show_scene and show_step would take the list from about
-# 2,700 to 5,150 tokens (measured 2026-11-27), so they stay behind execute_tool.
-CORE = ("read", "bash", "edit", "write", "search_tools", "execute_tool")
-EXECUTE = "execute_tool"
+# The declared tools, with T3_CORE when T3 is on. Render's show_scene and show_step would take the list past 5,000
+# tokens (measured 2026-11-27), so scripts call them.
+CORE = ("read", "bash", "edit", "write", "codemode")
+CODEMODE = "codemode"
+ABORTED = "MCP request aborted"  # Pi's whole result for a server call it cut off.
 SERVER_NOTES = {"t3": "T3 Code: threads, projects and pull requests.", "render": "Rook's gold-dust scenes on screen.",
                 "wow": "World of Warcraft game data."}
 PERSON_FILES = ("models.json", "auth.json", "mcp-auth.json")  # Linked, never copied, so sign-ins stay the person's.
@@ -56,19 +58,19 @@ CARRIED_KEYS = ("defaultProvider", "defaultModel", "defaultThinkingLevel", "mode
                 "warnings")
 SKILLS = [
     ("delegate/SKILL.md", "find one with ToolSearch, such as `select:mcp__t3__t3_thread_list`.",
-     "call one that is not in your list with execute_tool by that name."),
-    ("delegate/SKILL.md", "when ToolSearch cannot find the tools", "when execute_tool cannot reach the tools"),
+     "call one that is not in your list from a codemode script by that name."),
+    ("delegate/SKILL.md", "when ToolSearch cannot find the tools", "when a codemode script cannot reach the tools"),
     ("delegate/references/t3-command.md", "when ToolSearch cannot find the T3 tools",
-     "when execute_tool cannot reach the T3 tools"),
+     "when a codemode script cannot reach the T3 tools"),
     ("delegate/references/t3-tools.md", "Rook's Claude session", "Rook's Pi session"),
-    ("wow/SKILL.md", "Find one that is not loaded yet with ToolSearch.", "Call one with execute_tool by its name."),
+    ("wow/SKILL.md", "Find one that is not loaded yet with ToolSearch.", "Call one from a codemode script by its name."),
 ]
 PROMPT = [("a full Claude Code session", "a full Pi session")]
-TOOLS_LINE = ("\n\nReach a tool that is not in your list, such as one a skill names, with execute_tool by that same name. "
-              "search_tools finds one you do not know.")
+TOOLS_LINE = ("\n\nWhen one tool in your list fits, call it directly. Call any other tool from a codemode script as "
+              "`await tools.<name>(args)`, with the name a skill gives; searchTools() finds one you do not know. Never "
+              "assign to `tools`. Return only what you need, not whole results.")
 CLAUDE_ONLY = ("${CLAUDE_", "ToolSearch")
 NEEDS_ATTENTION = "MCP servers need attention:"  # Pi's one notice after startup about servers that failed.
-PI_SERVERS_LINE = "Call the tools of `codemode` servers from codemode scripts."  # pi_extension.ts replaces it.
 
 
 def agent_dir():
@@ -82,6 +84,16 @@ def default_model():
     except (OSError, ValueError, AttributeError):
         return None
     return model if isinstance(model, str) and model else None
+
+
+def tool_use(call_id, name, args):
+    """Claude Code's assistant message for one tool call, with Claude Code's tool name."""
+    name = NAMES.get(name, name)
+    args = args if isinstance(args, dict) else {}
+    if name == "Bash":
+        args = {**args, "run_in_background": False}
+    return {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": call_id, "name": name, "input": args}]}}
 
 
 def stream(kind, **fields):
@@ -99,7 +111,7 @@ def pi_servers(servers, denied):
 
 def core(servers, denied):
     """The declared tools, in order."""
-    return [*CORE, *(f"mcp__t3__{tool}" for tool in T3_CORE if "t3" in servers and tool not in denied)]
+    return [*CORE[:-1], *(f"mcp__t3__{tool}" for tool in T3_CORE if "t3" in servers and tool not in denied), CODEMODE]
 
 
 def person_settings():
@@ -199,7 +211,7 @@ class Pi(Harness):
                 "--append-system-prompt", prompt]
 
     def setup(self, start, later, wow):
-        """Claude Code's setup turn, with nothing to load: the core tools are declared, and execute_tool reaches the rest."""
+        """Claude Code's setup turn, with nothing to load: the core tools are declared, and scripts reach the rest."""
         return settings.render(f"Setup, not a request from {OWNER}: "
                                + ("load the wow skill, " if wow and _has_skill("wow") else "") + "then reply ready.")
 
@@ -275,35 +287,32 @@ class Pi(Harness):
                 yield from self.close_text()
             elif step == "toolcall_start":
                 yield from self.close_text()
-                if update.get("toolName") != EXECUTE:  # Its inner tool's name comes with its arguments.
+                if update.get("toolName") != CODEMODE:  # A script is not a tool to Rook; each call it makes is.
                     yield stream("content_block_start", content_block={
                         "type": "tool_use", "id": update.get("id"), "name": NAMES.get(update.get("toolName"), update.get("toolName"))})
             elif step == "toolcall_end":
                 call = update.get("toolCall") or {}
-                name, args = NAMES.get(call.get("name"), call.get("name")), call.get("arguments") or {}
-                if name == EXECUTE:  # Rook sees the inner tool, as if it were called directly.
-                    name, args = str(args.get("name") or EXECUTE), args.get("arguments")
-                    name = NAMES.get(name, name)
-                    if isinstance(args, str):  # A local model may send them as a JSON string; the extension parses it.
-                        try:
-                            args = json.loads(args)
-                        except ValueError:
-                            pass
-                    args = args if isinstance(args, dict) else {}
-                    yield stream("content_block_start", content_block={"type": "tool_use", "id": call.get("id"), "name": name})
-                if name == "Bash":
-                    args = {**args, "run_in_background": False}
-                yield {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": call.get("id"), "name": name, "input": args}]}}
+                if call.get("name") != CODEMODE:
+                    yield tool_use(call.get("id"), call.get("name"), call.get("arguments"))
         elif kind == "message_end" and (event.get("message") or {}).get("role") == "assistant":
             message = event["message"]
             yield from self.close_text()
             self.answer = "".join(block.get("text", "") for block in message.get("content") or ()
                                   if isinstance(block, dict) and block.get("type") == "text")
             self.error = (message.get("errorMessage") or "Pi's model failed.") if message.get("stopReason") == "error" else None
-        elif kind == "tool_execution_end" and not event.get("parentToolCallId"):  # execute_tool's inner call: its own result follows.
+        elif kind == "tool_execution_start" and event.get("parentToolCallId"):  # A call a codemode script makes.
+            name = NAMES.get(event.get("toolName"), event.get("toolName"))
+            yield stream("content_block_start", content_block={"type": "tool_use", "id": event.get("toolCallId"), "name": name})
+            yield tool_use(event.get("toolCallId"), event.get("toolName"), event.get("args"))
+        elif kind == "tool_execution_end" and (event.get("toolName") != CODEMODE or event.get("isError")):
+            if event.get("toolName") == CODEMODE:  # A failed script: one failed record, so Rook sees the attempt failed.
+                yield tool_use(event.get("toolCallId"), CODEMODE, {})
             content = [{"type": "text", "text": block["text"]} for block in (event.get("result") or {}).get("content") or ()
                        if isinstance(block, dict) and isinstance(block.get("text"), str)]
+            if event.get("isError") and [block["text"] for block in content] == [ABORTED]:
+                # Pi cut the call off (the script's deadline or a stop): a send may have landed, as after a timeout.
+                content = [{"type": "text", "text": ABORTED + ": it timed out or was stopped before its answer came, "
+                                                    "so it may have landed."}]
             yield {"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": event.get("toolCallId"), "content": content,
                  "is_error": bool(event.get("isError"))}]}}
@@ -385,7 +394,7 @@ def check():
         folders = skill_dirs(base / "skills", wow=True)
         assert folders[0] == base / "skills" and (base / "skills/delegate/SKILL.md").is_file()
         skill = (base / "skills/delegate/SKILL.md").read_text()
-        assert "execute_tool" in skill and "tool_search" not in skill
+        assert "from a codemode script by that name" in skill and "tool_search" not in skill
         codex_harness.edit((codex_harness.ROOT / "desktop/rook.py").read_text(), PROMPT, "desktop/rook.py")
         text = Pi().setup({"t3": ("t3_thread_send", "t3_thread_read")}, ["the other T3 tools"], False)
         assert text.endswith("then reply ready.") and "tool_search" not in text and "ToolSearch" not in text, text
@@ -417,7 +426,8 @@ def check():
         assert argv[at:at + 13] == ["pi", "--mode", "rpc", "--no-session", "--no-context-files", "--no-approve",
                                     "--no-extensions", "-e", "builtin:mcp", "-e", str(EXTENSION), "--tools",
                                     ",".join([*CORE, "mcp__*"])], argv
-        assert argv[at + 13] == "--no-skills" and not {"tool_search", "codemode"} & set(argv[:-1])
+        assert argv[at + 13] == "--no-skills" and "tool_search" not in argv[at + 12]
+        assert not {"builtin:codemode", "builtin:tool-search"} & set(argv)  # Only Rook's extension loads code mode.
         home = base / "run/rook-pi/agent"
         assert f"PI_CODING_AGENT_DIR={home}" in argv and json.loads(argv[argv.index("env") + 3].partition("=")[2]) == list(CORE)
         assert sorted(path.name for path in home.iterdir()) == ["auth.json", "mcp-auth.json", "models.json", "settings.json"]
@@ -428,8 +438,9 @@ def check():
             "shellCommandPrefix": "export PI_CODING_AGENT_DIR=" + shlex.quote(str(base / "agent")) + "\nset -o pipefail"}
         assert "--model" not in argv and "--thinking" not in argv and "a full Pi session" in argv[-1]
         assert argv[-1].endswith(TOOLS_LINE)
-        assert core({"t3": {}}, ("t3_thread_launch",)) == [*CORE, "mcp__t3__t3_thread_list", "mcp__t3__t3_thread_read",
-                                                            "mcp__t3__t3_thread_send", "mcp__t3__t3_pending_request"]
+        assert core({"t3": {}}, ("t3_thread_launch",)) == ["read", "bash", "edit", "write", "mcp__t3__t3_thread_list",
+                                                            "mcp__t3__t3_thread_read", "mcp__t3__t3_thread_send",
+                                                            "mcp__t3__t3_pending_request", "codemode"]
         # The prompt comes rendered from rook.py, where the person's notes pass as they are: no second render here.
         argv = chosen.command("a full Claude Code session. Notes: ⟦owner⟧ likes tea.", {}, "s", None, ())
         assert argv[-1] == "a full Pi session. Notes: ⟦owner⟧ likes tea." + TOOLS_LINE, argv[-1]
@@ -495,27 +506,64 @@ def check():
         pi, out = asyncio.run(run("broken", []))
         assert not results(out) and "No API key" in pi.setup_problem, (out, pi.setup_problem)
 
-        # 4. The watcher and cards: a t3_thread_send through execute_tool reaches Rook exactly as a direct one.
+        # 4. The watcher and cards: a call a codemode script makes reaches Rook exactly as a direct call of that tool.
         send_args = {"threadId": "t", "message": "brief"}
         reply = {"content": [{"type": "text", "text": '{"messageId": "m1"}'}]}
 
-        def seen(name, args, nested):
+        def seen(events):
             pi = Pi()
             pi.texting = False
-            events = [{"type": "message_update", "assistantMessageEvent": {"type": "toolcall_start", "id": "c1", "toolName": name}},
-                      {"type": "message_update", "assistantMessageEvent": {"type": "toolcall_end", "toolCall": {
-                          "type": "toolCall", "id": "c1", "name": name, "arguments": args}}},
-                      *nested, {"type": "tool_execution_end", "toolCallId": "c1", "toolName": name, "result": reply, "isError": False}]
             return [message for event in events for message in pi.handle(event)]
-        direct = seen("mcp__t3__t3_thread_send", send_args, [])
-        inner = {"type": "tool_execution_end", "toolCallId": "c1/1", "parentToolCallId": "c1",
-                 "toolName": "mcp__t3__t3_thread_send", "result": reply, "isError": False}
-        assert seen(EXECUTE, {"name": "mcp__t3__t3_thread_send", "arguments": send_args}, [inner]) == direct, direct
+
+        def model_call(call_id, name, args):
+            return [{"type": "message_update", "assistantMessageEvent": {"type": "toolcall_start", "id": call_id, "toolName": name}},
+                    {"type": "message_update", "assistantMessageEvent": {"type": "toolcall_end", "toolCall": {
+                        "type": "toolCall", "id": call_id, "name": name, "arguments": args}}}]
+
+        def ran(call_id, name, args, result, error=False, parent=None):
+            at = {"toolCallId": call_id, "toolName": name, **({"parentToolCallId": parent} if parent else {})}
+            return [{"type": "tool_execution_start", **at, "args": args},
+                    {"type": "tool_execution_end", **at, "result": result, "isError": error}]
+
+        def script(inner, error=False):  # A codemode call whose script makes the inner calls, as [(name, args, result, error)].
+            done = {"content": [{"type": "text", "text": "Script failed" if error else "Script completed"}]}
+            nested = [event for n, (name, args, result, bad) in enumerate(inner, 1)
+                      for event in ran(f"c1/{n}", name, args, result, bad, parent="c1")]
+            return [*model_call("c1", CODEMODE, {"code": "..."}), {"type": "tool_execution_start", "toolCallId": "c1",
+                                                                    "toolName": CODEMODE, "args": {"code": "..."}},
+                    *nested, {"type": "tool_execution_end", "toolCallId": "c1", "toolName": CODEMODE, "result": done, "isError": error}]
+
+        direct = seen([*model_call("c1/1", "mcp__t3__t3_thread_send", send_args),
+                       *ran("c1/1", "mcp__t3__t3_thread_send", send_args, reply)[1:]])
         assert [m["type"] for m in direct] == ["stream_event", "assistant", "user"], direct
-        shell = seen(EXECUTE, {"name": "bash", "arguments": '{"command": "ls"}'}, [])  # Refused by the extension, but
-        assert shell[1]["message"]["content"][0]["name"] == "Bash"  # Rook still sees Claude Code's name ...
-        assert shell[1]["message"]["content"][0]["input"] == {"command": "ls", "run_in_background": False}  # ... and a dict.
-        assert seen(EXECUTE, {"name": "mcp__t3__t3_thread_read", "arguments": ["x"]}, [])[1]["message"]["content"][0]["input"] == {}
+        assert seen(script([("mcp__t3__t3_thread_send", send_args, reply, False)])) == direct  # Recorded as a direct send.
+        three = seen(script([("mcp__t3__t3_thread_read", {"threadId": "t"}, reply, False), ("bash", {"command": "ls"}, reply, False),
+                             ("mcp__t3__t3_thread_send", send_args, reply, False)]))
+        uses = [m["message"]["content"][0] for m in three if m["type"] == "assistant"]
+        assert [u["name"] for u in uses] == ["mcp__t3__t3_thread_read", "Bash", "mcp__t3__t3_thread_send"], uses
+        assert uses[1]["input"] == {"command": "ls", "run_in_background": False}
+        assert sum(m["type"] == "user" for m in three) == 3
+        assert seen(script([])) == []  # A script that only searches records nothing.
+        failed = seen(script([], error=True))  # A failed script is one failed record.
+        assert [m["type"] for m in failed] == ["assistant", "user"] and failed[1]["message"]["content"][0]["is_error"], failed
+        cut = seen(script([("mcp__t3__t3_thread_send", send_args, {"content": [{"type": "text", "text": ABORTED}]}, True)], error=True))
+        answer = next(m for m in cut if m["type"] == "user")["message"]["content"][0]
+        assert answer["is_error"] and "timed out" in answer["content"][0]["text"], cut  # Rook reads it as unknown.
+        # A turn that opens with a long script: Pi's first event for the call moves heard past the hand-off, so Rook's
+        # first-output watchdog (silent_too_long in rook.py: heard <= handed) never counts the turn as silent.
+        async def opens_with_script():
+            pi, handed = Pi(), time.monotonic()
+            pi.texting, pi.heard = False, handed
+
+            async def events():
+                for event in script([("mcp__t3__t3_thread_send", send_args, reply, False)])[:3]:
+                    yield event
+                await asyncio.sleep(0.3)  # The script runs past a short watchdog bound of 0.2 s.
+                assert pi.heard > handed and time.monotonic() - handed >= 0.2
+            return [message async for message in pi.read(events())]
+        assert asyncio.run(opens_with_script()) == []  # And nothing of the script shows as a tool.
+        bad = seen(script([("mcp__t3__t3_thread_send", send_args, reply, True)]))
+        assert [m["message"]["content"][0]["is_error"] for m in bad if m["type"] == "user"] == [True]  # A failed inner call.
 
         # 5. The real pi with Rook's launch line, a stand-in model and a stand-in T3: the declared list is the same
         # at every request, through a search, an execute, a core call and a second prompt, and a late T3 never joins.
@@ -585,12 +633,19 @@ def real_check(real_pi, base):
         argv[argv.index("pi")] = real_pi
         env = {"PATH": os.environ["PATH"], "HOME": str(base / "home"), "XDG_CONFIG_HOME": str(base / "config"),
                "XDG_DATA_HOME": str(base / "data"), "XDG_STATE_HOME": str(base / "state"), "XDG_CACHE_HOME": str(base / "cache"),
-               "XDG_RUNTIME_DIR": str(base / "run"), "PI_OFFLINE": "1", "STUB_DELAY": str(delay), "ROOK_PI_WAIT_MS": str(wait_ms)}
+               "XDG_RUNTIME_DIR": str(base / "run"), "PI_OFFLINE": "1", "STUB_DELAY": str(delay), "ROOK_PI_WAIT_MS": str(wait_ms),
+               "ROOK_PI_SCRIPT_MS": "1500"}
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                    env=env, cwd=work)
         settled = threading.Semaphore(0)
-        threading.Thread(target=lambda: [settled.release() for line in process.stdout if '"agent_settled"' in line],
-                         daemon=True).start()
+        events = []
+
+        def read():
+            for line in process.stdout:
+                events.append(json.loads(line))
+                if events[-1].get("type") == "agent_settled":
+                    settled.release()
+        threading.Thread(target=read, daemon=True).start()
         for at, prompt in enumerate(prompts):
             process.stdin.write(json.dumps({"id": f"p{at}", "type": "prompt", "message": prompt}) + "\n")
             process.stdin.flush()
@@ -602,43 +657,56 @@ def real_check(real_pi, base):
         server.shutdown()
         home = base / "run/rook-pi/agent"
         assert all((home / name).is_symlink() for name in PERSON_FILES), "Pi replaced a link to the person's file"
-        return requests, errors
+        return requests, errors, events
 
     def said(request):
         return json.dumps(request[1].get("content"))
 
     send = {"threadId": "t", "message": "brief"}
-    listing = "mcp__t3__t3_project_list"
-    requests, errors = session([("text", "ready"), ("search_tools", {"query": "project list"}),
-                                ("execute_tool", {"name": listing, "arguments": {}}),
-                                ("mcp__t3__t3_thread_send", send), ("bash", {"command": "echo CHILD=${PI_CODING_AGENT_DIR-unset}"}),
-                                ("execute_tool", {"name": "mcp__t3__nope", "arguments": {}}),
-                                ("execute_tool", {"name": EXECUTE, "arguments": {"name": "mcp__t3__t3_thread_send", "arguments": send}}),
-                                ("execute_tool", {"name": listing, "arguments": "{}"}),
-                                ("execute_tool", {"name": listing, "arguments": []}),
-                                ("execute_tool", {"name": "bash", "arguments": {"command": "true"}}), ("text", "done")],
-                               ["Setup", "go", "and again"], 0, 10000)
+
+    def code(text):
+        return ("codemode", {"code": text})
+
+    requests, errors, events = session([
+        ("text", "ready"), code('return await searchTools("project list")'),
+        code("return await tools.mcp__t3__t3_project_list({})"), ("mcp__t3__t3_thread_send", send),
+        ("bash", {"command": "echo CHILD=${PI_CODING_AGENT_DIR-unset}"}),
+        code("return await tools.mcp__t3__t3_project_delete({})"), code("return typeof models"),
+        code('// @options: {"timeout_ms": 600000}\nwhile (true) {}'),
+        code('const a = await tools.mcp__t3__t3_thread_read({threadId: "t"}); '
+             'const b = await tools.mcp__t3__t3_thread_send({threadId: "t", message: "brief"}); return [a, b].length'),
+        ("text", "done")], ["Setup", "go", "and again"], 0, 10000)
     tools = {request[0] for request in requests}
-    assert len(requests) == 12 and len(tools) == 1, (len(requests), len(tools), errors[-500:])
+    assert len(requests) == 11 and len(tools) == 1, (len(requests), len(tools), errors[-500:])
     names = [tool["function"]["name"] for tool in json.loads(tools.pop())]
-    assert sorted(names) == sorted(core({"t3": {}}, ())), names
+    assert names == ["read", "bash", "edit", "write", "codemode", *(f"mcp__t3__{t}" for t in T3_CORE)], names  # As sent.
     first = requests[0][2]
     assert "MARKER" not in first and "marker" not in first, [m for m in first.split('"') if "MARKER" in m or "marker" in m][:5]
-    assert PI_SERVERS_LINE not in first and "Call their tools with execute_tool" in first
-    assert "mcp__t3__t3_project_list(" in said(requests[2]) and "t3_project_delete" not in said(requests[2]), said(requests[2])
+    assert "mcp__t3__t3_project_list" in said(requests[2]) and "t3_project_delete" not in said(requests[2]), said(requests[2])
     assert "t3_project_list ok" in said(requests[3]) and "t3_thread_send ok" in said(requests[4])
     assert f"CHILD={person}" in said(requests[5]), said(requests[5])  # Children get the person's own folder back.
-    assert "not found" in said(requests[6]) and "search_tools" in said(requests[6]), said(requests[6])
-    assert "t3_thread_send ok" not in said(requests[7]) and "call it directly" in said(requests[7]), said(requests[7])  # No nesting.
-    assert "t3_project_list ok" in said(requests[8]), said(requests[8])  # Arguments as a JSON string.
-    assert "must be a JSON object" in said(requests[9]) and "call it directly" in said(requests[10]), said(requests[10])
+    assert "Script failed" in said(requests[6]) and "t3_project_delete ok" not in said(requests[6]), said(requests[6])  # Denied.
+    assert "undefined" in said(requests[7]), said(requests[7])  # No models global.
+    assert "Script failed" in said(requests[8]), said(requests[8])  # Rook's deadline holds over the script's own.
+    assert "2" in said(requests[9]), said(requests[9])
     assert "tool list changed" not in errors, errors[-500:]
+    # Pi's real events through the harness: each call a script makes is one record under its own name, a search
+    # records none, and a failed script is one failed record.
+    pi = Pi()
+    pi.texting, pi.process = False, None
+    records = [m for event in events if event.get("type") != "agent_settled" for m in pi.handle(event)]
+    uses = [m["message"]["content"][0] for m in records if m["type"] == "assistant"]
+    results = {block["tool_use_id"]: block for m in records if m["type"] == "user" for block in m["message"]["content"]}
+    assert [u["name"] for u in uses] == ["mcp__t3__t3_project_list", "mcp__t3__t3_thread_send", "Bash", CODEMODE, CODEMODE,
+                                         "mcp__t3__t3_thread_read", "mcp__t3__t3_thread_send"], [u["name"] for u in uses]
+    assert [results[u["id"]]["is_error"] for u in uses] == [False, False, False, True, True, False, False], uses
+    assert uses[-1]["input"] == send and uses[0]["id"].endswith("/1")
     # A model whose provider only an extension of the person's could give.
     assert model_unknown("ghost/m") and not model_unknown("stand-in/m") and not model_unknown("ghost")
 
-    # T3 answers after the wait: its core tools stay out of the list, and execute_tool reaches them.
-    requests, errors = session([("text", "ready"), ("execute_tool", {"name": "mcp__t3__t3_thread_send", "arguments": send}),
-                                ("text", "done")], ["Setup", "go"], 2, 300)
+    # T3 answers after the wait: its core tools stay out of the list, and a script reaches them.
+    requests, errors, _ = session([("text", "ready"), code(f"return await tools.mcp__t3__t3_thread_send({json.dumps(send)})"),
+                                   ("text", "done")], ["Setup", "go"], 2, 300)
     tools = {request[0] for request in requests}
     assert len(requests) == 3 and len(tools) == 1 and "mcp__t3" not in tools.pop(), errors[-500:]
     assert "t3's tools were not ready" in errors and "t3_thread_send ok" in said(requests[2]), (errors[-500:], said(requests[2]))
