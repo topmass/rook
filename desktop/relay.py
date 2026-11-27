@@ -159,6 +159,7 @@ relay.py restart [--timeout DURATION] [--reason TEXT]
                             first. It waits for a quiet moment and may take minutes, so run it with a long
                             shell timeout. It prints blockers at most once a minute and exits non-zero without
                             restarting after the limit (9m by default). A stopped Rook starts.
+relay.py update --check     Print the installed version and the newest one on GitHub. It changes nothing.
 relay.py update [TAG|COMMIT]
                             Update an installed Rook: fetch its source, move the checkout to the newest
                             commit or to TAG or COMMIT, run the installer again when the requirements
@@ -249,6 +250,7 @@ from settings import (
     theme_pack_in_force, theme_packs,
     valid, valid_medium_voice_url, voice_python, voices, write_settings,
 )
+import update_check
 import watch
 import work
 OWNER = settings.OWNER_TOKEN  # The owner's name, filled in when the text leaves Rook.
@@ -469,6 +471,11 @@ def settings_command(argv):
         )
         # The thread watcher reads this one from the file at each look, so the file is what is in force.
         values["thread_milestones"] = dict(zip(("value", "source"), settings.thread_milestones_in_force(saved_file)))
+        values["debug_replay"] = dict(zip(("value", "source"), settings.debug_replay_in_force(saved_file)))
+        # The daily check reads the file at each look. A checkout whose origin is not public never checks.
+        check, source = update_check.mode(saved_file)
+        values["update_check"] = {"value": check, "source": source if update_check.is_public() else
+                                  f"{source}; off here, since this checkout's origin is not Rook's public repository"}
         values["plugins"] = {"value": saved_file.get("plugins") or {},
                              "source": "settings file" if saved_file.get("plugins") else "not set"}
         for key in keys:
@@ -611,6 +618,31 @@ def settings_command(argv):
         utter(f"Saved {key} = {value}" + (", with that agent's default model and effort" if key == "agent" else "")
               + f". It takes effect at Rook's next start, not now. Rook never restarts itself. {OWNER_START} or the build "
               f"thread restarts it with relay.py restart, or the daily restart at 04:30 does.{note}")
+        return
+    if key == "debug_replay":  # Rook reads the file at each Shift+right-click, so nothing is applied now.
+        value = value.strip().lower()
+        old = settings.debug_replay_in_force(saved)[0]
+        if value == "previous":
+            if key not in previous:
+                leave(f"There is no previous {key} to go back to.")
+            value = previous[key]
+        if value not in settings.DEBUG_REPLAY_MODES:
+            leave(f"debug_replay must be {' or '.join(settings.DEBUG_REPLAY_MODES)}. {value} is not one of them.")
+        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
+        utter(f"Saved debug_replay = {value}. Shift and a right-click on the resting loop use it from now on.")
+        return
+    if key == "update_check":  # The daily check reads the file at each look, so nothing is applied now.
+        value = value.strip().lower()
+        old = update_check.mode(saved)[0]
+        if value == "previous":
+            if key not in previous:
+                leave(f"There is no previous {key} to go back to.")
+            value = previous[key]
+        if value not in ("on", "off"):
+            leave(f"update_check must be on or off. {value} is not one of them.")
+        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
+        utter(f"Saved update_check = {value}. " + ("Rook looks on GitHub for a newer Rook once a day, after 10:00."
+                                                    if value == "on" else "Rook no longer looks for a newer Rook."))
         return
     if key == "thread_milestones":  # The thread watcher reads the file at each look, so nothing is applied now.
         value = value.strip().lower()
@@ -3941,8 +3973,19 @@ def update_command(argv):
     """relay.py update [TAG|COMMIT]: fetch Rook's source, move this install's checkout to the new commit, run
     install/install.sh again when the requirements changed, and restart Rook through the idle restart grant.
     It updates only a checkout that install/install.sh made, with no local changes."""
+    if argv == ["--check"]:  # Read-only: it never moves the checkout.
+        old, new = update_check.installed(), update_check.latest()
+        print(f"Installed: {old[:7] if old else 'unknown'}")
+        if not new:
+            sys.exit(f"Latest: unknown. Rook could not reach {update_check.PUBLIC}.")
+        print(f"Latest on GitHub: {new[:7]}")
+        print("Rook is up to date." if new == old else "A newer Rook is on GitHub. Update with: relay.py update")
+        if not update_check.is_public():
+            print("This checkout's origin is not Rook's public repository, so relay.py update fetches from that origin, "
+                  "and the daily check is off here.")
+        return
     if len(argv) > 1 or argv[:1] and argv[0].startswith("-"):
-        sys.exit("Usage: relay.py update [TAG|COMMIT]")
+        sys.exit("Usage: relay.py update [--check | TAG | COMMIT]")
     if os.environ.get("ROOK_AGENT"):
         sys.exit("Rook never updates or restarts itself. Run relay.py update in a terminal.")
     try:
@@ -3959,12 +4002,13 @@ def update_command(argv):
 
     if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
         sys.exit(f"{ROOT} has local changes, so Rook did not update it.")
-    # get.sh installs a .tar.gz through a temporary folder that it deletes, so that origin points at nothing.
+    # An older get.sh installed a .tar.gz through a temporary folder that it deleted, so that origin points at nothing.
+    # A folder install whose folder is gone is the same. Both now update from Rook's public repository.
     source = git("remote", "get-url", "origin").stdout.strip().removeprefix("file://")
     if source.startswith("/") and not Path(source).exists():
-        sys.exit(f"Rook was installed from a .tar.gz file or a folder that is gone ({source}), so it has no source to "
-                 f"update from. Point it at Rook's git repository with: git -C {ROOT} remote set-url origin <git URL>. "
-                 "Then run relay.py update again.")
+        if git("remote", "set-url", "origin", update_check.PUBLIC).returncode:
+            sys.exit(f"Rook's source folder {source} is gone, and Rook could not point origin at {update_check.PUBLIC}.")
+        print(f"Rook's source folder {source} is gone, so Rook now updates from {update_check.PUBLIC}.", flush=True)
     fetched = git("fetch", "-q", "origin", *argv)
     if fetched.returncode:
         sys.exit(f"Rook could not fetch its source. Check the network and try again. ({fetched.stderr.strip()})")
@@ -5576,6 +5620,7 @@ def check_memory():
 
 def check_shared_memory():
     """Self-check shared memory install, partial-failure recovery, hook merge, note moves, cap, and removal."""
+    import plistlib
     import shlex
     import tempfile
 
@@ -5614,8 +5659,10 @@ def check_shared_memory():
         fake_claude.chmod(0o755)
 
         def make_env(extra=None):
+            # A hook or memory-dir finds a project from these, so a coding session's own must never reach the check.
             env = {k: v for k, v in os.environ.items()
-                   if k not in ("T3CODE_THREAD_ID", "ROOK_AGENT", "CLAUDE_CONFIG_DIR", "ROOK_DREAM_COMMAND", "SYSTEMCTL")}
+                   if k not in ("T3CODE_THREAD_ID", "ROOK_AGENT", "CLAUDE_CONFIG_DIR", "ROOK_DREAM_COMMAND", "SYSTEMCTL",
+                                "CLAUDE_PROJECT_DIR", "PROJECT_ROOTS", "NO_MEMORY") and not k.startswith("GIT_")}
             env.update(
                 HOME=str(fake_home),
                 XDG_DATA_HOME=str(xdg_data),
@@ -5628,8 +5675,35 @@ def check_shared_memory():
             env.update(extra or {})
             return env
 
+        real_base = os.path.realpath(base)  # On a Mac, /var is /private/var.
+
+        def inside(path):
+            return os.path.realpath(path).startswith(real_base + "/")
+
+        def run_scratch(cmd, extra=None, cwd=None, **kwargs):
+            """Every command of this check: in a scratch folder, with the scrubbed scratch environment, so a hook's
+            $PWD fallback or a failing memory-dir never finds this repository or a real project."""
+            folder = str(cwd or base)
+            assert inside(folder) or os.path.realpath(folder) == real_base, folder
+            return subprocess.run([str(word) for word in cmd], cwd=folder, env=make_env(extra), text=True,
+                                  capture_output=True, **kwargs)
+
         def run_cli(*args, extra=None):
-            return subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=make_env(extra))
+            return run_scratch([sys.executable, SCRIPT, *args], extra=extra)
+
+        # 0. Before any command runs: the memory folder the check resolves, as the hook and its fallbacks do, is scratch.
+        for start in (fake_home / "Work", base):
+            resolved = run_scratch([memory.SHARED_SOURCE / "bin/memory-dir", "--start", start]).stdout.strip()
+            assert inside(resolved), resolved
+        bare_bin = base / "bin-bare"  # No jq and no timeout: the hook falls back to $PWD, here the scratch base.
+        bare_bin.mkdir(mode=0o700)
+        for tool in ("bash", "git", "python3", "dirname", "basename", "readlink", "realpath", "mkdir", "grep", "head",
+                     "find", "tr"):
+            (bare_bin / tool).symlink_to(shutil.which(tool))
+        bare_hook = run_scratch(["bash", memory.SHARED_SOURCE / "hooks/memory-context.sh"], extra={"PATH": str(bare_bin)},
+                                input="{}")
+        fallback = re.search(r"^Memory folder: (.+) \(private", bare_hook.stdout, re.M)
+        assert fallback and inside(fallback.group(1)), (bare_hook.stdout, bare_hook.stderr)
 
         # 1. Refusal when ~/.agents/bin/dream exists and was not installed by Rook (regular file and symlink).
         foreign_dream = fake_home / ".agents/bin/dream"
@@ -5768,18 +5842,15 @@ def check_shared_memory():
             assert not (own_dir / "incoming.jsonl").exists()
 
             # Standalone session hook prints instructions to read notes and save with ~/.agents/bin/remember.
-            hook_run = subprocess.run(
-                ["bash", str(fake_home / ".agents/hooks/memory-context.sh")],
-                input=json.dumps({"cwd": str(fake_home / "Work")}),
-                text=True, capture_output=True, env=make_env(),
-            )
+            hook_run = run_scratch(["bash", fake_home / ".agents/hooks/memory-context.sh"],
+                                   input=json.dumps({"cwd": str(fake_home / "Work")}))
             assert hook_run.returncode == 0 and str(rook_shared) in hook_run.stdout, hook_run.stdout
             assert "Read the notes related to your task before starting." in hook_run.stdout, hook_run.stdout
             assert "~/.agents/bin/remember" in hook_run.stdout, hook_run.stdout
 
             # 4. Nightly dream: empty-night skip, CLAUDE_BIN without fake_bin on PATH, DREAM_MAX_RUNS clamp (>=2), and cut part progress.
             minimal_path = {"PATH": "/usr/bin:/bin"}
-            empty_dream = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            empty_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert empty_dream.returncode == 0 and "nothing to dream" in empty_dream.stdout, (empty_dream.stdout, empty_dream.stderr)
 
             # Create a multi-part session (>400 KB) in ProjA plus a session in ProjB, set DREAM_MAX_RUNS=1 (must clamp to 2).
@@ -5807,7 +5878,7 @@ def check_shared_memory():
             (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
             orig_conf = (fake_home / ".agents/memory.conf").read_text()
             (fake_home / ".agents/memory.conf").write_text(orig_conf.replace("DREAM_MAX_RUNS=12", "DREAM_MAX_RUNS=1"))
-            capped_dream = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            capped_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert capped_dream.returncode == 0, (capped_dream.stdout, capped_dream.stderr)
             assert int(claude_count.read_text()) == 2, claude_count.read_text()
             assert "cut s1.jsonl to 1 of" in capped_dream.stdout, capped_dream.stdout
@@ -5830,15 +5901,15 @@ def check_shared_memory():
             sfile_split.write_text("\n".join(split_lines) + "\n")
             os.utime(sfile_split, (time.time() - 3600,) * 2)
             (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
-            night1 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night1 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night1.returncode == 0 and "cut split.jsonl to 1 of" in night1.stdout, (night1.stdout, night1.stderr)
             st1 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st1["files"][str(sfile_split)] == 1 and str(sfile_split) in st1["retry"], st1
-            night2 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night2 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night2.returncode == 0 and "single line in split.jsonl spans more than 1 part(s)" in night2.stdout, (night2.stdout, night2.stderr)
             st2 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st2["files"][str(sfile_split)] == 2 and str(sfile_split) in st2["retry"], st2
-            night3 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night3 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night3.returncode == 0, (night3.stdout, night3.stderr)
             st3 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st3["files"][str(sfile_split)] == 3 and str(sfile_split) not in st3["retry"], st3
@@ -5846,10 +5917,8 @@ def check_shared_memory():
             # bin/remember falls back to claude on PATH when CLAUDE_BIN is stale.
             stale_conf = orig_conf.replace(f"CLAUDE_BIN={fake_claude}", "CLAUDE_BIN=/nonexistent/claude")
             (fake_home / ".agents/memory.conf").write_text(stale_conf)
-            rem_fallback = subprocess.run(
-                [str(fake_home / ".agents/bin/remember"), "stale path fallback fact"],
-                cwd=str(fake_home / "ProjA"), text=True, capture_output=True, env=make_env(),
-            )
+            rem_fallback = run_scratch([fake_home / ".agents/bin/remember", "stale path fallback fact"],
+                                       cwd=fake_home / "ProjA")
             assert rem_fallback.returncode == 0, (rem_fallback.stdout, rem_fallback.stderr)
 
             # 5. User-edited memory.conf is preserved on reinstall AND left in place on remove; pre-existing file kept too.
@@ -5895,18 +5964,94 @@ def check_shared_memory():
             repo_a, repo_b = fake_home / "Code/repo-a", fake_home / "Code/repo-b"
             for repo in (repo_a, repo_b):
                 repo.mkdir(parents=True)
-                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                run_scratch(["git", "init", "-q", repo], check=True)
             inst2 = run_cli("memory", "install-shared")
             assert inst2.returncode == 0, (inst2.returncode, inst2.stdout, inst2.stderr)
             assert json.loads(claude_settings.read_text())["autoMemoryEnabled"] is False
             for repo in (repo_a, repo_b):
-                md_out = subprocess.run([str(fake_home / ".agents/bin/memory-dir"), "--start", str(repo)],
-                                        text=True, capture_output=True, env=make_env())
+                md_out = run_scratch([fake_home / ".agents/bin/memory-dir", "--start", repo])
                 assert md_out.returncode == 0 and md_out.stdout.strip() == f"{os.path.realpath(str(repo))}/.agent-memory", md_out.stdout
             assert run_cli("memory", "remove-shared").returncode == 0
             assert not (fake_home / ".agents/memory.conf").exists()  # Unedited memory.conf IS removed.
             restored = json.loads(claude_settings.read_text())
             assert restored == {"model": "opus"}, restored
+
+            # 7. A Mac: no systemctl, so the dream is a launchd job; realpath has no -m and there is no timeout.
+            mac_bin = base / "bin-mac"
+            mac_bin.mkdir(mode=0o700)
+            for tool in ("bash", "git", "python3", "dirname", "basename", "readlink", "mkdir", "grep", "head", "find", "tr",
+                         "jq"):
+                (mac_bin / tool).symlink_to(shutil.which(tool))
+            (mac_bin / "claude").symlink_to(fake_claude)
+            real_realpath = shutil.which("realpath")
+            (mac_bin / "realpath").write_text(  # BSD realpath, as on a Mac.
+                f'#!/bin/sh\n[ "$1" = -m ] && {{ echo "realpath: illegal option -- m" >&2; exit 1; }}\nexec {real_realpath} "$@"\n')
+            launch_log, launch_loaded = base / "launchctl.log", base / "launchctl.loaded"
+            no_domain = base / "launchctl.no-domain"  # As over ssh: no gui domain, so every call fails.
+            (mac_bin / "launchctl").write_text(
+                "#!/bin/sh\n"
+                f'echo "$*" >> {shlex.quote(str(launch_log))}\n'
+                f'[ -f {shlex.quote(str(no_domain))} ] && {{ echo "Bad request." >&2; exit 125; }}\n'
+                'case "$1" in\n'
+                f'  bootstrap) [ -f {shlex.quote(str(launch_loaded))} ] && exit 5; : > {shlex.quote(str(launch_loaded))} ;;\n'
+                f'  bootout) [ -f {shlex.quote(str(launch_loaded))} ] || exit 3; {shutil.which("rm")} -f {shlex.quote(str(launch_loaded))} ;;\n'
+                f'  print) [ -f {shlex.quote(str(launch_loaded))} ] || exit 113 ;;\n'
+                "esac\n")
+            for tool in ("realpath", "launchctl"):
+                (mac_bin / tool).chmod(0o755)
+            mac = {"PATH": str(mac_bin)}
+            agents_dir_ = fake_home / "Library/LaunchAgents"
+            agents_dir_.mkdir(parents=True)
+            other_plist = agents_dir_ / "com.example.other.plist"
+            other_plist.write_text("not Rook's\n")
+            plist = agents_dir_ / "com.rook.agent-dream.plist"
+            job = f"gui/{os.getuid()}/com.rook.agent-dream"
+            sys_log.write_text("")
+            mac_inst = run_cli("memory", "install-shared", extra=mac)
+            assert mac_inst.returncode == 0, (mac_inst.returncode, mac_inst.stdout, mac_inst.stderr)
+            assert sys_log.read_text() == "" and not (xdg_config / "systemd/user/agent-dream.timer").exists()
+            job_plist = plistlib.loads(plist.read_bytes())
+            assert job_plist["Label"] == "com.rook.agent-dream", job_plist
+            assert job_plist["ProgramArguments"] == [str(fake_home / ".agents/bin/dream")], job_plist
+            assert job_plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 0} and job_plist["Nice"] == 10, job_plist
+            assert job_plist["EnvironmentVariables"]["PATH"] == (f"{fake_home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+                                                                  "/usr/bin:/bin"), job_plist
+            assert launch_log.read_text().splitlines() == [f"bootout {job}", f"bootstrap gui/{os.getuid()} {plist}"]
+            mac_manifest = json.loads((fake_home / ".agents/rook-shared-manifest.json").read_text())
+            assert mac_manifest["timer"] == {"label": "com.rook.agent-dream", "loaded": True}, mac_manifest["timer"]
+            assert mac_manifest["rook_memory_dir"] == str(rook_shared), mac_manifest  # memory-dir ran without realpath -m.
+            # With no timeout, the hook still takes the session's folder from its payload, not its own folder.
+            assert not (mac_bin / "timeout").exists()
+            mac_hook = run_scratch(["bash", fake_home / ".agents/hooks/memory-context.sh"], extra=mac,
+                                   input=json.dumps({"cwd": str(fake_home / "Work")}))
+            assert mac_hook.returncode == 0 and f"Memory folder: {rook_shared} " in mac_hook.stdout, (mac_hook.stdout, mac_hook.stderr)
+            assert f"{fake_home / 'Work'}\t{rook_shared}" in (fake_home / ".agents/dream/dirs.tsv").read_text().splitlines()
+            # A second install reloads the job it owns.
+            again = run_cli("memory", "install-shared", extra=mac)
+            assert again.returncode == 0 and launch_loaded.exists(), (again.stdout, again.stderr)
+            # Unable to reach the job from this session: nothing is removed, so a later run can finish.
+            no_domain.write_text("")
+            own_before = sorted((p.name, p.read_bytes()) for p in own_dir.iterdir())
+            stuck = run_cli("memory", "remove-shared", extra=mac)
+            assert stuck.returncode != 0 and "from this session" in stuck.stderr, (stuck.stdout, stuck.stderr)
+            assert "on the Mac itself, while signed in at its screen" in stuck.stderr, stuck.stderr
+            assert sorted((p.name, p.read_bytes()) for p in own_dir.iterdir()) == own_before, "own notes changed"
+            assert plist.is_file() and launch_loaded.exists() and (fake_home / ".agents/rook-shared-manifest.json").is_file()
+            no_domain.unlink()
+            launch_log.write_text("")
+            mac_rem = run_cli("memory", "remove-shared", extra=mac)
+            assert mac_rem.returncode == 0, (mac_rem.returncode, mac_rem.stdout, mac_rem.stderr)
+            assert launch_log.read_text().splitlines() == [f"print {job}", f"bootout {job}"], launch_log.read_text()
+            assert not launch_loaded.exists() and sorted(agents_dir_.iterdir()) == [other_plist]
+            assert other_plist.read_text() == "not Rook's\n" and sys_log.read_text() == ""
+            assert not (fake_home / ".agents/rook-shared-manifest.json").exists() and not (fake_home / ".agents/bin").exists()
+            # A job Rook did not write is never replaced, loaded or unloaded.
+            plist.write_text("their own job\n")
+            launch_log.write_text("")
+            assert run_cli("memory", "install-shared", extra=mac).returncode == 0
+            assert json.loads((fake_home / ".agents/rook-shared-manifest.json").read_text())["timer"]["loaded"] is False
+            assert run_cli("memory", "remove-shared", extra=mac).returncode == 0
+            assert plist.read_text() == "their own job\n" and launch_log.read_text() == "", launch_log.read_text()
         finally:
             if saved_home is None:
                 os.environ.pop("HOME", None)

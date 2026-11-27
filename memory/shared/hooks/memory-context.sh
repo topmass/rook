@@ -2,7 +2,11 @@
 # Standalone SessionStart hook for Claude Code: prints the project's memory folder and its index.
 base=$(dirname "$(dirname "$(readlink -f "$0")")")
 . "$base/memory.conf"
-[ -t 0 ] || cwd=$(timeout 1 jq -r '.cwd // empty' 2>/dev/null)
+if command -v timeout >/dev/null 2>&1; then
+  [ -t 0 ] || cwd=$(timeout 1 jq -r '.cwd // empty' 2>/dev/null)
+else # A Mac has no timeout: read waits at most 1 s for the payload.
+  [ -t 0 ] || { IFS= read -r -d '' -t 1 payload; cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null); }
+fi
 cwd=${cwd:-${CLAUDE_PROJECT_DIR:-$PWD}}
 dir=$("$base/bin/memory-dir" --start "$cwd")
 case $? in
@@ -14,7 +18,7 @@ mkdir -p "$dir" "$HOME/.agents/dream" 2>/dev/null || exit 0
 [ -f "$dir/MEMORY.md" ] || printf '# Memory index\n' >"$dir/MEMORY.md"
 # The dream job needs this map after a worktree is deleted.
 map="$HOME/.agents/dream/dirs.tsv"
-line="$(realpath -m "$cwd")	$dir"
+line="$(realpath -m "$cwd" 2>/dev/null || python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$cwd")	$dir"
 grep -qxF "$line" "$map" 2>/dev/null || echo "$line" >>"$map"
 
 echo "Memory folder: $dir (private, never commit). Memory model: $MEMORY_MODEL."

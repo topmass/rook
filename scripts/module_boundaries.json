@@ -17,6 +17,7 @@
       "desktop/work.py",
       "desktop/machine.py",
       "desktop/start_limit.py",
+      "desktop/update_check.py",
       "desktop/speech.py",
       "desktop/turn_end.py",
       "desktop/memory.py",

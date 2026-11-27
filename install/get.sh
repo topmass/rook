@@ -9,8 +9,8 @@
 # Any install.sh option after SOURCE overrides a default, for example --agent codex or --dry-run.
 set -eu
 
-# Rook's public repository.
-ROOK_PUBLIC_SOURCE="https://github.com/topmass/rook.git"
+# Rook's public repository. Tests name a stand-in.
+ROOK_PUBLIC_SOURCE="${ROOK_PUBLIC_SOURCE:-https://github.com/topmass/rook.git}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -126,7 +126,7 @@ main() {
       git -C "$work/rook" init -q
       git -C "$work/rook" add -A
       git -C "$work/rook" -c user.name=Rook -c user.email=rook@localhost commit -qm "Rook from $source"
-      from_tarball=1
+      tar_origin="$ROOK_PUBLIC_SOURCE"
       code="$work/rook"
       source="$work/rook" ;;
     *)
@@ -185,7 +185,8 @@ main() {
       say "Rook also gets its medium voice, a $size voice model. The install option --voice small skips it." ;;
   esac
   rc=0
-  ROOK_GET_STARTS_ROOK=1 bash "$code/install/install.sh" --source "$source" \
+  # A .tar.gz is cloned from a folder that this run deletes, so its checkout updates from the public repository.
+  ROOK_GET_STARTS_ROOK=1 ROOK_ORIGIN="${tar_origin:-}" bash "$code/install/install.sh" --source "$source" \
     --voice "$voice" --voice-model yes --recogniser yes --service yes "$@" </dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
     say ""
@@ -239,7 +240,6 @@ print(re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", key).replace("Ctrl", "Control"))' \
       say "Start Rook with the command above. Once every piece checks out, hold $key and say hello."
     fi
     say "Next, check every piece: $verify   (each row marked FIX prints its fix)"
-    [ -z "${from_tarball:-}" ] || say "This copy came from a .tar.gz file, so relay.py update cannot update it. To update later, uninstall and install again from a git URL."
   fi
   # Last, so it is the line a person reads: an agent that is not signed in answers nothing.
   # Only a status command that runs and says plainly that it is signed out: an old tool without one says nothing.

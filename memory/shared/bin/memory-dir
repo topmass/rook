@@ -6,9 +6,11 @@
 #   memory-dir DIR           the folder to use from DIR later in a session: the nearest one that already
 #                            exists at DIR or above, so a `cd` into a subfolder still finds the session's memory
 # It prints nothing and exits with 3 for a folder listed under NO_MEMORY in memory.conf.
+# realpath -m, or Python's realpath where realpath has no -m, as on a Mac.
+canon() { realpath -m "$1" 2>/dev/null || python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 start=""
 [ "${1:-}" = --start ] && { start=1; shift; }
-d=$(realpath -m "${1:-$PWD}")
+d=$(canon "${1:-$PWD}")
 d=${d%%/.agent-memory*}
 started=$d # the folder as given, before a worktree is traced to its repository
 
@@ -25,7 +27,7 @@ fi
 IFS=: read -ra off <<<"${NO_MEMORY:-}"
 for root in "${off[@]}"; do
   [ -n "$root" ] || continue
-  root=$(realpath -m "${root/#\~/$HOME}")
+  root=$(canon "${root/#\~/$HOME}")
   case "$d/" in "$root"/*) exit 3 ;; esac
   case "$started/" in "$root"/*) exit 3 ;; esac
 done
@@ -34,7 +36,7 @@ done
 IFS=: read -ra roots <<<"${PROJECT_ROOTS:-}"
 for root in "${roots[@]}"; do
   [ -n "$root" ] || continue
-  root=$(realpath -m "${root/#\~/$HOME}")
+  root=$(canon "${root/#\~/$HOME}")
   case "$d/" in "$root"/*) d=$root ;; esac
 done
 

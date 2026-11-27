@@ -10,6 +10,7 @@ import secrets
 import math
 import os
 import posixpath
+import random
 import re
 import shlex
 import shutil
@@ -34,7 +35,8 @@ if __name__ == "__main__" and not sys.argv[1:2] or __name__ == "__main__" and no
 
 # The self-checks run on empty scratch folders, whatever the environment holds, so they never read or write the owner's
 # real state, data, config, cache, or runtime files. Set before the imports below, which read these paths.
-if __name__ == "__main__" and sys.argv[1:2] in (["--check-steps"], ["--check-restart"], ["--check-agent"],
+if __name__ == "__main__" and sys.argv[1:2] in (["--check-steps"], ["--check-replay"], ["--check-restart"],
+                                                ["--check-agent"],
                                                 ["--check-dark"], ["--check-timing"], ["--check-mailbox"],
                                                 ["--check-speech"], ["--check-journal"], ["--check-phone"],
                                                 ["--check-media"], ["--check-desktop"], ["--check-start"]):
@@ -80,6 +82,7 @@ import plugin_loader  # Which plugins are active, published once per agent launc
 import session  # The session for clients that attach over HTTP, such as the owner's phone.
 import relay  # The settings Rook may change itself, and their rules, shared with relay.py set.
 from render import SCENE_SECONDS  # How long the overlay keeps a scene after its turn.
+import update_check  # Once a day, whether a newer Rook is on GitHub.
 import watch  # Watches the threads Rook hands work to, and says when they finish.
 import work  # The work list: each of the owner's wishes, where it is, and what it waits on.
 OWNER = relay.settings.OWNER_TOKEN  # The owner's name, filled in when the text leaves Rook.
@@ -392,6 +395,10 @@ DIAGRAM_OPENER = re.compile(r"\{\s*diagram\b\s*", re.IGNORECASE)
 # With no marks, a scene's steps take turns while Rook speaks: each holds the speech's length shared by the steps,
 # and at least this long.
 STEP_LOOP_SECONDS = 3.0
+# The video-recording debug replay: its thinking phase lasts this long, picked at random so clips differ, and each gap
+# of the recorded turn shrinks to at most REPLAY_GAP_SECONDS, with a tool's form held at least REPLAY_FORM_SECONDS.
+REPLAY_THINK_SECONDS = (2.0, 5.0)
+REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS = 2.0, 1.2
 # An unprompted turn starts this long after Rook's voice last finished, and longer when that speech asked the owner
 # something, so they have time to answer. Once they record, the usual rules hold the turn.
 SPEECH_GAP_SECONDS = 6
@@ -703,6 +710,13 @@ def name_marks(spoken, names, seen):
         seen.update(new)
         out.append("".join(f"{{step {k + 1}}}" for k in new) + sentence)
     return " ".join(out)
+
+
+def replay_thinking(rng):
+    """The debug replay's thinking phase: (seconds, seconds per form, which other form). The rook holds a bit over
+    half of it and one other thinking form the rest, so each clip shows the rook and one more form, and clips differ."""
+    seconds = rng.uniform(*REPLAY_THINK_SECONDS)
+    return seconds, round(seconds * rng.uniform(0.52, 0.6), 2), rng.randrange(100)
 
 
 def render_text(text):
@@ -2325,6 +2339,13 @@ class Companion:
     media_recovered = False  # True once start-up crash recovery has run; no speech may duck before then.
     duck_retry_handle = None  # Scheduled retry handle when a restore failed to list or set volume.
     duck_retries = 0  # Short retry counter for failed restores in the current cycle.
+    # A video-recording debug replay: Shift+right-click on the resting loop arms a one-shot replay of the owner's last
+    # spoken answer, so a good answer can be filmed again. The tape lives in memory only, as it may hold private words,
+    # and the replay never reaches the agent: it runs no tool, and the next real turn knows nothing of it.
+    replay_tape = None  # {"events": [(seconds, kind, value)], "reply": last_reply} of the last owner turn that spoke.
+    replay_rec = None  # The tape the running owner turn records into, until its answer comes.
+    replay_armed = False
+    replay_task = None  # The replay that plays now.
     duck_retry_seconds = 2.0  # Delay before a short restore retry.
     hush_paused = ()  # Video players Rook paused for its own speech, resumed when the exchange ends; a list in __init__.
     speech_held = None  # Desk speech that waits while a playing video is paused first; a list while it waits.
@@ -2680,6 +2701,8 @@ class Companion:
                                                                "words, such as \"Your phone's in.\"")))
 
     def show(self, state, **fields):
+        if self.replay_rec is not None and (state == "speaking" or "activity" in fields or "send" in fields):
+            self.replay_note("show", (state, fields))
         if state == "thinking":  # A turn the owner did not ask for thinks quietly: the overlay stays at rest until speech.
             fields = {"quiet": not self.matt_turn, **fields}
         entering_speaking = False
@@ -3180,6 +3203,10 @@ class Companion:
                 return "stopped"
             if heeded:
                 note = f"{heeded}\n{note}" if note else heeded
+        if (self.replay_armed and source in ("spoken", "typed") and not client and turn is None
+                and not self.pending_turns):  # The armed debug replay: the words are ignored and never sent.
+            self.replay_armed, self.replay_task = False, self.loop.create_task(self.debug_replay(self.replay_tape))
+            return "replayed"
         asked = time.monotonic()
         # A device's request takes none of what waits for the desk: the held report, the check-in, the focus line.
         if source in ("spoken", "typed") and not self.dark and not client:
@@ -3259,6 +3286,8 @@ class Companion:
         self.matt_turn = source in ("spoken", "typed") or steer and self.matt_turn
         self.turn_source = source
         if not steer:  # A steered request's turn already spoke a dive's answer, which must not be said again.
+            owner = source in ("spoken", "typed") and not client
+            self.replay_rec = {"at": time.monotonic(), "events": []} if owner else None
             self.turn_spoken = []
             self.turn_thoughts = []
             self.stamp = None
@@ -3461,6 +3490,9 @@ class Companion:
                 self.settle_request(completed, answer, message.get("is_error"),
                                     speaking and self.voice is not None and self.voice.returncode is None)
                 self.finish_turn_timing(completed)
+                rec, self.replay_rec = self.replay_rec, None
+                if rec and speaking and not failed and any(kind == "say" for _, kind, _ in rec["events"]):
+                    self.replay_tape = {**rec, "reply": dict(self.last_reply)}
                 if self.staged_item is None:  # The turn ended with no speech after the scene.
                     self.reveal_scene(self.staged, fallback=True)
                 if not speaking or not self.voice_id:
@@ -3916,6 +3948,9 @@ class Companion:
         if self.owed_speech and not self.exit.is_set():  # The owner cut the answer themselves: it is not owed.
             self.journal_write("close", list(self.owed_speech), "closed", "stopped")
             self.owed_speech = frozenset()
+        if self.replay_task:  # Every cut (Stop, the stop word, a talk key) stops a replay here.
+            self.replay_task, task = None, self.replay_task
+            task.cancel()
         self.end_steps()
         self.spoke_turn = self.answered = None  # Cut speech never counts as heard, and opens no listen window.
         self.staged_item = self.stream_ended = None  # Stopped speech never starts. The turn's end or the timeout reveals the scene.
@@ -3989,6 +4024,7 @@ class Companion:
     def say(self, spoken, loop=True):
         """Queue an answer's spoken part, one speech item per step mark, so each step lights as its sentence plays.
         Without marks, a scene shown in this turn takes its steps in turn while the speech plays."""
+        self.replay_note("say", (spoken, loop))
         if self.diagram_names and not STEP_MARK.search(spoken):
             spoken = name_marks(spoken, self.diagram_names, self.diagram_seen)
         parts = voice_parts(spoken)
@@ -4026,6 +4062,7 @@ class Companion:
     def stage_diagram(self, graph):
         """Send a diagram's graph to the overlay, staged: the voice's next speech reveals it, as a scene's. A graph
         with fewer than two nodes shows nothing. Repairs go to the log, never to the model."""
+        self.replay_note("diagram", graph)
         title, nodes, links, repairs = constellation.parse(graph)
         self.log("render", action="diagram", ok=bool(nodes), name=title or None, nodes=len(nodes), links=len(links),
                  repairs=repairs or None)
@@ -4075,6 +4112,78 @@ class Companion:
         self.stop_loop()
         if self.step_lit:
             self.light_step(0)
+
+    def replay_note(self, kind, value):
+        """Add one thing the owner's running turn plays to the debug replay's tape, with its time in the turn."""
+        if self.replay_rec is not None:
+            self.replay_rec["events"].append((time.monotonic() - self.replay_rec["at"], kind, value))
+
+    def shift_held(self):
+        """Whether a Shift key is down on one of the keyboards Rook reads, from the kernel's key state. Each asks its own
+        fd: EVIOCGKEY drops the key events queued on the fd it asks, and Rook's reader needs those."""
+        for path in list(getattr(self, "key_devices", {}) or {}):
+            try:
+                with contextlib.closing(InputDevice(path)) as probe:
+                    if {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT} & set(probe.active_keys()):
+                        return True
+            except (OSError, AttributeError, NameError):
+                continue
+        return False
+
+    def toggle_replay(self):
+        """Shift+right-click on the resting loop: arm the debug replay of the last spoken turn, or disarm it. The
+        debug_replay setting must be on: a private tool for the owner's own videos, off for everyone else."""
+        if relay.settings.debug_replay_in_force(relay.read_settings()[0])[0] != "on":
+            self.log("debug_replay_unarmed", why="the debug_replay setting is off")
+            return
+        if self.replay_armed:
+            self.replay_armed = False
+            self.log("debug_replay_disarmed")
+        elif self.replay_tape is None:
+            self.log("debug_replay_unarmed", why="no spoken answer recorded since this start")
+        else:
+            self.replay_armed = True
+            self.log("debug_replay_armed", events=len(self.replay_tape["events"]))
+        self.show(None, replay_armed=self.replay_armed)
+
+    async def debug_replay(self, tape):
+        """Play the recorded turn again for a video: a short thinking phase, its tool forms in order with time
+        compressed, its exact speech, and its diagram, scene or media. It sends nothing to the agent and runs no tool or
+        send: it only drives the overlay and the voice, so the agent's conversation never learns of it."""
+        self.replay_rec, self.turn_timing = None, None
+        self.scene_steps, self.diagram_names, self.diagram_seen = 0, (), frozenset()
+        self.flush_pending_timing()
+        self.last_reply = dict(tape["reply"])
+        think, turn, other = replay_thinking(random)
+        started, cut = time.monotonic(), True
+        self.show("thinking", quiet=False, think={"turn": turn, "other": other})
+        try:
+            await asyncio.sleep(think)
+            last, hold = None, 0.0
+            for at, kind, value in tape["events"]:
+                gap = 0.0 if last is None else at - last
+                await asyncio.sleep(min(max(gap, hold), REPLAY_GAP_SECONDS))
+                last, hold = at, 0.0
+                if kind == "show":
+                    state, fields = value
+                    self.show(state, **fields)
+                    hold = REPLAY_FORM_SECONDS if fields.get("activity") else 0.0
+                elif kind == "say":
+                    self.say(*value)
+                elif kind == "diagram":
+                    self.stage_diagram(value)
+                elif kind == "render":
+                    await self.render_request(json.dumps(value))
+                elif kind == "media":
+                    await self.present(*value, source="debug_replay")
+            cut = False
+        finally:
+            if self.replay_task is asyncio.current_task():
+                self.replay_task = None
+            self.log("debug_replay", thinking=round(think, 1), seconds=round(time.monotonic() - started, 1),
+                     recorded=round(tape["events"][-1][0], 1) if tape["events"] else 0, cut=cut)
+        if self.voice_id is None and not self.voice_texts:  # Its speech already ended: the answer rests.
+            self.show("result", details=self.last_reply.get("details"))
 
     def speak(self):
         if self.voice and self.voice.returncode is None and self.last_reply.get("spoken"):
@@ -4258,8 +4367,8 @@ class Companion:
         self.log("speech", turn=self.latest_turn, volume=message.get("volume"), error=message.get("error"))
         if message.get("error"):
             print(f"Voice playback failed: {message['error']}", file=sys.stderr)
-        # Speech queues in order, so the last id sent finishes last. Claude may still be working.
-        if self.latest_turn not in self.pending_turns:
+        # Speech queues in order, so the last id sent finishes last. Claude, or a replay, may still be working.
+        if self.latest_turn not in self.pending_turns and self.replay_task is None:
             if heard:
                 self.show("result", details=self.last_reply.get("details"))
             answered, self.answered = self.answered, None
@@ -4942,6 +5051,8 @@ class Companion:
                 self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
             else:
                 self.scene_at = None
+        if answer.get("ok"):
+            self.replay_note("render", data)
         self.log("render", action="clear" if data.get("clear") else "step" if "step" in data else
                  "diagram" if diagram else "scene",
                  ok=bool(answer.get("ok")), name=scene.get("name"), step=data.get("step"),
@@ -4976,6 +5087,7 @@ class Companion:
             if before:
                 answer["said"] = f"Shown, in place of {before[1] or os.path.basename(before[0])}."
             self.viewing = (path, title)
+            self.replay_note("media", (path, title))
             self.scene_at = self.staged = self.staged_item = None  # The viewer ends a scene. It drops a staged one.
             self.log("media_shown", path=path, title=title, source=source, kind=answer.get("kind"),
                      width=answer.get("width"), height=answer.get("height"))
@@ -5257,6 +5369,21 @@ class Companion:
         tick = self.timer_tick_at or self.started
         now = time.time() if now is None else now
         return now - tick > RESUME_GAP_THRESHOLD and tick < due <= now
+
+    async def check_updates(self):
+        """Once a day, at or after 10:00, look on GitHub for a newer Rook, in a thread off the event loop. A newer one
+        is a routine status turn, told once per version. A failure is silent: the next day looks again."""
+        await asyncio.sleep(update_check.FIRST_SECONDS)
+        while True:
+            try:
+                note = await asyncio.to_thread(lambda: update_check.look(relay.read_settings()[0]))
+            except Exception as exc:  # The check must never take Rook down.
+                self.log("update_check_error", error=repr(exc))
+                note = None
+            if note:
+                self.log("update_found")
+                self.inbox.put_nowait(("status", note))
+            await asyncio.sleep(update_check.LOOK_SECONDS)
 
     async def run_timers(self):
         """Say or start each timer that is due. It waits while the owner records, queues behind Rook's speech, and
@@ -5603,7 +5730,7 @@ class Companion:
 
     def busy_with(self, quiet=False):
         """The names of what keeps Rook from being idle, for idle() and for the log row of a long wait."""
-        flags = {"turn": self.pending_turns or self.cut_waiting, "warm-up": self.warming or self.warm_waits, "speech": quiet and self.voice_id,
+        flags = {"turn": self.pending_turns or self.cut_waiting or self.replay_task, "warm-up": self.warming or self.warm_waits, "speech": quiet and self.voice_id,
                  "recording": self.talking() or self.recording or not self.capture_finished.is_set(),
                  "restart": self.stopping()}
         return [name for name, on in flags.items() if on]
@@ -5639,8 +5766,12 @@ class Companion:
                     break
             if test:
                 label = f"{relay.settings.render(TEST_LABEL)}\n{label}"
-            if await self.submit(text, label, shots, source="test" if test else "typed",
-                                 timing={"queue_ms": round(queue_seconds * 1000)}) == "stopped":
+            sent = await self.submit(text, label, shots, source="test" if test else "typed",
+                                     timing={"queue_ms": round(queue_seconds * 1000)})
+            if sent == "replayed":
+                return {"ok": True, "answer": self.replay_tape["reply"].get("details"),
+                        "spoken": self.replay_tape["reply"].get("spoken")}
+            if sent == "stopped":
                 return {"ok": False, "error": f"{OWNER_START} said stop before this request reached the agent, so Rook did not "
                                               "send it."}
             waiter = self.waiters[self.latest_turn] = self.loop.create_future()
@@ -5656,6 +5787,9 @@ class Companion:
                 match message.get("event"):
                     case "interrupt":
                         self.stop_turn()
+                    case "debug_replay":
+                        if message.get("shift") or self.shift_held():
+                            self.toggle_replay()
                     case "permission":
                         self.answer_permission(message.get("allow", False), message.get("answers"), message.get("card"))
                     case "shown" | "show_error" as event:
@@ -7749,7 +7883,7 @@ class Companion:
         # (device that started it, event that stops it, "toggle" or "held") of the last recording. A hold key
         # press adds its press time and its key. A quick release changes its mode from "held" to "toggle".
         listening = None
-        devices = {}  # The open keyboards, by path.
+        devices = self.key_devices = {}  # The open keyboards, by path; shift_held() reads Shift from them too.
         nodes = {}  # The device node checked at each path, so a new device at an old path is checked again.
         down = {}  # The modifier keys down on each open keyboard, by path.
 
@@ -7981,6 +8115,7 @@ class Companion:
         self.keep("thread watcher", self.watcher.run, optional=True)  # Says when delegated threads finish.
         self.keep("thread roster", lambda: watch.keep_roster(self.roster, self.log, self.roster_busy), optional=True)
         self.keep("timers", self.run_timers, optional=True)
+        self.keep("update check", self.check_updates, optional=True)
         want_overlay = self.use_overlay and self.overlay_explicit is not False
         if start_state is not None and not (
             start_state["hyprland"] and start_state["capture"] and (not want_overlay or start_state["overlay"])
@@ -8133,10 +8268,13 @@ def check_steps():
         await play(0)
         assert lit == ["5", 1, 0] and c.staged is None, lit
         lit.clear(); sent.clear()
-        STEP_LOOP_SECONDS = 0.05
+        STEP_LOOP_SECONDS = 0.1
         c.say("No marks here. The steps take turns.")
         await play(0, "start")
-        await asyncio.sleep(0.17)
+        for _ in range(300):  # Until the loop comes round to step 1 again; a busy machine only makes this wait longer.
+            if len(lit) >= 4:
+                break
+            await asyncio.sleep(0.01)
         await play(0)
         assert lit == [1, 2, 3, 1, 0], lit
         # A diagram mark split across chunks is held until it closes, staged, and never spoken. Each sentence lights
@@ -8177,6 +8315,170 @@ def check_steps():
 
     asyncio.run(run())
     print("Step marks: all checks passed.")
+
+
+def check_replay():
+    """Self-check of the video-recording debug replay, with a stand-in agent, overlay and voice: arming and disarming,
+    a replay that sends the agent 0 bytes and runs no tool, its speech identical to the recording, the random thinking
+    phase, one replay per arming, and a cut. ~/.local/share/rook/venv/bin/python desktop/rook.py --check-replay"""
+    global REPLAY_THINK_SECONDS, REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS
+    import inspect
+    from types import SimpleNamespace
+    # The thinking phase stays in its bounds over many seeds: the rook holds a bit over half, then one other form shows
+    # at least 0.8 s, and no third form comes. Runs differ.
+    plans = [replay_thinking(random.Random(seed)) for seed in range(2000)]
+    for seconds, each, other in plans:
+        assert 2.0 <= seconds <= 5.0 and each < seconds < 2 * each and seconds - each >= 0.8 and 0 <= other < 100, \
+            (seconds, each, other)
+    assert len({round(p[0], 2) for p in plans}) > 250 and len({p[2] for p in plans}) == 100
+    assert replay_thinking(random.Random()) != replay_thinking(random.Random())
+    # Structurally, the replay reaches only the overlay and the voice: nothing in it names the agent or a send.
+    assert not re.search(r"self\.(harness|agent|journal\w*|submit|inbox|fan_send|mail)\b",
+                         inspect.getsource(Companion.debug_replay))
+
+    async def run():
+        global REPLAY_THINK_SECONDS, REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS
+        agent_bytes, sent, rows, shown, voice = [0], [], [], [], asyncio.StreamReader()
+        c = Companion.__new__(Companion)
+        agent = SimpleNamespace(returncode=None, stdout=None, stdin=SimpleNamespace(
+            write=lambda data: agent_bytes.__setitem__(0, agent_bytes[0] + len(data))))
+        c.__dict__.update(
+            agent=agent, warming=False, warm_waits=0, pending_turns=set(),
+            latest_turn=None, turn_spoken=[], scene_steps=0, held_note=None, spoke_at=None, playing=set(),
+            silenced_at=None, silenced_turn=None, missed_events=0, fired=[], dark=None, matt_turn=False,
+            dark_turn=None, dark_call=None, session="s", waiters={}, permission=None, last_reply={}, voice_id=None,
+            voice_texts={}, voice_steps={}, step_loop=None, step_task=None, step_lit=False, speech_rate=0.0,
+            delegating={}, tasks={}, probes={}, auditions={}, exit=asyncio.Event(), loop=asyncio.get_running_loop(),
+            staged=None, staged_item=None, capture_finished=asyncio.Event(), save_presence=lambda: None,
+            stream_text=None, stream_prefix=None, stream_ended=None, render_count=0, overlay_last={}, state_at=0.0,
+            talking=lambda: False, recording=False,
+            overlay=SimpleNamespace(returncode=None, stdin=SimpleNamespace(write=lambda line: shown.append(
+                json.loads(line)))),
+            voice=SimpleNamespace(returncode=None, stdout=voice, stdin=SimpleNamespace(
+                write=lambda line: sent.append(json.loads(line)))),
+            log=lambda event, **fields: rows.append((event, fields)),
+            # The stand-in harness writes each turn to the agent's stdin, as the real one does, so bytes count.
+            harness=SimpleNamespace(name="Stand-in", turn=lambda agent, *args: agent.stdin.write(
+                json.dumps(args).encode()), interrupt=lambda agent: agent.stdin.write(b"interrupt")))
+        c.capture_finished.set()
+        c.exit.set()
+        reader = asyncio.create_task(c.read_voice(c.voice))
+
+        async def play(texts):  # The voice plays every queued item to its end.
+            for m in [m for m in sent if m.get("type") == "speak"]:
+                voice.feed_data((json.dumps({"id": m["id"], "event": "start"}) + "\n").encode())
+                await asyncio.sleep(0)
+                voice.feed_data((json.dumps({"id": m["id"]}) + "\n").encode())
+                await asyncio.sleep(0)
+            texts.extend(m["text"] for m in sent if m.get("type") == "speak")
+            sent.clear()
+
+        # 0. The setting gates it, and Shift is read from the keyboards: with none open, Shift reads up. The setting is
+        # swapped for the check, never written, so a hand run cannot touch the owner's real settings file.
+        assert c.shift_held() is False
+        gate = ["off"]
+        relay.settings.debug_replay_in_force = lambda saved: (gate[0], "check")
+        c.toggle_replay()
+        assert not getattr(c, "replay_armed", False) and rows[-1] == ("debug_replay_unarmed",
+                                                                       {"why": "the debug_replay setting is off"})
+        gate[0] = "on"
+        # 1. A real spoken turn: a web search, a diagram mark, and an answer.
+        c.toggle_replay()  # Nothing recorded yet: it does nothing, and says why.
+        assert not c.replay_armed and rows[-1][0] == "debug_replay_unarmed" and shown[-1] == {"replay_armed": False}
+        await c.submit("How does a web page load?", source="spoken")
+        answer = ("{diagram Web | browser > dns > server} The browser asks DNS for the address. Then the server "
+                  "sends the page.\n\nWritten details.")
+
+        async def read(_):
+            yield {"type": "stream_event", "event": {"type": "content_block_start",
+                                                     "content_block": {"type": "tool_use", "name": "WebSearch"}}}
+            yield {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "u1", "name": "WebSearch", "input": {"query": "page load"}}]}}
+            yield {"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "text"}}}
+            for piece in (answer[:30], answer[30:70], answer[70:]):
+                yield {"type": "stream_event", "event": {"type": "content_block_delta",
+                                                         "delta": {"type": "text_delta", "text": piece}}}
+            yield {"type": "stream_event", "event": {"type": "content_block_stop"}}
+            yield {"type": "result", "user_message_uuids": sorted(c.pending_turns), "result": answer,
+                   "terminal_reason": "completed"}
+
+        c.harness.read = read
+        await c.read_stream()
+        real_bytes, real_tools, real_render = agent_bytes[0], list(c.turn_tools), c.render_count
+        assert real_bytes > 0 and real_tools == ["WebSearch"]
+        real_shown = list(shown)
+        assert {"activity": "WebSearch"} in real_shown and any("diagram" in m.get("render", {}) for m in real_shown)
+        real_spoken = []
+        await play(real_spoken)
+        assert real_spoken == ["The browser asks DNS for the address.", "Then the server sends the page."], real_spoken
+        tape = c.replay_tape
+        assert tape and [kind for _, kind, _ in tape["events"]].count("say") >= 1 and \
+            any(kind == "diagram" for _, kind, _ in tape["events"]), tape
+
+        # 2. Arming, disarming, and arming again. Each arm answers with the overlay's pulse.
+        c.toggle_replay()
+        assert c.replay_armed and rows[-1][0] == "debug_replay_armed" and shown[-1] == {"replay_armed": True}
+        c.toggle_replay()
+        assert not c.replay_armed and rows[-1][0] == "debug_replay_disarmed" and shown[-1] == {"replay_armed": False}
+        c.toggle_replay()
+        assert c.replay_armed
+
+        # 3. The replay: other words, no agent bytes, no tool, the same speech, then disarmed.
+        REPLAY_THINK_SECONDS, REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS = (0.02, 0.05), 0.03, 0.02
+        shown.clear()
+        logged = len(rows)
+        assert await c.submit("Tell me something different.", source="spoken") == "replayed"
+        assert not c.replay_armed and c.replay_task and c.busy_with() == ["turn"], c.busy_with()
+        await c.replay_task
+        replay_spoken = []
+        await play(replay_spoken)
+        assert agent_bytes[0] == real_bytes and c.turn_tools == real_tools, (agent_bytes, c.turn_tools)
+        assert replay_spoken == real_spoken, replay_spoken
+        assert shown[0]["state"] == "thinking" and shown[0]["quiet"] is False and set(shown[0]["think"]) == {"turn", "other"}, shown[0]
+        assert {"activity": "WebSearch"} in shown and c.render_count == real_render + 1
+        assert shown[-1] == {"state": "result", "details": "The browser asks DNS for the address. Then the server sends "
+                                                           "the page.\n\nWritten details."}, shown[-1]
+        new = [event for event, _ in rows[logged:]]
+        assert "debug_replay" in new and not {"request", "response", "startup_held"} & set(new), new
+        assert [f for e, f in rows[logged:] if e == "debug_replay"][0]["cut"] is False
+        assert c.replay_task is None and c.replay_tape is tape and c.busy_with() == []
+        assert await c.submit("Once more.", source="typed") is None  # Disarmed after one: the next turn is real.
+        assert agent_bytes[0] > real_bytes
+        c.pending_turns.clear()
+        real_bytes = agent_bytes[0]
+
+        # 4. Cuts: the Stop button during its speech, and the stop word during its thinking.
+        for cut in ("button", "word"):
+            c.toggle_replay()
+            sent.clear(); logged = len(rows)
+            assert await c.submit("Anything.", source="typed") == "replayed"
+            task = c.replay_task
+            if cut == "button":
+                while not any(m.get("type") == "speak" for m in sent):
+                    await asyncio.sleep(0.005)
+                c.stop_turn()
+            else:
+                await asyncio.sleep(0.01)
+                assert await c.submit("Stop.", source="spoken") == "stopped"
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            assert c.replay_task is None and not c.replay_armed and agent_bytes[0] == real_bytes, (cut, agent_bytes, real_bytes, c.replay_task, c.replay_armed)
+            assert [f for e, f in rows[logged:] if e == "debug_replay"][0]["cut"] is True
+            if cut == "button":
+                assert sent[-1] == {"type": "stop"} and c.overlay_last["state"] == "result", sent
+            else:
+                assert not any(m.get("type") == "speak" for m in sent) and c.overlay_last["state"] == "hidden"
+        voice.feed_eof()
+        await reader
+
+    saved = REPLAY_THINK_SECONDS, REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS
+    saved_gate = relay.settings.debug_replay_in_force
+    try:
+        asyncio.run(run())
+    finally:
+        REPLAY_THINK_SECONDS, REPLAY_GAP_SECONDS, REPLAY_FORM_SECONDS = saved
+        relay.settings.debug_replay_in_force = saved_gate
+    print("Debug replay: all checks passed.")
 
 
 def check_restart():
@@ -10748,7 +11050,7 @@ def check_speech():
         # 11. Scene with steps and no marks queues one item and starts the step loop on the first word.
         global STEP_LOOP_SECONDS
         saved_step_loop = STEP_LOOP_SECONDS
-        STEP_LOOP_SECONDS = 0.05
+        STEP_LOOP_SECONDS = 0.1
         try:
             c, sent, _, _, lit, voice, _ = make_companion(scene_steps=3)
             c.exit.set()
@@ -10770,7 +11072,10 @@ def check_speech():
             assert [m["text"] for _, m in sent] == ["No marks here. The steps take turns."], sent
             item_id = sent[0][1]["id"]
             voice.feed_data((json.dumps({"id": item_id, "event": "start"}) + "\n").encode())
-            await asyncio.sleep(0.17)
+            for _ in range(300):  # Until the loop comes round to step 1 again, however busy the machine is.
+                if len(lit) >= 4:
+                    break
+                await asyncio.sleep(0.01)
             voice.feed_data((json.dumps({"id": item_id}) + "\n").encode())
             voice.feed_eof()
             await reader
@@ -19696,6 +20001,8 @@ def check_start(tree=ROOT):
 def main():
     if sys.argv[1:2] == ["--check-steps"]:
         return check_steps()
+    if sys.argv[1:2] == ["--check-replay"]:
+        return check_replay()
     if sys.argv[1:2] == ["--check-agent"]:
         return check_agent()
     if sys.argv[1:2] == ["--check-restart"]:

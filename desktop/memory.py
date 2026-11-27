@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import select
 import shlex
@@ -47,6 +48,7 @@ SHARED_FILES = (
     ("prompts/remember.md", 0o644),
 )
 SHARED_UNITS = ("agent-dream.service", "agent-dream.timer")
+DREAM_LABEL = "com.rook.agent-dream"  # On a Mac, the launchd job that stands in for agent-dream.timer.
 GIT_IGNORE_LINE = ".agent-memory/"
 MANIFEST_NAME = "rook-shared-manifest.json"
 MAX_BACKUPS = 7
@@ -1266,6 +1268,37 @@ def _run_systemctl(*args):
     return True, ""
 
 
+def _run_launchctl(*args):
+    try:
+        done = subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or f"exit {done.returncode}").strip()
+        return False, detail
+    return True, ""
+
+
+def _dream_plist_path():
+    return Path.home() / "Library/LaunchAgents" / f"{DREAM_LABEL}.plist"
+
+
+def _render_dream_plist():
+    """agent-dream.service and its timer as one launchd job: the dream at 04:00, at Nice 10, with the PATH of
+    Rook's own launchd jobs. Like Persistent=true, launchd runs a time missed in sleep when the Mac wakes."""
+    home = Path.home()
+    log = str(home / "Library/Logs/agent-dream.log")
+    return plistlib.dumps({
+        "Label": DREAM_LABEL,
+        "ProgramArguments": [str(agents_dir() / "bin/dream")],
+        "EnvironmentVariables": {"PATH": f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
+        "StartCalendarInterval": {"Hour": 4, "Minute": 0},
+        "Nice": 10,
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    })
+
+
 def _resolve_shared_dir(memory_dir_bin, workspace):
     done = subprocess.run([str(memory_dir_bin), "--start", str(workspace)], capture_output=True, text=True, timeout=15)
     if done.returncode == 3:
@@ -1397,7 +1430,8 @@ def _render_memory_conf():
 
 def install_shared():
     """Install the vendored shared memory system into ~/.agents/. Return (ok, message)."""
-    if not shutil.which("systemctl"):  # Its nightly tidy is agent-dream.timer: refuse before anything is written.
+    launchd = not shutil.which("systemctl") and bool(shutil.which("launchctl"))  # A Mac: the timer is a launchd job.
+    if not shutil.which("systemctl") and not launchd:  # No nightly timer at all: refuse before anything is written.
         return False, ("Refused: the shared memory tidies its notes each night with a systemd timer, and this computer "
                        "has no systemd, so Rook keeps its own memory.")
     agents = agents_dir()
@@ -1429,7 +1463,8 @@ def install_shared():
         "files": prior_files,
         "git_ignore": prior.get("git_ignore") if prior else None,
         "claude_hook": prior.get("claude_hook") if prior else None,
-        "timer": dict(prior_timer) if prior_timer else {"unit": "agent-dream.timer", "enabled": False},
+        "timer": dict(prior_timer) if prior_timer else (
+            {"label": DREAM_LABEL, "loaded": False} if launchd else {"unit": "agent-dream.timer", "enabled": False}),
         "rook_memory_dir": prior.get("rook_memory_dir") if prior else None,
         "moved_notes": list(prior.get("moved_notes") or []) if prior else [],
     }
@@ -1458,13 +1493,23 @@ def install_shared():
         save_manifest()
 
     systemd_dir = _systemd_user_dir()
-    for unit in SHARED_UNITS:
+    for unit in () if launchd else SHARED_UNITS:
         dest = systemd_dir / unit
         key = str(dest)
         if (dest.exists() or dest.is_symlink()) and key not in manifest["files"]:
             continue
         _copy_file(SHARED_SOURCE / "systemd" / unit, dest, 0o644)
         manifest["files"][key] = _sha256_file(dest)
+        save_manifest()
+
+    plist = _dream_plist_path()
+    if launchd and (str(plist) in manifest["files"] or not (plist.exists() or plist.is_symlink())):
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        if plist.is_symlink():
+            plist.unlink()
+        plist.write_bytes(_render_dream_plist())
+        plist.chmod(0o644)
+        manifest["files"][str(plist)] = _sha256_file(plist)
         save_manifest()
 
     git_path = _git_ignore_path()
@@ -1502,14 +1547,24 @@ def install_shared():
     }
     save_manifest()
 
-    ok, detail = _run_systemctl("daemon-reload")
-    if not ok:
-        return False, f"Could not reload user systemd units: {detail}"
-    ok, detail = _run_systemctl("enable", "--now", "agent-dream.timer")
-    if not ok:
-        return False, f"Could not enable agent-dream.timer: {detail}"
-    manifest["timer"] = {"unit": "agent-dream.timer", "enabled": True}
-    save_manifest()
+    if launchd:
+        if str(plist) in manifest["files"]:  # Rook loads only the job it wrote, never one it found.
+            domain = f"gui/{os.getuid()}"
+            _run_launchctl("bootout", f"{domain}/{DREAM_LABEL}")  # A loaded job refuses a second bootstrap.
+            ok, detail = _run_launchctl("bootstrap", domain, str(plist))
+            if not ok:
+                return False, f"Could not load {DREAM_LABEL}: {detail}"
+            manifest["timer"] = {"label": DREAM_LABEL, "loaded": True}
+            save_manifest()
+    else:
+        ok, detail = _run_systemctl("daemon-reload")
+        if not ok:
+            return False, f"Could not reload user systemd units: {detail}"
+        ok, detail = _run_systemctl("enable", "--now", "agent-dream.timer")
+        if not ok:
+            return False, f"Could not enable agent-dream.timer: {detail}"
+        manifest["timer"] = {"unit": "agent-dream.timer", "enabled": True}
+        save_manifest()
 
     try:
         rook_shared = _resolve_shared_dir(agents / "bin/memory-dir", rook_workspace())
@@ -1532,10 +1587,24 @@ def remove_shared():
     if manifest is None:
         return False, "Shared memory was not installed by Rook."
 
+    timer = manifest.get("timer") or {}
+    if timer.get("loaded") and timer.get("label"):  # First, so nothing changes when the job cannot be unloaded.
+        label, job = timer["label"], f"gui/{os.getuid()}/{timer['label']}"
+        try:
+            # 113: launchd has no such job, so it is already unloaded. Any other answer needs a bootout.
+            if subprocess.run(["launchctl", "print", job], capture_output=True, timeout=30).returncode != 113:
+                done = subprocess.run(["launchctl", "bootout", job], capture_output=True, text=True, timeout=30)
+                if done.returncode != 0:  # Over ssh there is often no gui domain.
+                    detail = (done.stderr or done.stdout or f"exit {done.returncode}").strip()
+                    return False, (f"Could not unload {label} from this session: {detail}. Nothing was changed. "
+                                   "Run relay.py memory remove-shared again in a terminal on the Mac itself, "
+                                   "while signed in at its screen.")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return False, f"Could not run launchctl to unload {label}: {error}. Nothing was changed."
+
     rook_shared = Path(manifest["rook_memory_dir"]) if manifest.get("rook_memory_dir") else None
     copied = _copy_shared_notes_to_own(rook_shared, manifest.get("moved_notes") or [])
 
-    timer = manifest.get("timer") or {}
     timer_enabled = bool(timer.get("enabled") and timer.get("unit"))
     if timer_enabled:
         ok, detail = _run_systemctl("disable", "--now", str(timer["unit"]))

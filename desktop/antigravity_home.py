@@ -400,6 +400,7 @@ def denied_command(command):
 
 
 SYSTEMCTL_READS = {"status", "show", "cat", "is-active", "is-enabled", "is-failed", "list-units", "list-unit-files"}
+LAUNCHCTL_READS = {"print", "print-cache", "print-disabled", "list", "blame"}
 OPERATORS = (";", "&&", "||", "|", "&", "(", ")")
 
 
@@ -422,13 +423,17 @@ def commands(command):
 
 
 def stops_rook(command):
-    """Whether a command stops or restarts Rook through systemctl, kill or relay's module, or merges a pull request
+    """Whether a command stops or restarts Rook through systemctl, launchctl, kill or relay's module, or merges a pull request
     through GitHub's API. Judged on program words, never on quoted text."""
     for name, args in commands(command):
         verb = next((arg for arg in args if not arg.startswith("-")), "")
         rook = any("rook" in arg.lower() for arg in args)
         hidden = any("$" in arg or "`" in arg for arg in args) or name == "kill" and not args  # A pid from elsewhere.
         if (name == "systemctl" and rook and verb not in SYSTEMCTL_READS
+                # Rook's job, its <label>.daily restart, or a glob with rook in it that the shell may expand to them.
+                or name == "launchctl" and verb not in LAUNCHCTL_READS
+                and any(desk.LAUNCHD_LABEL.lower() in arg.lower()
+                        or "rook" in arg.lower() and any(glob in arg for glob in "*?[") for arg in args)
                 or name in ("kill", "pkill", "killall") and (rook or hidden and "rook" in command.lower())
                 or name == "kill" and "-1" in args  # Every process the owner owns, Rook among them.
                 or name in ("pkill", "killall") and any("python" in arg for arg in args)  # Rook runs as python.
@@ -1096,7 +1101,14 @@ def check():
                     "cd desktop && python3 -m relay reload overlay", "bash -c 'pkill -f rook'",
                     "python3 -B -m relay daily-restart", "python3 -mrelay restart", "python3 -u -m relay restart",
                     "gh api graphql -f query='mutation{mergePullRequest}'", "kill -9 -1", "pkill -f python3",
-                    "killall python"):
+                    "killall python", f"launchctl bootout gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl kickstart -k gui/501/{desk.LAUNCHD_LABEL}", f"launchctl kill TERM gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl unload ~/Library/LaunchAgents/{desk.LAUNCHD_LABEL}.plist", f"launchctl stop {desk.LAUNCHD_LABEL}",
+                    f"launchctl bootstrap gui/501 ~/Library/LaunchAgents/{desk.LAUNCHD_LABEL}.daily.plist",
+                    f"launchctl remove {desk.LAUNCHD_LABEL}", f"launchctl disable gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl kickstart -k gui/501/{desk.LAUNCHD_LABEL}.daily",
+                    "launchctl unload ~/Library/LaunchAgents/com.rook.*.plist", "launchctl bootout gui/501/com.rook.compan?on",
+                    "launchctl unload ~/Library/LaunchAgents/[c]om.rook.companion.plist"):
         assert denied_command(command), command
     for command in ("/usr/bin/python relay.py note 'Done; kill the rook overlay test later'",  # Review 3, fix 3.
                     "/usr/bin/python relay.py tell 'Build passed; systemctl rook restart is next'",
@@ -1104,6 +1116,10 @@ def check():
                     "/usr/bin/python relay.py note 'the relay restart on nimbus failed'",
                     "/usr/bin/python relay.py tell 'Rook will kill the rook timer'", "rg -n 'kill' ~/Code/rook/desktop",
                     "git log --grep 'kill rook'", "grep -rn mergePullRequest ~/Code", "systemctl --user status rook",
+                    "launchctl print gui/501/com.rook.companion", "launchctl list com.rook.companion",
+                    "launchctl blame gui/501/com.rook.companion", "launchctl print-disabled gui/501",
+                    "launchctl kickstart -k gui/501/com.example.other", "launchctl kickstart gui/501/com.rook.agent-dream",
+                    "launchctl bootout gui/501/com.rook.medium-voice",
                     "t3 thread start /x - --json --title 'Kill switch for rook' <<'EOF'\nx\nEOF"):
         assert not denied_command(command), command
     # Review 2, fix 1: T3 tools outside Rook's list are refused in both of agy's forms, as are t3_queue's writes.

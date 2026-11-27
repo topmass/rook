@@ -85,6 +85,7 @@ Protocol, stdin (one JSON object per line):
 
 Protocol, stdout (one JSON object per line, one per button press or viewer change):
     {"event": "interrupt"}
+    {"event": "debug_replay"}  (Shift+right-click on the resting loop; {"replay_armed": true} answers with a pulse)
     {"event": "permission", "allow": true, "answers": {...}, "card": "the id of the card it answers"}
     {"event": "shown", "path": "...", "kind": "image"|"animation"|"video", "width": 1920, "height": 1080}
     {"event": "closed", "path": "...", "why": "click"|"escape"|"close mark"|"rook"|"replaced"|"ended"|"game"|"error"}
@@ -450,6 +451,8 @@ SPIN = {"lattice": 0.4, "sphere": 0.25, "globe": 0.35, "ear": 0.3, "rook": 0.45}
 # Plain thinking (no tool with its own form) takes turns between the lattice and the rook, this long each,
 # starting on the lattice.
 THINK_TURN = 4.0
+# The video-recording debug replay's arm mark: the resting loop brightens this much and fades back over this long.
+REPLAY_PULSE_GAIN, REPLAY_PULSE_SECONDS, REPLAY_PULSE_WIDTH = 0.25, 1.1, 0.55  # Band over full light, one lap (s), half-width (rad).
 # The rook's profile as (y, radius) from the base's top up to the crown floor; y points down, the centre is 0.
 ROOK_PROFILE = [(44, 34), (40, 30), (36, 25), (-14, 19), (-18, 26), (-24, 26), (-27, 21), (-44, 31)]
 # Rings as (radius, y, grains): the base's bottom edge and steps, the collar, and the crown floor's two edges.
@@ -4912,6 +4915,8 @@ class Scene:
         self.pace = 1.0
         self.delay_scale = 1.0
         self.thinking_since = None  # When plain thinking began, for its turns between the lattice and the rook.
+        self.think_plan = None  # A debug replay's thinking: (seconds per form, which other form), until the next state.
+        self.replay_pulse_at = -math.inf  # When the debug replay was armed, for the loop's faint pulse.
         self.label_anchor = None
         self.label = ""
         self.label_alpha = 0.0
@@ -5708,6 +5713,11 @@ class Scene:
                     c.ended = True
         if state in STATES:
             self.quiet = state == "thinking" and msg.get("quiet") is True
+            plan = msg.get("think") if state == "thinking" else None
+            turn, other = (plan.get("turn"), plan.get("other")) if isinstance(plan, dict) else (None, None)
+            ok = (isinstance(turn, (int, float)) and not isinstance(turn, bool) and 0.3 <= turn <= 10
+                  and isinstance(other, int) and not isinstance(other, bool) and other >= 0)
+            self.think_plan = (float(turn), other) if ok else None
         if "send" in msg:
             raw_send = msg.get("send")
             items = [raw_send] if isinstance(raw_send, dict) else (raw_send if isinstance(raw_send, list) else [])
@@ -5795,6 +5805,20 @@ class Scene:
         if s == "error":
             return not (held or now - self.state_at < ERROR_SECONDS)
         return False
+
+    def replay_pulse(self, tb, lit, now, points, flow):
+        """The debug replay's arm mark on the resting loop: one band of the loop's own grains comes back up to its full,
+        undimmed light (lit) and runs once round the figure eight from the crossing, as the quiet glare does, then is
+        gone. No label or card, so it is safe on camera."""
+        since = now - self.replay_pulse_at
+        if 0 <= since < REPLAY_PULSE_SECONDS:
+            head = 2 * math.pi * _ease_out(since / REPLAY_PULSE_SECONDS)
+            fade = math.sin(math.pi * since / REPLAY_PULSE_SECONDS)  # In and out, so the band never pops.
+            for i in self.idx:
+                d = (points[i][0] + flow - head + math.pi) % (2 * math.pi) - math.pi  # From the crossing, round the eight.
+                if abs(d) < REPLAY_PULSE_WIDTH:
+                    w = fade * (0.5 + 0.5 * math.cos(math.pi * d / REPLAY_PULSE_WIDTH))
+                    tb[i] += (lit[i] * (1 + REPLAY_PULSE_GAIN) - tb[i]) * w
 
     def scatter(self):
         """Appearing: the grains start as loose dust around the canvas and drift in."""
@@ -5970,10 +5994,11 @@ class Scene:
                 # Plain thinking alternates the rook with the theme pack's thinking icons, THINK_TURN seconds each.
                 if self.thinking_since is None:
                     self.thinking_since = now
-                turn = int((now - self.thinking_since) / THINK_TURN)
+                each, first = self.think_plan or (THINK_TURN, 0)
+                turn = int((now - self.thinking_since) / each)
                 if PARTICLE_VARIANT == "C":
                     others = self.think_forms
-                    form = devs_pack.THINK_ANCHOR if turn % 2 == 0 else others[(turn // 2) % len(others)]
+                    form = devs_pack.THINK_ANCHOR if turn % 2 == 0 else others[(turn // 2 + first) % len(others)]
                 else:
                     form = ("lattice", "rook")[turn % 2]
             else:
@@ -6121,6 +6146,7 @@ class Scene:
                 ty[i] = rest_y + 26 * 2 * sa * ca + offset
                 # The strand through the crossing at a = 0 is in front; the other passes behind it.
                 tb[i] = 0.55 + 0.225 * (ca + 1)
+            lit = tb[:] if 0 <= now - self.replay_pulse_at < REPLAY_PULSE_SECONDS else None  # Before the dim rest.
             look = REST_LOOKS[REST_LOOK]
             if look:
                 self._rest_look(look, points, flow, tb, now)
@@ -6132,6 +6158,8 @@ class Scene:
                     d = (points[i][0] + flow - head + math.pi) % tau - math.pi
                     pulse = exp(-(d / 0.24) ** 2) if d > 0 else (1 + d / 1.2) ** 3 if d > -1.2 else 0.0
                     tb[i] *= 1 + glow * (QUIET_LIFT + QUIET_PEAK * pulse)
+            if lit is not None:
+                self.replay_pulse(tb, lit, now, points, flow)
             return tx, ty, tb
         if name in SHAPE_MOTION:
             return self._shape_motion(name, points, now - self.form_at)
@@ -11188,6 +11216,10 @@ class Overlay(Gtk.Application):
         loop_drag.connect("drag-update", self._carry_update)
         loop_drag.connect("drag-end", self._carry_end)
         self.area.add_controller(loop_drag)
+        # Shift+right-click on the resting loop arms or disarms the video-recording debug replay (rook.py).
+        replay_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        replay_click.connect("released", self._replay_clicked)
+        self.area.add_controller(replay_click)
         loop_motion = Gtk.EventControllerMotion()
         loop_motion.connect("motion", lambda _c, x, y: self._loop_pointer(x, y))
         loop_motion.connect("leave", lambda *_: self._loop_pointer(-1, -1))
@@ -12428,6 +12460,8 @@ class Overlay(Gtk.Application):
             self._show_media(msg["show"])
         if "render" in msg:
             self._handle_render(msg["render"])
+        if msg.get("replay_armed") is True:
+            self.scene.replay_pulse_at = time.monotonic()
         if isinstance(msg.get("answers"), list):
             if seeded := [text for text in msg["answers"] if isinstance(text, str) and text.strip()][-ANSWER_HISTORY:]:
                 self.answers, self.answer, self.answer_at = seeded, seeded[-1], len(seeded) - 1
@@ -13087,6 +13121,13 @@ class Overlay(Gtk.Application):
             x = min(max(x, bx + LOOP_HIT[0] / 2 - WIDTH / 2), bx + bw - LOOP_HIT[0] / 2 - WIDTH / 2)
             y = min(max(y, by + LOOP_HIT[1] / 2 - self.scene.rest_pad), by + bh - LOOP_HIT[1] / 2 - self.scene.rest_pad)
         self._move_window(round(x), round(y))
+
+    def _replay_clicked(self, gesture, _n, x, y):
+        """A right-click on the resting loop. On Wayland an overlay with no keyboard focus never learns that Shift is
+        held, so Rook reads Shift from the keyboard itself and decides; shift says what GTK saw, which may be False."""
+        if self._on_loop(x, y):
+            self._emit({"event": "debug_replay",
+                        "shift": bool(gesture.get_current_event_state() & Gdk.ModifierType.SHIFT_MASK)})
 
     def _carry_end(self, _gesture, _dx, _dy):
         _, _, (x, y), moving = self.carry

@@ -91,6 +91,10 @@ SMART_TURN = "off"
 # finishes. Off by default, so Rook stays quiet until a thread finishes. The watcher reads it at each look.
 THREAD_MILESTONES_MODES = ("off", "on")
 THREAD_MILESTONES = "off"
+# The video-recording debug replay (Shift+right-click on the resting loop). A private developer tool: off for everyone,
+# turned on only by the owner, and named in no shipped skill.
+DEBUG_REPLAY_MODES = ("off", "on")
+DEBUG_REPLAY = "off"
 # Opt-in live thought and between-tool narration: off by default.
 # beats: prompt allows brief plain-English beats between later tool calls.
 # thoughts: narrates cleaned English agent_thought_chunk updates in real time.
@@ -113,7 +117,8 @@ MACHINES_CONFIG = CONFIG.with_name("machines.json")
 DEFAULT_THEME_PACK = "devs"
 THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
 SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "diagram_entrance", "diagram_dance",
-            "stage", "listen_after", "smart_turn", "thread_milestones", "speak_thoughts", "recording_minutes", *RANGES, *AGENT_SETTINGS,
+            "stage", "listen_after", "smart_turn", "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
+            "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
             "recogniser_model")
 CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
@@ -165,6 +170,10 @@ def valid(data):
         elif key == "smart_turn" and isinstance(value, str) and value.strip().lower() in SMART_TURNS:
             found[key] = value.strip().lower()
         elif key == "thread_milestones" and isinstance(value, str) and value.strip().lower() in THREAD_MILESTONES_MODES:
+            found[key] = value.strip().lower()
+        elif key == "debug_replay" and isinstance(value, str) and value.strip().lower() in DEBUG_REPLAY_MODES:
+            found[key] = value.strip().lower()
+        elif key == "update_check" and isinstance(value, str) and value.strip().lower() in ("on", "off"):
             found[key] = value.strip().lower()
         elif key == "speak_thoughts" and isinstance(value, str) and value.strip().lower() in SPEAK_THOUGHTS_MODES:
             found[key] = value.strip().lower()
@@ -578,6 +587,13 @@ def smart_turn_in_force(saved):
     if saved.get("smart_turn") in SMART_TURNS:
         return saved["smart_turn"], "settings file"
     return SMART_TURN, "default"
+
+
+def debug_replay_in_force(saved):
+    """Return (debug_replay mode, source): the saved mode while valid, else the default (off)."""
+    if saved.get("debug_replay") in DEBUG_REPLAY_MODES:
+        return saved["debug_replay"], "settings file"
+    return DEBUG_REPLAY, "default"
 
 
 def thread_milestones_in_force(saved):

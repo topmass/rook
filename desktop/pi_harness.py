@@ -218,7 +218,7 @@ class Pi(Harness):
     def begin(self, process, session, uuid, text):
         """Send the setup turn, with the lines of the owner's session start hook, run in Pi's own folder, as Claude
         Code's hook adds them to its session. The hook takes about 20 ms."""
-        cwd = os.readlink(f"/proc/{process.pid}/cwd") if Path(f"/proc/{process.pid}").is_dir() else os.getcwd()
+        cwd = desk.process_cwd(process.pid, getattr(self, "workspace", None))
         if lines := codex_harness.memory(cwd):  # The hook's lines are data, passed as they are.
             text += settings.render(f"\n\nSession start lines, from {OWNER}'s session start hook:\n") + lines
         self.process, self.setup_uuid, self.heard = process, uuid, time.monotonic()

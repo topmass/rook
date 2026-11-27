@@ -191,13 +191,13 @@ class _Linux:
         import time
         return time.clock_gettime(time.CLOCK_BOOTTIME)
 
-    def process_cwd(self, pid):
+    def process_cwd(self, pid, fallback=None):
         if pid:
             try:
                 return os.readlink(f"/proc/{pid}/cwd")
             except OSError:
                 pass
-        return os.getcwd()
+        return fallback or os.getcwd()
 
     def hyprland_session(self, timeout=0.2):
         """Whether a Hyprland session is reachable now on its command socket within one total deadline."""
@@ -741,7 +741,7 @@ class _Mac(_Linux):
         except OSError:
             return time.monotonic()
 
-    def process_cwd(self, pid):
+    def process_cwd(self, pid, fallback=None):
         import subprocess
         if pid:
             try:
@@ -755,7 +755,7 @@ class _Mac(_Linux):
                             return line[1:]
             except (OSError, subprocess.TimeoutExpired, ValueError):
                 pass
-        return os.getcwd()
+        return fallback or os.getcwd()
 
     def desktop_capabilities(self, timeout=1.0):
         return {"hyprland": False, "overlay": False, "capture": False, "grim": False}
@@ -1381,8 +1381,9 @@ def uptime_seconds():
     return PLATFORM.uptime_seconds()
 
 
-def process_cwd(pid):
-    return PLATFORM.process_cwd(pid)
+def process_cwd(pid, fallback=None):
+    """The folder a process runs in, else fallback, else Rook's own folder."""
+    return PLATFORM.process_cwd(pid, fallback)
 
 
 def desktop_capabilities(timeout=1.0):

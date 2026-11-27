@@ -1772,4 +1772,45 @@ printf '%s\n' "$OUT39" | grep -qF "voice_engine=medium," || fail "39 the setting
 grep -qF '"voice_engine": "medium"' "$SB39/.config/rook/settings.json" || fail "39 the saved voice changed"
 pass "Voice banner: a run with no --voice shows the saved medium voice, and keeps it"
 
-echo "All install failure and recovery tests passed (39/39)."
+echo "=== Case 40: get.sh leaves origin on the public repository, and relay.py update repoints a dead origin ==="
+PUB40="$TEST_ROOT/public40.git"  # Stands in for Rook's public repository, so GitHub is never reached.
+"$REAL_GIT" init -q --bare -b main "$PUB40"
+"$REAL_GIT" -C "$REPO_ROOT" push -q "$PUB40" HEAD:refs/heads/main
+HEAD40="$("$REAL_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
+"$REAL_GIT" -C "$REPO_ROOT" archive --format=tar.gz --prefix=rook/ -o "$TEST_ROOT/rook40.tar.gz" HEAD
+get40() { run_in_sb "$1" env ROOK_PUBLIC_SOURCE="$PUB40" sh "$GET_SH" "$2" --agent claude --voice small --voice-model no \
+  --recogniser no --service no --recogniser-source "$FAKE_WHEEL"; }
+relay40() { run_in_sb "$1" env ROOK_PUBLIC_SOURCE="$3" "$REAL_PY3" "$1/.local/share/rook/live/desktop/relay.py" update $2; }
+# A git URL install keeps that URL as origin, and is up to date with it.
+SB40A="$(new_sandbox get-origin-url)"
+set +e
+OUT40A="$(get40 "$SB40A" "file://$PUB40" 2>&1)"
+RC40A=$?
+set -e
+[ "$RC40A" -eq 2 ] || fail "40 the git URL install failed ($RC40A): $OUT40A"
+[ "$("$REAL_GIT" -C "$SB40A/.local/share/rook/live" remote get-url origin)" = "file://$PUB40" ] || fail "40 a git URL install changed origin"
+OUT40A="$(relay40 "$SB40A" --check "file://$PUB40" 2>&1)" || fail "40 update --check failed: $OUT40A"
+printf '%s\n' "$OUT40A" | grep -qx "Installed: ${HEAD40:0:7}" && printf '%s\n' "$OUT40A" | grep -qx "Latest on GitHub: ${HEAD40:0:7}" \
+  && printf '%s\n' "$OUT40A" | grep -qx "Rook is up to date." || fail "40 update --check did not print both versions: $OUT40A"
+# A .tar.gz install is cloned from a folder get.sh deletes, so its origin is the public repository.
+SB40="$(new_sandbox get-origin-tarball)"
+set +e
+OUT40="$(get40 "$SB40" "$TEST_ROOT/rook40.tar.gz" 2>&1)"
+RC40=$?
+set -e
+LIVE40="$SB40/.local/share/rook/live"
+[ "$RC40" -eq 2 ] || fail "40 the .tar.gz install failed ($RC40): $OUT40"
+[ "$("$REAL_GIT" -C "$LIVE40" remote get-url origin)" = "$PUB40" ] || fail "40 a .tar.gz install left origin off the public repository"
+! printf '%s\n' "$OUT40" | grep -qF "cannot update it" || fail "40 still says a .tar.gz install cannot update: $OUT40"
+# An older install whose origin folder is gone: relay.py update points it at the public repository and updates.
+"$REAL_GIT" -C "$LIVE40" remote set-url origin "$TEST_ROOT/gone40"
+: >"$TEST_ROOT/systemctl.log"
+OUT40B="$(relay40 "$SB40" "" "$PUB40" 2>&1)" || fail "40 update after a dead origin failed: $OUT40B"
+printf '%s\n' "$OUT40B" | grep -qF "Rook's source folder $TEST_ROOT/gone40 is gone, so Rook now updates from $PUB40." \
+  || fail "40 update did not say it repointed origin: $OUT40B"
+[ "$("$REAL_GIT" -C "$LIVE40" remote get-url origin)" = "$PUB40" ] || fail "40 update did not repoint the dead origin"
+[ "$("$REAL_GIT" -C "$LIVE40" rev-parse HEAD)" = "$HEAD40" ] || fail "40 update did not move to the public commit: $OUT40B"
+grep -qx -- "--user restart rook.service" "$TEST_ROOT/systemctl.log" || fail "40 update did not restart Rook through systemctl"
+pass "Origin: a git URL install keeps its URL and update --check prints both versions; a .tar.gz install updates from the public repository; update repoints a dead origin and updates"
+
+echo "All install failure and recovery tests passed (40/40)."

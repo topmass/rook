@@ -694,9 +694,7 @@ class Codex(Harness):
         self.first_words = None
         self.setup_uuid, self.setup_done, self.stages = uuid, False, {}
         self.setup_problem = None
-        pid = getattr(process, "pid", None)  # macOS has no /proc: use the folder Rook started Codex in.
-        self.cwd = (os.readlink(f"/proc/{pid}/cwd") if pid and Path(f"/proc/{pid}").is_dir()
-                    else getattr(self, "workspace", None) or os.getcwd())
+        self.cwd = desk.process_cwd(getattr(process, "pid", None), getattr(self, "workspace", None))
         self.call("initialize", {
             "clientInfo": {"name": "rook", "title": "Rook", "version": "1"},
             "capabilities": {"experimentalApi": True},

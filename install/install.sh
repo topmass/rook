@@ -1405,6 +1405,8 @@ stage_and_install_prefix() {
   local replace_empty="$1"
   STAGE_TMP="$(make_stage_dir "$(dirname "$PREFIX")" ".rook-stage-prefix")"
   run_cmd git clone "$SOURCE" "$STAGE_TMP/checkout"
+  # get.sh names the repository that relay.py update fetches from when SOURCE is a folder it deletes.
+  [ -z "${ROOK_ORIGIN:-}" ] || git -C "$STAGE_TMP/checkout" remote set-url origin "$ROOK_ORIGIN"
   [ -f "$STAGE_TMP/checkout/desktop/rook.py" ] || die "Install check failed: desktop/rook.py is missing." "Check that $SOURCE is a valid Rook repository."
   [ -f "$STAGE_TMP/checkout/desktop/relay.py" ] || die "Install check failed: desktop/relay.py is missing." "Check that $SOURCE is a valid Rook repository."
   local clone_commit clone_branch
