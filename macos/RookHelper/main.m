@@ -259,8 +259,11 @@ static BOOL isLoopbackURL(NSURL *url) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
     NSRect screenFrame = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
-    NSRect frame = NSMakeRect(NSMaxX(screenFrame) - self.width - 24,
-                              NSMaxY(screenFrame) - self.height - 24,
+    NSRect fullFrame = NSScreen.mainScreen ? NSScreen.mainScreen.frame : screenFrame;
+    // Top centre of the screen, as Rook sits on Linux: the middle of the whole screen, so a side Dock does not
+    // push it off-centre, and below the menu bar. Whole points, so the panel stays sharp on a 1x screen.
+    NSRect frame = NSMakeRect(round(NSMidX(fullFrame) - self.width / 2),
+                              round(NSMaxY(screenFrame) - self.height - 24),
                               self.width, self.height);
 
     PresencePanel *panel = [[PresencePanel alloc]
