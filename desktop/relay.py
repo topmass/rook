@@ -18,6 +18,8 @@ relay.py tell [--urgent] [TEXT|-]
 relay.py media [status|pause|play|toggle] [PLAYER]
                             Show active desktop media players in one line each, or pause, play, or toggle one.
 relay.py note [TEXT|-]      Leave the reason for a restart, which the next Rook start reports.
+relay.py obsidian-note [TEXT|-]
+                            Append Markdown to today's daily note in the running Rook's configured Obsidian vault.
 relay.py get [KEY]          Print Rook's settings and where each value comes from.
 relay.py voices             List the voices Rook can speak with.
 relay.py fonts              List the fonts Rook can show its text in.
@@ -2463,6 +2465,24 @@ def ask_command(argv):
     if not answer.get("ok"):
         leave(answer.get("error") or answer.get("answer") or "Rook could not answer.")  # The agent's own reason.
     print(answer.get("spoken") or answer.get("answer") or "")  # The agent's own answer: never rendered again.
+
+
+def obsidian_note_command(args):
+    from obsidian_notes import MAX_BYTES
+
+    if len(args) > 1:
+        leave("Usage: relay.py obsidian-note [TEXT|-]")
+    text = args[0] if args and args[0] != "-" else sys.stdin.read(MAX_BYTES + 1)
+    if len(text.encode()) > MAX_BYTES:
+        leave("An Obsidian note can be at most 16 KiB.")
+    if not text.strip():
+        leave("Give the note as an argument or on stdin.")
+    answer = ask_rook("obsidian-note", text, wait=15)
+    if answer is None:
+        leave("Rook is not running. The note was not saved.")
+    if not answer.get("ok"):
+        leave(answer.get("error") or "Rook could not save the Obsidian note.")
+    print(f"Saved to {answer['path']}.")
 
 
 # A project name is a plain folder name.
@@ -5883,6 +5903,8 @@ def main():
         return work_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "ask":
         return ask_command(sys.argv[1:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "obsidian-note":
+        return obsidian_note_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "show":
         return show_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "media":

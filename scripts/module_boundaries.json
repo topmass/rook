@@ -20,6 +20,7 @@
       "desktop/speech.py",
       "desktop/turn_end.py",
       "desktop/memory.py",
+      "desktop/obsidian_notes.py",
       "desktop/media.py"
     ],
     "platform": [

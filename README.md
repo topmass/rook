@@ -49,9 +49,16 @@ Hold the talk key, speak, and let go. Some examples:
 - "Pause the video." or "Play the music." Rook controls your media players.
 - "Change your voice." or "Talk a bit faster." Rook changes its own settings.
 - "Go dark for an hour." Rook goes quiet, takes no screenshots, and holds its messages until it comes back.
+- "Save this to Obsidian. Try the west entrance on the next run." Rook appends the note when a vault is configured.
 - "Stop." Rook stops what it is saying.
 
 Rook answers in short spoken sentences. It shows longer answers as text on the screen.
+
+### Obsidian dictation
+
+Set `ROOK_OBSIDIAN_VAULT` to the absolute path of your vault in the Rook service's environment. The vault needs an existing `daily/` directory. On macOS, see [LaunchAgent setup](macos/README.md#obsidian-dictation).
+
+Rook appends your words as a Markdown entry in `daily/YYYY-MM-DD.md` using the service's local date and creates the file if needed. Say “Save this to Obsidian” followed by the note, or run `python3 desktop/relay.py obsidian-note "Your note"` while Rook is running. The service writes the entry through Rook's local relay, so the agent needs no vault filesystem grant.
 
 ## What is yours and what ships
 
