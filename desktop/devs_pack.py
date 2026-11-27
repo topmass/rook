@@ -606,6 +606,58 @@ def build_tesseract_3d(grains: int, rng: random.Random):
     return _by_angle(pts[:grains])
 
 
+LATTICE_BLOCK = 15.0      # Each of the cube's eight blocks is this far from its centre to a face.
+LATTICE_GAP = 2.0         # The seam between two blocks at rest; the cube spans 2 * (2 * BLOCK + GAP / 2) = 62.
+LATTICE_PART = 4.0        # How much wider each seam opens as the cube breathes.
+LATTICE_BREATH = 5.0      # One breath, open and closed, in seconds.
+LATTICE_EDGE = 13         # Grains along each block's share of an outer edge (24 shares, 312 grains).
+_KEY = (-0.42, -0.62, 0.66)  # The key light, from the upper left and in front, in view space (as icons_wow2).
+LATTICE_LIGHT = tuple(c / math.sqrt(sum(k * k for k in _KEY)) for c in _KEY)
+# The cube's facets, each a normal and the axis its grains run along (-1 on a face): 6 faces, then 12 outer edges.
+LATTICE_FACETS = [(tuple(float(s) if q == axis else 0.0 for q in range(3)), -1) for axis in range(3) for s in (-1, 1)]
+LATTICE_FACETS += [(tuple(0.0 if q == axis else 0.7071 * (sj if q == (axis + 1) % 3 else si) for q in range(3)), axis)
+                   for axis in range(3) for sj in (-1, 1) for si in (-1, 1)]
+
+
+def build_lattice_3d(grains: int, rng: random.Random):
+    """The thinking cube: a solid cube of eight blocks, two by two by two, whose seams are the lattice. Grains lie only
+    on the outer faces and the 12 outer edges, so a face turned from the light or the viewer dims and nothing shows
+    through from inside. A grain is (x, y, z, weight, block signs, facet): its place at rest, its brightness weight,
+    the direction its block parts in, and its LATTICE_FACETS index."""
+    pts = []
+    h, c = LATTICE_BLOCK, LATTICE_BLOCK + LATTICE_GAP / 2
+    facet = {f: k for k, f in enumerate(LATTICE_FACETS)}
+    per_face = grains - 24 * LATTICE_EDGE
+    face_n = [per_face // 24 + (1 if k < per_face % 24 else 0) for k in range(24)]
+    k = 0
+    for s in [(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]:
+        mid = tuple(c * v for v in s)
+        for axis in range(3):
+            j, i = (axis + 1) % 3, (axis + 2) % 3
+            # The outer face across this axis: evenly spread (a jittered R2 sequence), kept off the edges so no line
+            # doubles and no corner gathers a knot.
+            nrm = tuple(float(s[axis]) if q == axis else 0.0 for q in range(3))
+            u0, v0, jit = rng.random(), rng.random(), 0.45 / math.sqrt(face_n[k])
+            for q in range(face_n[k]):
+                u = 0.1 + 0.8 * ((u0 + 0.7548776662 * q + rng.uniform(-jit, jit)) % 1.0)
+                v = 0.1 + 0.8 * ((v0 + 0.5698402910 * q + rng.uniform(-jit, jit)) % 1.0)
+                p = list(mid)
+                p[axis] += s[axis] * h
+                p[j] += (2 * u - 1) * h
+                p[i] += (2 * v - 1) * h
+                pts.append((*p, 1.1, s, facet[(nrm, -1)]))
+            k += 1
+            # The block's share of the outer edge that runs along this axis, evenly spaced, its normal between faces.
+            e = tuple(0.0 if q == axis else 0.7071 * s[q] for q in range(3))
+            for q in range(LATTICE_EDGE):
+                p = list(mid)
+                p[j] += s[j] * h
+                p[i] += s[i] * h
+                p[axis] += (2 * (q + 0.5) / LATTICE_EDGE - 1) * h
+                pts.append((*p, 1.3, s, facet[(e, axis)]))
+    return _by_angle(pts[:grains])
+
+
 def build_knot_3d(grains: int, rng: random.Random):
     """Sculpted 3D trefoil knot: crisp golden mathematical tube slowly turning in space."""
     sin, cos, tau = math.sin, math.cos, 2 * math.pi
@@ -752,6 +804,48 @@ def build_quill_3d(grains: int, rng: random.Random):
     return _by_angle(pts[:grains])
 
 
+# Reading a file: a ring of light descends round a turning page of text, lighting each line as it passes, because
+# reading is a pass down the file. The ring's white-hot bead stays level with the line it lights.
+RING_ROWS, RING_R, RING_TILT = (-36.0, -24.0, -12.0, 0.0, 12.0, 24.0, 36.0), 40.0, 0.12  # The rows, ring radius, tilt.
+RING_PERIOD, RING_SWEEP = 3.0, 2.4  # The loop, and the ring's pass down the page.
+
+
+def _read_words(rng, x0, x1, count):
+    """count grains spread evenly over words of random length from x0 to x1, so a line of dust reads as text."""
+    words, x = [], x0
+    while x < x1 - 3.0:
+        length = min(rng.uniform(5.0, 13.0), x1 - x)
+        words.append((x, length))
+        x += length + rng.uniform(3.5, 5.0)
+    total = sum(length for _, length in words)
+    out = []
+    for k in range(count):
+        d = total * (k + 0.5) / count
+        for w0, length in words:
+            if d <= length:
+                out.append(w0 + d)
+                break
+            d -= length
+        else:
+            out.append(words[-1][0] + words[-1][1])
+    return out
+
+
+def build_scan_3d(grains: int, rng: random.Random):
+    """Seven rows of words, the ring, and the ring's white-hot bead at its front. A record is (x, y, kind, a, b):
+    a word grain's x and row, or a ring grain's angle."""
+    pts, last = [], len(RING_ROWS) - 1
+    for row, y in enumerate(RING_ROWS):
+        for x in _read_words(rng, -30.0, 8.0 if row == last else 30.0, 34 if row == last else 50):
+            pts.append((x, y + rng.gauss(0, 0.45), 1, x, row))
+    for k in range(250):
+        a = _TAU * (k + 0.5 + rng.uniform(-0.2, 0.2)) / 250
+        pts.append((RING_R * math.cos(a), RING_ROWS[0] - 8.0, 2, a, rng.gauss(0, 0.5)))
+    while len(pts) < grains:
+        pts.append((0.0, RING_ROWS[0] - 8.0, 3, rng.gauss(0, 1.8), rng.gauss(0, 1.4)))
+    return _by_angle(pts[:grains])
+
+
 # The listening ripples: a slowly turning gold ring of radius 40 px, as the old halo. While the voice is up, gold
 # ripples are born just inside the rim and contract to a bright core at the centre, each turning against the last.
 # Each of the RIPPLE_SLOTS slots has its own grains and carries one ripple at a time. A louder voice keeps more busy.
@@ -790,7 +884,7 @@ def build_listen_ripples(grains: int, rng: random.Random):
 
 # ---------------------------------------------------------------------------
 # Registry of Round-3 3D point builders and live motion evaluators
-# (rook, lattice, and sphere keep their exact origin/main 3D point sets!)
+# (rook and sphere keep their exact origin/main 3D point sets!)
 # ---------------------------------------------------------------------------
 
 BUILDERS = {
@@ -804,8 +898,10 @@ BUILDERS = {
     "prism": build_prism_3d,
     "astrolabe": build_astrolabe_3d,
     "tesseract": build_tesseract_3d,
+    "lattice": build_lattice_3d,
     "aperture": build_aperture_3d,
     "quill": build_quill_3d,
+    "scan": build_scan_3d,
 }
 
 
@@ -983,6 +1079,42 @@ def eval_targets(name: str, points, scene, now: float):
             tz.append(zn)
         return tx, ty, tb, tz
 
+    if name == "lattice":
+        # The cube turns slowly, seen from a little above, and every LATTICE_BREATH seconds its eight blocks part along
+        # their diagonals and close, so the seams open as dark lines. It arrives closed and dwells closed. Each facet
+        # is lit once a frame by the key light, and a facet turned from the viewer goes out, so the cube reads as a
+        # solid. It goes fully out, not to a faint floor, because the fast Cairo fallback draws every grain above zero
+        # at its least alpha. An edge seen end on is dimmed by how short it looks, so its grains never stack into a knot.
+        a = now * float(meta.get("spin", 0.40))
+        tilt = float(meta.get("tilt", -0.52))
+        ca, sa, ct, st = cos(a), sin(a), cos(tilt), sin(tilt)
+        o = 0.5 - 0.5 * cos(2 * pi * max(0.0, now - getattr(scene, "form_at", now)) / LATTICE_BREATH)
+        part = 0.5 * LATTICE_PART * o * o
+        lx, ly, lz = LATTICE_LIGHT
+        light = []
+        for nrm, axis in LATTICE_FACETS:
+            nxv, nyv, nzv = _rot_yx(*nrm, ca, sa, ct, st)
+            vis = min(1.0, max(0.0, nzv / 0.25))
+            b = (0.55 + 0.75 * max(0.0, nxv * lx + nyv * ly + nzv * lz)) * vis * vis * (3 - 2 * vis)
+            if axis >= 0:
+                sx, sy, _ = _rot_yx(*(1.0 if q == axis else 0.0 for q in range(3)), ca, sa, ct, st)
+                b *= 0.3 + 0.7 * math.hypot(sx, sy)
+            light.append(b)
+        tx, ty, tb, tz = [], [], [], []
+        inv = 1.0 / persp_d
+        for x, y, z, w, s, f in points:  # _rot_yx and _depth_shade(z2, 46.0), inline.
+            x, y, z = x + s[0] * part, y + s[1] * part, z + s[2] * part
+            z1 = z * ca - x * sa
+            y2, z2 = y * ct - z1 * st, y * st + z1 * ct
+            p = 1.0 / (1.0 - z2 * inv)
+            tx.append((x * ca + z * sa) * p)
+            ty.append(y2 * p)
+            zn = z2 / 46.0
+            zn = -1.0 if zn < -1.0 else 1.0 if zn > 1.0 else zn
+            tb.append(w * (0.855 + 0.378 * (0.5 + 0.5 * zn) ** 1.25) * light[f])
+            tz.append(zn)
+        return tx, ty, tb, tz
+
     if name in ("prism", "tesseract"):
         a = now * float(meta.get("spin", 0.42))
         tilt = float(meta.get("tilt", 0.32))
@@ -1145,6 +1277,45 @@ def eval_targets(name: str, points, scene, now: float):
             tb[i], tz[i] = b_d * boost, zn
         return tx, ty, tb, tz
 
+    if name == "scan":
+        # Reading a file: the ring descends round the turning page, and each row lights as the bead passes it.
+        exp = math.exp
+        d = max(0.0, now - scene.form_at)
+        tx, ty, tb, tz = [], [], [], []
+
+        def put(x, y, z, boost, view):
+            x1, y2, z2 = _rot_yx(x, y, z, *view)
+            p = 1.0 / (1.0 - z2 / persp_d)
+            b_d, zn = _depth_shade(z2, 44.0)
+            tx.append(x1 * p)
+            ty.append(y2 * p)
+            tb.append(b_d * boost)
+            tz.append(zn)
+
+        ph = d % RING_PERIOD
+        yaw = float(meta.get("yaw_base", -0.35)) + 0.30 * sin(2 * pi * now / (2 * RING_PERIOD))
+        pitch = float(meta.get("pitch", -0.30))
+        view = (cos(yaw), sin(yaw), cos(pitch), sin(pitch))
+        ct, st = cos(RING_TILT), sin(RING_TILT)
+        top, span = RING_ROWS[0] - 8.0, RING_ROWS[-1] - RING_ROWS[0] + 16.0
+        bead = top + span * min(1.0, ph / RING_SWEEP) if ph <= RING_SWEEP + 0.25 else top  # The bead's height.
+        # The ring rides higher than its bead, which tilt and view carry down to the row it lights.
+        scan = bead - RING_R * (st + ct * -sin(pitch) / cos(pitch))
+        ring = _smooth(ph / 0.3) * _smooth((RING_SWEEP + 0.25 - ph) / 0.25)
+        settle = _smooth((ph - RING_SWEEP) / 0.7)  # After the pass the rows dim, ready to be read again.
+        for _, _, kind, a, b in points:
+            if kind == 1:
+                passed = RING_SWEEP * (RING_ROWS[b] - top) / span
+                lit = 0.5 if ph < passed else 1.15 + 1.1 * exp(-(ph - passed) / 0.22)
+                lit += (0.5 - lit) * settle
+                put(a, RING_ROWS[b], 0.0, lit, view)
+            elif kind == 2:
+                rx, rz = (RING_R + b) * cos(a), (RING_R + b) * sin(a)
+                put(rx, scan + rz * st, rz * ct, 0.95 * ring, view)
+            else:
+                put(a, scan + RING_R * st + b, RING_R * ct, (2.7 - 0.2 * (a * a + b * b)) * ring, view)
+        return tx, ty, tb, tz
+
     if name == "quill":
         # The pen writes looped script: its tip circles while the paper carries the ink line to the left.
         d = max(0.0, now - scene.form_at)
@@ -1195,3 +1366,11 @@ def eval_targets(name: str, points, scene, now: float):
         return tx, ty, tb, tz
 
     return None
+
+
+__import__("icons_wow2").register()  # The WoW lookup sketches, round two (desktop/icons_wow2.py).
+import icons_system2; icons_system2.register(globals())  # noqa: E402,E702  The system activities' second-round candidate forms.
+import icons_system3; icons_system3.register(globals())  # noqa: E402,E702  Their third round (desktop/icons_system3.py).
+import icons_tools2; BUILDERS.update(icons_tools2.BUILDERS); eval_targets = icons_tools2.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round two.
+import icons_tools3; BUILDERS.update(icons_tools3.BUILDERS); eval_targets = icons_tools3.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round three.
+import icons_writing; icons_writing.register()  # noqa: E402,E702  Writing icon concepts, round two (desktop/icons_writing.py).

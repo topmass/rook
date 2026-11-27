@@ -150,8 +150,15 @@ RESPELL = ((re.compile(r"\bBiS\b", re.IGNORECASE), "biss"),
            (re.compile(r"\beverystate\b", re.IGNORECASE), "every state"),
            (re.compile(r"\bW[oO]W:\s*Forever\b"), "Wow Forever"),
            (re.compile(r"\bW[oO]W\b"), "Wow"))
-# Phonon reads "live" as the verb in most adjective uses.
-# Respell it as "lyve" unless a verb marker comes right before it.
+# Both voices read "live" as the verb in most adjective uses.
+# Respell it per engine unless a verb marker comes right before it.
+# On Qwen3-TTS, "lyve" came back as "leave" in 1 of 12 probes, and "lighve" as "live" in 24 of 24.
+# A recogniser cannot hear the vowel, so the owner picks the medium spelling by ear.
+LIVE_SPELLING = {"small": "lyve", "medium": "lighve"}
+# The owner's own respellings, for speech only: {"words": {WORD: SPELLING}, "small": {...}, "medium": {...}}.
+# An engine's entries win over "words". A missing or broken file gives no entries.
+PRONUNCIATIONS = desk.config_dir() / "rook/pronunciations.json"
+_pronounced = [None, {}]  # The file's (mtime, size) and its compiled entries per engine.
 LIVE_VERB_BEFORE = frozenset((
     "i", "you", "we", "they", "can", "could", "will", "would", "should",
     "must", "might", "may", "shall", "do", "does", "did", "don't", "doesn't",
@@ -190,10 +197,44 @@ def clock_words(match):
     return f"{words} {half.upper()}M" if half else words if minute else words + " o'clock"
 
 
-def respell(text, live=True):
-    """Respell words the voice reads wrong, keeping captions unchanged.
-    live=False keeps "live" as written. The medium voice reads plain "live" correctly and "lyve" as "leave"."""
+def read_pronunciations(path=None):
+    """Return the pronunciations file as {"words"|"small"|"medium": {WORD: SPELLING}}, or {} when missing or broken."""
+    try:
+        data = json.loads((path or PRONUNCIATIONS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {group: {w.strip(): s.strip() for w, s in entries.items()
+                    if isinstance(w, str) and isinstance(s, str) and w.strip() and s.strip()}
+            for group, entries in data.items() if group in ("words", "small", "medium") and isinstance(entries, dict)}
+
+
+def pronunciations(engine):
+    """Return the owner's (pattern, spelling) pairs for engine, rereading the file only when it changes.
+    A word with a capital letter matches that case only. A lowercase word matches any case."""
+    try:
+        info = PRONUNCIATIONS.stat()
+        key = (info.st_mtime_ns, info.st_size)
+    except OSError:
+        key = None
+    if key != _pronounced[0]:
+        data = read_pronunciations() if key else {}
+        compiled = {}
+        for name in ("small", "medium"):
+            entries = {**data.get("words", {}), **data.get(name, {})}
+            compiled[name] = [(re.compile(rf"(?<!\w){re.escape(w)}(?!\w)", 0 if w != w.lower() else re.IGNORECASE), s)
+                              for w, s in sorted(entries.items(), key=lambda item: -len(item[0]))]
+        _pronounced[:] = [key, compiled]
+    return _pronounced[1].get(engine, ())
+
+
+def respell(text, engine="small"):
+    """Respell words the voice of engine ("small" or "medium") reads wrong, for speech only. Captions keep the text."""
     text = CLOCK.sub(clock_words, text)
+    for pattern, spelling in pronunciations(engine):
+        text = pattern.sub(lambda m: spelling[:1].upper() + spelling[1:]
+                           if m.group(0)[:1].isupper() and spelling[:1].islower() else spelling, text)
     for pattern, replacement in RESPELL:
         text = pattern.sub(replacement, text)
 
@@ -207,9 +248,10 @@ def respell(text, live=True):
                 before_to = PREV_WORD.search(text[:prev.start()])
                 if before_to and before_to.group(1).lower() in TO_LIVE_VERB_BEFORE:
                     return match.group(0)
-        return "lyve" if match.group(0).islower() else "Lyve"
+        spelling = LIVE_SPELLING[engine]
+        return spelling if match.group(0).islower() else spelling.capitalize()
 
-    return LIVE_WORD.sub(replace_live, text) if live else text
+    return LIVE_WORD.sub(replace_live, text)
 
 
 def load(args):
@@ -417,7 +459,7 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
 
         def raw_audio():
             nonlocal connection, sock, connected, status, got_audio
-            for piece in pieces(respell(text, live=False)):
+            for piece in pieces(respell(text, "medium")):
                 if stop.is_set() or abort.is_set():
                     return
                 connection = connect(server.hostname, port,
@@ -611,8 +653,12 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
 
 def check_words():
     """Self-check speech respellings for WoW Friend, WoW, BiS, and live across both voice engines."""
+    global PRONUNCIATIONS
     import http.server
     import io
+    import tempfile
+    scratch = tempfile.TemporaryDirectory()  # Never the owner's file. It is removed at exit, also after a failure.
+    saved, PRONUNCIATIONS = PRONUNCIATIONS, type(PRONUNCIATIONS)(scratch.name) / "pronunciations.json"
     assert respell("Best BiS in WoW: Forever and WoW.") == "Best biss in Wow Forever and Wow."
     assert respell("WOW and WoW's bags.") == "Wow and Wow's bags."
     # Every spelling of WoW Friend (plain, possessive, plural) reaches speech as "wow friend(s)".
@@ -658,7 +704,7 @@ def check_words():
         ("Run `a[6:24]` on line 12:30:45, at 6:24.5 s, or 24:00.", "Run `a[6:24]` on line 12:30:45, at 6:24.5 s, or 24:00."),
         ("Read main.py:12:4 and 6:24x.", "Read main.py:12:4 and 6:24x."),
     ):
-        assert respell(text) == want == respell(text, live=False), (text, respell(text), want)
+        assert respell(text) == want == respell(text, "medium"), (text, respell(text), want)
 
     # Stand-in check: verify respelled text reaches both medium (Qwen HTTP /tts) and small-voice paths.
     wav_buf = io.BytesIO()
@@ -722,9 +768,20 @@ def check_words():
             assert med_seen[-1] == want, med_seen[-1]
             # Direct small voice selection.
             assert b"".join(gen(raw, threading.Event(), {"voice": "Miles"})) and small_seen[-1] == want, small_seen[-1]
-        # The medium voice reads plain "live" correctly and "lyve" as "leave", so it keeps "live" as written.
-        assert b"".join(gen("It is live now.", threading.Event())) and med_seen[-1] == "It is live now.", med_seen[-1]
-        assert respell("It is live now.", live=False) == "It is live now."
+        # The medium voice gets its own adjective spelling, and the verb stays "live".
+        assert b"".join(gen("It is live now.", threading.Event())) and med_seen[-1] == "It is lighve now.", med_seen[-1]
+        assert LIVE_SPELLING["medium"] == "lighve" and respell("Live, where I live.", "medium") == "Lighve, where I live."
+        assert respell("We're live and direct, and this is a live demo.", "medium") == \
+            "We're lighve and direct, and this is a lighve demo."
+        # The owner's pronunciations reach the voice text only. The caller's text, which captions and logs show,
+        # stays as written. An engine's own entry wins over a shared one.
+        PRONUNCIATIONS.write_text(json.dumps({"words": {"nginx": "engine x", "Nginx Plus": "engine x plus"},
+                                              "medium": {"nginx": "engine ex"}}))
+        caption = "Nginx is live on nginx."
+        assert b"".join(gen(caption, threading.Event())) and med_seen[-1] == "Engine ex is lighve on engine ex."
+        assert b"".join(gen(caption, threading.Event(), {"voice": "Miles"})) and \
+            small_seen[-1] == "Engine x is lyve on engine x.", small_seen[-1]
+        assert caption == "Nginx is live on nginx." and respell("Nginx Plus", "small") == "Engine x plus"
         # Each sentence is its own request, so a long reply is never one long generation.
         assert b"".join(gen("Done: the list is in. It landed.", threading.Event()))
         assert med_seen[-2:] == ["Done: the list is in.", "It landed."], med_seen[-2:]
@@ -784,6 +841,18 @@ def check_words():
     # Whole words only.
     whole = "It's alive, olive oil lives on, he lived and kept living."
     assert respell(whole) == whole, respell(whole)
+    # The pronunciations file: whole words only. A word with a capital letter matches only that case, and a
+    # lowercase word matches any case. A rewrite applies at the next sentence. A broken file gives no entries.
+    PRONUNCIATIONS.write_text(json.dumps({"words": {"SQL": "sequel", "C#": "see sharp", "us": "uss"},
+                                          "small": ["not", "a", "map"], "medium": {"SQL": 3}, "_note": "kept"}))
+    assert respell("SQL and sql, mySQL, C# and C#s. US and us.") == "Sequel and sql, mySQL, See sharp and C#s. Uss and uss."
+    assert respell("SQL", "medium") == "Sequel"
+    for broken in (b"{not json", b"[1, 2]", b'{"words": "nginx"}', b"\xff\xfe"):
+        PRONUNCIATIONS.write_bytes(broken)
+        assert respell("SQL us live") == "SQL us lyve", broken
+    PRONUNCIATIONS.unlink()
+    assert respell("SQL us") == "SQL us" and not pronunciations("medium")
+    PRONUNCIATIONS = saved
     print("Speech respelling: all checks passed.")
 
 

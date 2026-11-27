@@ -19,6 +19,7 @@ Your task message lists the proposal files, in time order, and the transcripts t
 
 ### Forget
 Do not add, and remove where you find it:
+- What the developer's global agent instructions state. They are the single source of truth for models, tools, delegation, and working style. A note that repeats or contradicts them is obsolete, and they settle any CONFLICT they cover.
 - What the project's code, git history, or instruction files now show.
 - Summaries of web pages or documentation that can be fetched again. Keep the conclusion and where it came from.
 - Plans and proposals that were adopted (keep the decision) or dropped (keep one line on why, if the reason would stop a future agent repeating it).

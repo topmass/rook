@@ -1,8 +1,7 @@
 ---
 name: settings
-description: Change Rook's basic settings by voice: voice engine and name, speed, volume, expressiveness, overlay font, light-theme dust look, diagram entrance (draw or fly) and dance (subtle, medium, lively), listen-after mode, Smart Turn end-of-turn detection and threshold, max recording minutes, and main agent (Claude Code, Antigravity/Gemini, or Codex). Use when ⟦owner⟧ asks to change, compare, or revert any of these settings, switch agents, or check current settings.
-when_to_use: Trigger phrases include "change your voice", "try a different voice", "use Aldric", "use your medium voice", "use Jarvis", "try Velvet Wit", "use Observatory Keeper", "try Late-Night Architect", "go back to your small voice", "change your font", "try the mono one", "make the dust black with gold", "change the particles in light mode", "use the fly-in for diagrams", "draw the diagrams on", "change how diagrams enter", "make the diagram dust livelier", "tone down the diagram motion", "set diagram dance to subtle", "listen after you ask me something", "listen after updates", "listen after both", "listen after updates and questions", "turn off listening after you talk", "turn on smart turn", "turn off smart turn", "change smart turn threshold", "let me talk for up to fifteen minutes", "go back to the previous one", "talk a bit slower", "speak faster", "quieter", "more expressive", "change the temperature", "sound steadier", "what voice is this", "be more friendly when you talk", "use Gemini", "use Codex", "go back to Claude", "which model are you on", "call yourself Nova". Anything else about Rook, such as its colours, layout, keys, or behaviour beyond how it talks, is not a setting and goes to the build thread.
-allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py get*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py voices*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py fonts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py dusts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py set *), Read(~/.config/rook/personality.md), Edit(~/.config/rook/personality.md)
+description: "Change Rook's basic settings by voice: the voice and its engine, speed, volume, expressiveness, the caption font, the light-theme dust, how diagrams enter and dance, listening after Rook talks, Smart Turn, recording length, talk keys, screenshots, the main agent and its model, the names Rook uses, update checks, and how Rook talks. Use when ⟦owner⟧ asks to change, compare, revert or check one of these, such as \"change your voice\", a voice by its name, such as \"use Jarvis\" or \"try Velvet Wit\", \"use your medium voice\", \"talk a bit slower\", \"quieter\", \"change the temperature\", \"try the mono font\", \"change the particles in light mode\", \"use the fly-in for diagrams\", \"listen after you ask me something\", \"turn on smart turn\", \"go back to the previous one\", \"use Gemini\", \"say X like Y\", \"which model are you on\", \"be more friendly when you talk\", \"call yourself Nova\", \"stop checking for updates\" or \"install the update\". Rook's colours, layout and behaviour go to the build thread."
+allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py get*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py voices*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py fonts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py dusts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py set *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py pronounce *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py update --install), Read(~/.config/rook/personality.md), Edit(~/.config/rook/personality.md)
 ---
 
 # Rook's settings
@@ -26,6 +25,7 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `smart_turn_threshold` | How sure Smart Turn must be before ending a turn; higher waits longer | `0.1` to `0.95`. Default is `0.75` |
 | `speak_thoughts` | Debug mode: read aloud extra thinking summaries while working, such as Antigravity's live thoughts and short beats between tool calls. Wordy, so keep it off for normal use; turn it on when ⟦owner⟧ wants to debug or is curious | `off` (the default), `beats`, `thoughts`, or `both` |
 | `thread_milestones` | Debug mode: tell ⟦owner⟧ a thread's progress notes while it still waits on its subagents, at most every 10 minutes a thread. It applies within a minute | `off` (the default) or `on` |
+| `update_check` | Whether you look on GitHub once a day, after 10:00, for a newer Rook, and tell ⟦owner⟧ once per new version. It applies at the next look | `on` (the default) or `off` |
 | `recording_minutes` | Longest time one recording can run before it stops and sends | 1 to 30 minutes. Default is 10 |
 | `agent` | The main agent you run on | `claude` (Claude Code, the default), `antigravity` (Gemini), `codex` (Codex), or `pi` (Pi) |
 | `agent_model` | The model of that agent. Unset means the agent's own default | A model id of that agent, such as `gemini-4-neon` or `gpt-6.2-sol`, or `default` |
@@ -74,11 +74,16 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 - `relay.py set listen_after off|passive|questions|both` changes when you listen after you talk. It applies to your next answer.
 - `relay.py set smart_turn off|on` turns Smart Turn v3.2 mid-thought pause detection off or on, and `relay.py set smart_turn_threshold <0.1-0.95>` sets its threshold; both accept `previous` and apply to the next listen window.
 - `relay.py set speak_thoughts off|beats|thoughts|both` toggles the thinking debug mode: live thought narration and between-tool beats (off by default); accepts `previous`. Live thought narration takes effect on the next turn; the between-tool beats prompt rule takes effect at Rook's next start.
+- "Stop checking for updates" means `relay.py set update_check off`. "Check for updates again" means `relay.py set update_check on`.
+- "Install the update" or "update yourself" means `relay.py update --install`, only when ⟦owner⟧ asks. It updates you and restarts you once this turn ends. When it fails, nothing restarts: say why in one sentence.
 - `relay.py set recording_minutes <1-30>` sets how many minutes one recording can run, and `relay.py set recording_minutes previous` goes back. It applies to the next recording.
+- "Say X like Y" means `relay.py pronounce add "X" "Y"`. It changes only what you say, never captions. `pronounce list` and `pronounce remove "X"` show or undo one, and `--voice small|medium` limits it to one voice.
 
 `set` checks the value, saves it, and tells the running Rook to apply it. Rook swaps only its speech worker, so the conversation goes on. The command prints the result. When it fails, it prints why, and Rook keeps its old voice.
 
 ## The main agent
+
+When ⟦owner⟧ says "temperature" about a model, an agent or a thread, ⟦verb:he means|they mean⟧ reasoning effort: `agent_effort` for your own agent, and the effort a new thread starts with for a thread. Never set a sampling temperature.
 
 When ⟦owner⟧ says "use Gemini", run `relay.py set agent antigravity`, then `relay.py set agent_model gemini-4-neon`. When ⟦owner⟧ says "use Codex", run `relay.py set agent codex` (default model `gpt-6.2-sol`, low effort; set `agent_model` too if ⟦verb:he names|they name⟧ another Codex model). When ⟦owner⟧ says "use Pi", run `relay.py set agent pi` (Pi's own default model; set `agent_model` too if ⟦verb:he names|they name⟧ one of Pi's models, such as `llamacpp` or a `provider/model` pair). When ⟦owner⟧ names a thinking level, such as "on high", also run `relay.py set agent_effort high`. When ⟦owner⟧ says "go back to Claude", run `relay.py set agent claude`. A change of `agent` resets the model and the effort to that agent's defaults.
 
@@ -148,6 +153,7 @@ When ⟦owner⟧ asks to change how lively diagram dust feels, switch between `s
 
 - Speak speed, volume, and expressiveness as points from 1 to 100. Never say raw decimals.
 - Higher means faster, louder, and more expressive. Volume 0 is silent.
+- When ⟦owner⟧ says "temperature" about your voice, ⟦verb:he means|they mean⟧ expressiveness.
 - Rook's default speed is 75, about 10% faster than the medium server's own pace. Normal speed means 75. Default expressiveness is 80.
 - Read the current value with `relay.py get` first, and stay inside the range.
 - "A bit faster" means about 10 points up. Use about 10 points for "a bit slower", "a bit louder", "quieter", "steadier", or "more expressive".

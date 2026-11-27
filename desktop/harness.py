@@ -28,6 +28,7 @@ Rook's tool servers, such as mcp__t3__t3_thread_send. Other names show as the ac
 """
 from abc import ABC, abstractmethod
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -60,8 +61,37 @@ def skill_sources(wow=False, plugin_skills=None):
 
 
 def plugin_user_skills():
-    """Return the skills folders of active user plugins. Their skills join the user's own, as rook-user:<name>."""
-    return tuple(Path(folder) for folder in plugin_loader.skill_dirs()[1])
+    """Return the skills folders of active user plugins. Their skills join the user's own, as rook-user:<name>.
+    A folder whose skills hold Rook's tokens comes back as a copy in the runtime folder, filled in as Rook's own
+    skills are: ${CLAUDE_SKILL_DIR}, ${CLAUDE_PLUGIN_ROOT} and the owner tokens."""
+    copies = desk.runtime_dir() / "rook-user-plugins"
+    folders = tuple(_rendered_skills(Path(folder), copies) for folder in plugin_loader.skill_dirs()[1])
+    for old in sorted(copies.iterdir()) if copies.is_dir() else ():
+        if old not in folders:  # A copy for a plugin turned off or removed since.
+            shutil.rmtree(old, ignore_errors=True)
+    return folders
+
+
+def _rendered_skills(folder, copies):
+    try:
+        files = [file for file in sorted(folder.rglob("*"))
+                 if file.is_file() and "__pycache__" not in file.relative_to(folder).parts]
+        raw = {file: file.read_text() for file in files if file.suffix == ".md"}
+        texts = {file: settings.render(text.replace("${CLAUDE_SKILL_DIR}", str(folder / file.relative_to(folder).parts[0]))
+                                       .replace("${CLAUDE_PLUGIN_ROOT}", str(Path(__file__).resolve().parent.parent / "plugin")))
+                 for file, text in raw.items()}
+        if texts == raw:
+            return folder
+        target = copies / hashlib.sha1(str(folder).encode()).hexdigest()[:12]
+        shutil.rmtree(target, ignore_errors=True)
+        for file in files:
+            out = target / file.relative_to(folder)
+            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            out.write_text(texts[file]) if file in texts else shutil.copy2(file, out)
+        return target
+    except (OSError, ValueError) as error:  # Rook still starts, with the skills as written.
+        print(f"plugin skills: rendering {folder} failed ({type(error).__name__})", file=sys.stderr)
+        return folder
 
 
 def _has_skill(name):
@@ -249,6 +279,15 @@ def _write_wow_plugin(plugin, runtime_dir=None, wow=True):
     return target
 
 
+def bare_skill_names(text):
+    """Rook's own text naming its skills by bare name, such as delegate for rook:delegate: how Antigravity, Codex and Pi
+    list them. Only Claude Code lists plugin skills as rook:<name>. Only the name of a skill Rook ships changes, so
+    a path or a word such as rook:latest stays. Never pass it a person's words, a file or a tool's output."""
+    names = sorted({md.parent.name for folder in skill_sources(wow=True) for md in Path(folder).glob("*/SKILL.md")},
+                   key=len, reverse=True)
+    return re.sub(r"\brook:(" + "|".join(map(re.escape, names)) + r")(?![\w-])", r"\1", text) if names else text
+
+
 class Harness(ABC):
     """Base interface for Rook's main agent harnesses.
 
@@ -267,6 +306,7 @@ class Harness(ABC):
     narrate_thoughts = False  # Opt-in: emit {"type": "thought", "text": ...} from live thought chunks.
     narrate_beats = False  # Opt-in: prompt allows brief spoken beats between later tool calls.
     heard = 0  # Monotonic timestamp of the last message received from the agent.
+    rook_prefix = False  # True when the agent lists Rook's skills as rook:<name>. Otherwise they go by bare name.
 
     def __init__(self, model=None, effort=None):
         self.model, self.effort = model or self.model, effort or self.effort
@@ -274,6 +314,18 @@ class Harness(ABC):
     def ready(self):
         """Return None when the agent can start, or one short sentence on why it cannot."""
         return None
+
+    def signin_status(self, env=None):
+        """Whether the agent is signed in, by the tool's own status command run with env (Rook's own environment when
+        None): ("in" | "out" | "unknown", the sentence for "out" or None). A tool with no status command, or one that
+        does not answer plainly, is "unknown". It never reads a credential, and keeps none of the status output."""
+        return "unknown", None
+
+    def signin_problem(self, env=None):
+        """The sentence Rook says when the agent is signed out or its sign-in ended, or None. The turn path and
+        relay.py verify share these words."""
+        state, sentence = self.signin_status(env)
+        return sentence if state == "out" else None
 
     @abstractmethod
     def command(self, prompt, servers, session, plugin, denied):
@@ -311,12 +363,67 @@ class Harness(ABC):
         """Yield Rook's stream-json message dicts from the agent's parsed stdout stream."""
 
 
+def signin_sentence(tool, command, ended=False):
+    """The one sentence for a signed-out agent. command is the full login command."""
+    return (f"{tool}'s sign-in has ended" if ended else f"{tool} is not signed in") + \
+        f". Run {command} in a terminal on this computer, then ask again."
+
+
+LOGIN = {"claude": ("claude", "auth login"), "codex": ("codex", "login")}  # Each agent's own sign-in command.
+
+
+def login_command(agent):
+    """The full sign-in command for agent, with the tool's own path, for printed fixes only (a spoken line says
+    LOGIN's plain words), or None when the agent has none or is not on PATH. It runs nothing."""
+    program, words = LOGIN.get(agent, (None, None))
+    found = program and shutil.which(program)
+    return f"{found} {words}" if found else None
+
+
+def status_run(argv, env=None, timeout=10):
+    """Run a tool's own status command with no input, for at most timeout seconds: (exit code, output) or None."""
+    import subprocess
+    try:
+        done = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.returncode, done.stdout + done.stderr
+
+
 class Claude(Harness):
     name = "Claude Code"  # In "Claude Code closed" and other errors.
+    rook_prefix = True  # Its plugin skills list as rook:<name>.
     short = "Claude"  # In the permission card: "Claude requests Bash."
     # Its stream names a tool before the tool can run, so a request with no tool mark ran no tool.
     marks_tools_first = True
     model, effort = "claude-opus-5-5", "medium"  # The defaults, when the settings name none.
+
+    def signin_status(self, env=None):
+        """claude auth status --json: loggedIn, and loginExpiresAt, the end of the sign-in itself. An ended sign-in can
+        say loggedIn while every turn fails with "OAuth session expired", so the end time counts too. Only those two
+        fields are read; the rest of the output is dropped. A sign-in that cannot be refreshed for another reason (a
+        keychain the service cannot read) still reads as "in": only a real turn shows that."""
+        from datetime import datetime, timezone
+        program = shutil.which("claude", path=(env if env is not None else os.environ).get("PATH"))
+        ran = program and status_run([program, "auth", "status", "--json"], env=env)
+        if not ran:
+            return "unknown", None
+        try:
+            data = json.loads(ran[1])
+        except ValueError:
+            return "unknown", None
+        if not isinstance(data, dict) or not isinstance(data.get("loggedIn"), bool):
+            return "unknown", None
+        login = f"{program} auth login"
+        if not data["loggedIn"]:
+            return "out", signin_sentence(self.name, login)
+        try:
+            ends = datetime.fromisoformat(str(data.get("loginExpiresAt")).replace("Z", "+00:00"))
+            if ends.tzinfo and ends <= datetime.now(timezone.utc):
+                return "out", signin_sentence(self.name, login, ended=True)
+        except ValueError:
+            pass  # No end time, or an older Claude Code: loggedIn alone decides.
+        return "in", None
 
     def command(self, prompt, servers, session, plugin, denied):
         """The argv. servers are Rook's MCP servers by name. denied are T3 tools that must never run."""

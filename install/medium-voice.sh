@@ -51,4 +51,6 @@ mkdir -p "$data"
 [ -x "$data/venv/bin/python" ] || "$uv" venv -q --python 3.12 "$data/venv"
 "$uv" pip install -q --python "$data/venv/bin/python" qwentts-cpp-python==0.5.0 \
 	nvidia-cuda-runtime-cu12==12.8.90 nvidia-cublas-cu12==12.8.4.1
+echo "  Downloading the medium voice's model, about 2.2 GB. It shows no progress, so the log stays quiet until it ends."
 HF_HUB_DISABLE_PROGRESS_BARS=1 "$data/venv/bin/python" "$here/desktop/medium_voice.py" --download >/dev/null
+echo "  The medium voice's model is downloaded."

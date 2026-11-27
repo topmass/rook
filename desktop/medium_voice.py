@@ -263,8 +263,49 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(500, {"error": "tts failed, see the server log"})
 
 
+PINNED = Path(__file__).resolve().parent.parent / "install/medium-voice-model-8bit.json"
+
+
+def drop_bad(path):
+    """Delete a bad model file and the cache blob behind it, so the next download fetches it again."""
+    if path.is_dir() and not path.is_symlink():
+        sys.exit(f"{path} is a folder where the medium voice expects a model file. Move it away, then run the install "
+                 "again.")
+    blob = path.resolve() if path.is_symlink() else None
+    path.unlink(missing_ok=True)
+    if blob is not None and blob.name and blob.parent.name == "blobs":
+        blob.unlink(missing_ok=True)
+
+
+def model_problem(folder, drop=False):
+    """On a Mac with the 8-bit model: the first file in folder that is missing or differs from its pinned size and
+    SHA-256, as a sentence, or None. With drop, a file that differs is deleted with its cache blob. Other builds have
+    no pinned table."""
+    import hashlib
+    if not (MAC and QUANT == "8bit"):
+        return None
+    for name, (size, sha) in json.loads(PINNED.read_text())["files"].items():
+        path = Path(folder) / name
+        if not path.is_file() or path.stat().st_size != size:
+            if drop and path.exists():
+                drop_bad(path)
+            return f"The medium voice's model file {name} is missing or the wrong size."
+        digest = hashlib.sha256()
+        with open(path, "rb") as data:
+            for block in iter(lambda: data.read(1 << 20), b""):
+                digest.update(block)
+        if digest.hexdigest() != sha:
+            if drop:
+                drop_bad(path)
+            return f"The medium voice's model file {name} does not match its pinned SHA-256."
+    return None
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--download"]:
-        print(model_path(download=True))
+        folder = model_path(download=True)
+        if problem := model_problem(folder, drop=True):
+            sys.exit(problem + " It was deleted, so running the install again fetches it fresh.")
+        print(folder)
     else:
         ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

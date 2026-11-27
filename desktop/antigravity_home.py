@@ -4,7 +4,7 @@ Rook starts agy with --gemini-dir set to HOME. Antigravity then reads its person
 HOME/config, and the owner's own ~/.gemini stays untouched. Nothing private is copied here: the owner's files are linked
 or named by path.
 
-  config/plugins/rook/  skills/, rendered for Antigravity. The skills keep their names, such as rook:delegate.
+  config/plugins/rook/  skills/, rendered for Antigravity. They go by bare name, such as delegate, as agy lists them.
   config/AGENTS.md      a copy of the owner's global instructions, ~/.agents/AGENTS.md. A copy, so agy cannot change them.
   config/skills.json    Rook's own skills in ~/.config/rook/skills, and the active plugins' allowed host skills.
   config/hooks.json     `guard` below: Rook's denied tools and commands, then DCG on every run_command call.
@@ -189,7 +189,7 @@ T3_EAGER = ("t3_thread_send", "t3_thread_launch", "t3_thread_list", "t3_thread_r
 T3_QUEUE_ACTIONS = ("list", "read")
 # Rook's own tools that agy always declares to the model up front: the owner uses diagrams daily, and the wow skill calls
 # its tools by name. check() compares them with the @mcp.tool functions in each server's source.
-EAGER_TOOLS = {"render": ("show_scene", "show_step", "clear_scene"),
+EAGER_TOOLS = {"render": ("show_diagram", "show_scene", "show_step", "clear_scene"),
                **{name: tools for name, (_, tools) in _ACTIVE_OPTIONAL_SERVERS.items()}}
 SERVER_SOURCES = {"render": "desktop/render_tool.py",
                   **{name: src for name, (src, _) in _ACTIVE_OPTIONAL_SERVERS.items()}}
@@ -400,6 +400,7 @@ def denied_command(command):
 
 
 SYSTEMCTL_READS = {"status", "show", "cat", "is-active", "is-enabled", "is-failed", "list-units", "list-unit-files"}
+LAUNCHCTL_READS = {"print", "print-cache", "print-disabled", "list", "blame"}
 OPERATORS = (";", "&&", "||", "|", "&", "(", ")")
 
 
@@ -422,13 +423,17 @@ def commands(command):
 
 
 def stops_rook(command):
-    """Whether a command stops or restarts Rook through systemctl, kill or relay's module, or merges a pull request
+    """Whether a command stops or restarts Rook through systemctl, launchctl, kill or relay's module, or merges a pull request
     through GitHub's API. Judged on program words, never on quoted text."""
     for name, args in commands(command):
         verb = next((arg for arg in args if not arg.startswith("-")), "")
         rook = any("rook" in arg.lower() for arg in args)
         hidden = any("$" in arg or "`" in arg for arg in args) or name == "kill" and not args  # A pid from elsewhere.
         if (name == "systemctl" and rook and verb not in SYSTEMCTL_READS
+                # Rook's job, its <label>.daily restart, or a glob with rook in it that the shell may expand to them.
+                or name == "launchctl" and verb not in LAUNCHCTL_READS
+                and any(desk.LAUNCHD_LABEL.lower() in arg.lower()
+                        or "rook" in arg.lower() and any(glob in arg for glob in "*?[") for arg in args)
                 or name in ("kill", "pkill", "killall") and (rook or hidden and "rook" in command.lower())
                 or name == "kill" and "-1" in args  # Every process the owner owns, Rook among them.
                 or name in ("pkill", "killall") and any("python" in arg for arg in args)  # Rook runs as python.
@@ -576,7 +581,7 @@ def skills(target, wow=False):
                     .replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT / "plugin")))
             if rel.name == "SKILL.md":  # Claude Code's permission syntax. It means nothing to Antigravity.
                 text = re.sub(r"(?m)^allowed-tools:.*\n", "", text, count=1)
-            text = owned(edit(text, edits.pop(str(rel), []), f"{source.relative_to(ROOT)}/{rel}"))
+            text = harness.bare_skill_names(owned(edit(text, edits.pop(str(rel), []), f"{source.relative_to(ROOT)}/{rel}")))
             if left := [name for name in CLAUDE_ONLY if name in text]:
                 raise ValueError(f"{source.relative_to(ROOT)}/{rel} still names {left}. Add an entry to SKILLS in {__file__}.")
             out.write_text(text)
@@ -808,12 +813,15 @@ def check():
     with tempfile.TemporaryDirectory() as scratch:
         plain = Path(scratch) / "plain"
         skills(plain, wow=False)
-        for name in ("dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show"):
+        for name in ("about", "dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show"):
             assert (plain / name / "SKILL.md").read_text().startswith(f"---\nname: {name}\n")
+        # agy lists Rook's skills by bare name, so the rendered skills name each other that way too.
+        left = [str(f) for f in plain.rglob("*.md") if re.search(r"\brook:[a-z]", f.read_text())]
+        assert not left and "the delegate skill" in (plain / "settings/SKILL.md").read_text(), left
         assert not (plain / "wow").exists()
         with_wow = Path(scratch) / "wow"
         skills(with_wow, wow=True)
-        expected = ("dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show") + (("wow",) if has_wow_skill else ())
+        expected = ("about", "dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show") + (("wow",) if has_wow_skill else ())
         for name in expected:
             assert (with_wow / name / "SKILL.md").read_text().startswith(f"---\nname: {name}\n")
         if not has_wow_skill:
@@ -1088,12 +1096,20 @@ def check():
         shutil.rmtree(HOME)
         HOME = real_home
     # Review 2, fixes 4 and 5: the stop and merge checks read program words and the systemctl verb, not quoted text.
-    for command in ("systemctl --user restart rook --show-transaction", "systemctl --user stop rook --no-pager -l status",
+    for command in ("systemctl --user restart rook", "/usr/bin/python relay.py restart", "relay.py restart",
+                    "systemctl --user restart rook --show-transaction", "systemctl --user stop rook --no-pager -l status",
                     "kill $(pgrep -f rook.py)", "pgrep -f rook.py | xargs kill", "sudo systemctl restart rook",
                     "cd desktop && python3 -m relay reload overlay", "bash -c 'pkill -f rook'",
                     "python3 -B -m relay daily-restart", "python3 -mrelay restart", "python3 -u -m relay restart",
                     "gh api graphql -f query='mutation{mergePullRequest}'", "kill -9 -1", "pkill -f python3",
-                    "killall python"):
+                    "killall python", f"launchctl bootout gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl kickstart -k gui/501/{desk.LAUNCHD_LABEL}", f"launchctl kill TERM gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl unload ~/Library/LaunchAgents/{desk.LAUNCHD_LABEL}.plist", f"launchctl stop {desk.LAUNCHD_LABEL}",
+                    f"launchctl bootstrap gui/501 ~/Library/LaunchAgents/{desk.LAUNCHD_LABEL}.daily.plist",
+                    f"launchctl remove {desk.LAUNCHD_LABEL}", f"launchctl disable gui/501/{desk.LAUNCHD_LABEL}",
+                    f"launchctl kickstart -k gui/501/{desk.LAUNCHD_LABEL}.daily",
+                    "launchctl unload ~/Library/LaunchAgents/com.rook.*.plist", "launchctl bootout gui/501/com.rook.compan?on",
+                    "launchctl unload ~/Library/LaunchAgents/[c]om.rook.companion.plist"):
         assert denied_command(command), command
     for command in ("/usr/bin/python relay.py note 'Done; kill the rook overlay test later'",  # Review 3, fix 3.
                     "/usr/bin/python relay.py tell 'Build passed; systemctl rook restart is next'",
@@ -1101,7 +1117,12 @@ def check():
                     "/usr/bin/python relay.py note 'the relay restart on nimbus failed'",
                     "/usr/bin/python relay.py tell 'Rook will kill the rook timer'", "rg -n 'kill' ~/Code/rook/desktop",
                     "git log --grep 'kill rook'", "grep -rn mergePullRequest ~/Code", "systemctl --user status rook",
-                    "t3 thread start /x - --json --title 'Kill switch for rook' <<'EOF'\nx\nEOF"):
+                    "launchctl print gui/501/com.rook.companion", "launchctl list com.rook.companion",
+                    "launchctl blame gui/501/com.rook.companion", "launchctl print-disabled gui/501",
+                    "launchctl kickstart -k gui/501/com.example.other", "launchctl kickstart gui/501/com.rook.agent-dream",
+                    "launchctl bootout gui/501/com.rook.medium-voice",
+                    "t3 thread start /x - --json --title 'Kill switch for rook' <<'EOF'\nx\nEOF",
+                    "/usr/bin/python relay.py update --install"):  # The one update Rook runs when its owner asks.
         assert not denied_command(command), command
     # Review 2, fix 1: T3 tools outside Rook's list are refused in both of agy's forms, as are t3_queue's writes.
     for name, args, decision in (("mcp_t3_create_threads", {}, "deny"), ("mcp_t3_t3_thread_send_attachments", {}, "deny"),

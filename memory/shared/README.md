@@ -11,7 +11,7 @@ Sources behind this design:
 - Each project keeps flat Markdown notes and a `MEMORY.md` index in `<project>/.agent-memory/` (ignored globally by Git).
 - For a multi-repo project, list its umbrella folder in `PROJECT_ROOTS` inside `~/.agents/memory.conf` by hand.
 - `hooks/memory-context.sh` runs standalone at session start and prints the memory folder and index.
-- `bin/dream` runs nightly via `agent-dream.timer` (`Persistent=true`, `Nice=10`), skips idle projects and empty nights, and caps model runs per night at `DREAM_MAX_RUNS` in `memory.conf` (default 12).
+- `bin/dream` runs nightly via `agent-dream.timer` (`Persistent=true`, `Nice=10`), skips idle projects and empty nights, and runs uncapped by default (with an optional `DREAM_MAX_RUNS` cap in `memory.conf`).
 - `bin/remember` files a single note using `MEMORY_MODEL`; `bin/memory-dir` resolves a folder's memory path.
 
 ## Manage from Rook

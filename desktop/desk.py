@@ -191,13 +191,13 @@ class _Linux:
         import time
         return time.clock_gettime(time.CLOCK_BOOTTIME)
 
-    def process_cwd(self, pid):
+    def process_cwd(self, pid, fallback=None):
         if pid:
             try:
                 return os.readlink(f"/proc/{pid}/cwd")
             except OSError:
                 pass
-        return os.getcwd()
+        return fallback or os.getcwd()
 
     def hyprland_session(self, timeout=0.2):
         """Whether a Hyprland session is reachable now on its command socket within one total deadline."""
@@ -497,6 +497,70 @@ class _Linux:
             })
         return streams
 
+    sound_settings = "your sound settings"  # Where a person picks the microphone, in one plain phrase.
+
+    # relay.py verify's checks of this system, one function each. A Mac returns None from any it does not check yet,
+    # and verify then says so, rather than passing it.
+    def service_health(self, timeout=5.0):
+        """Rook's login service now: {"active": bool, "restarts": int or None}, or None when there is no unit."""
+        import subprocess
+        try:
+            done = subprocess.run(["systemctl", "--user", "show", "rook.service", "-p", "LoadState", "-p",
+                                   "ActiveState", "-p", "NRestarts"], stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        fields = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
+        if done.returncode or fields.get("LoadState") != "loaded":
+            return None
+        restarts = fields.get("NRestarts", "")
+        return {"active": fields.get("ActiveState") == "active", "restarts": int(restarts) if restarts.isdigit() else None}
+
+    def talk_key_access(self):
+        """Whether this process may read the keyboards for the talk key: the input group. Run inside Rook, it is
+        Rook's own groups, which change only at a new login."""
+        import grp
+        names = set()
+        for gid in os.getgroups():
+            try:
+                names.add(grp.getgrgid(gid).gr_name)
+            except KeyError:
+                pass
+        return "input" in names
+
+    def mic_access(self):
+        """Whether this process may record. Linux has no microphone permission."""
+        return True
+
+    def audio_device(self, direction="input", timeout=2.0):
+        """The default input (or output) device, as {"name": ..., "kind": ...}. kind is real, virtual (a monitor of an
+        output, or the sound server's own dummy device: nothing a person speaks into or hears), none (no such device
+        at all), or unknown (cannot tell, such as a noise filter or effects node in front of real hardware). Only a
+        device positively known to be a loopback is virtual, so a real setup never reads as broken."""
+        import json
+        import subprocess
+        kind = "source" if direction == "input" else "sink"
+        try:
+            default = subprocess.run(["pactl", f"get-default-{kind}"], stdin=subprocess.DEVNULL, capture_output=True,
+                                     text=True, timeout=timeout).stdout.strip()
+            listed = subprocess.run(["pactl", "-f", "json", "list", f"{kind}s"], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=timeout)
+            rows = json.loads(listed.stdout) if listed.returncode == 0 and listed.stdout.strip() else None
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return {"name": None, "kind": "unknown"}
+        if not isinstance(rows, list):
+            return {"name": None, "kind": "unknown"}
+        row = next((r for r in rows if isinstance(r, dict) and r.get("name") == default), None)
+        if row is None:
+            real = [r for r in rows if isinstance(r, dict)
+                    and (r.get("properties") or {}).get("device.class") != "monitor"]
+            return {"name": None, "kind": "none" if not real else "unknown"}
+        props = row.get("properties") or {}
+        name = row.get("description") or default
+        if props.get("device.class") == "monitor" or default in ("auto_null", "auto_null.monitor"):
+            return {"name": name, "kind": "virtual"}
+        return {"name": name, "kind": "real" if props.get("device.api") else "unknown", "muted": row.get("mute") is True}
+
     def microphone_busy(self, timeout=0.4):
         import json
         import subprocess
@@ -677,7 +741,7 @@ class _Mac(_Linux):
         except OSError:
             return time.monotonic()
 
-    def process_cwd(self, pid):
+    def process_cwd(self, pid, fallback=None):
         import subprocess
         if pid:
             try:
@@ -691,7 +755,7 @@ class _Mac(_Linux):
                             return line[1:]
             except (OSError, subprocess.TimeoutExpired, ValueError):
                 pass
-        return os.getcwd()
+        return fallback or os.getcwd()
 
     def desktop_capabilities(self, timeout=1.0):
         return {"hyprland": False, "overlay": False, "capture": False, "grim": False}
@@ -725,6 +789,63 @@ class _Mac(_Linux):
 
     def microphone_busy(self, timeout=0.4):
         return []
+
+    sound_settings = "System Settings, Sound, Input"
+
+    def service_health(self, timeout=5.0):
+        """launchd's job state. launchd keeps no restart count that verify reads, so restarts is None."""
+        return {"active": self.service_state("rook.service") == "active", "restarts": None}
+
+    def helper_access(self, timeout=10.0):
+        """Rook.app's own permissions, from RookHelper --check-access, as a dict, or None when it cannot tell. It is
+        true only inside Rook, whose process belongs to Rook.app (the launcher sets ROOK_MAC_HELPER): from another
+        terminal, macOS would answer for that terminal. The check never prompts. It does list Rook, switched off,
+        under Accessibility (AXIsProcessTrusted), which is harmless and expected."""
+        import json
+        import subprocess
+        helper = os.environ.get("ROOK_MAC_HELPER")
+        if not helper:
+            return None
+        try:
+            done = subprocess.run([helper, "--check-access"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=timeout)
+            state = json.loads(done.stdout.strip().splitlines()[-1])
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def talk_key_access(self):
+        """Whether Input Monitoring is in force for this build of Rook.app. A switch left on for an older build that was
+        signed differently reads false here, which is the truth: the key stays deaf."""
+        state = self.helper_access()
+        return None if state is None else state.get("input") is True
+
+    def mic_access(self):
+        """Whether Rook.app may record."""
+        state = self.helper_access()
+        return None if state is None else state.get("microphone") == "allowed"
+
+    def audio_device(self, direction="input", timeout=10.0):
+        """The default input (or output) device, from system_profiler: virtual for a CoreAudio virtual device such as
+        a loopback driver, real for built-in, USB, Bluetooth and other hardware, unknown for an aggregate."""
+        import json
+        import subprocess
+        try:
+            done = subprocess.run(["system_profiler", "SPAudioDataType", "-json"], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=timeout)
+            groups = json.loads(done.stdout).get("SPAudioDataType") or []
+        except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+            return {"name": None, "kind": "unknown"}
+        flag, count = (("coreaudio_default_audio_input_device", "coreaudio_device_input") if direction == "input" else
+                       ("coreaudio_default_audio_output_device", "coreaudio_device_output"))
+        devices = [d for g in groups if isinstance(g, dict) for d in g.get("_items") or () if isinstance(d, dict)]
+        device = next((d for d in devices if d.get(flag) == "spaudio_yes"), None)
+        if device is None:
+            return {"name": None, "kind": "none" if not any(d.get(count) for d in devices) else "unknown"}
+        transport = str(device.get("coreaudio_device_transport") or "")
+        kind = ("virtual" if transport.endswith("_virtual") else "unknown" if transport.endswith("_aggregate") or not transport
+                else "real")
+        return {"name": device.get("_name"), "kind": kind}
 
     def set_sink_input_volume(self, index, values, timeout=0.5):
         return False, NOT_YET
@@ -1264,8 +1385,9 @@ def uptime_seconds():
     return PLATFORM.uptime_seconds()
 
 
-def process_cwd(pid):
-    return PLATFORM.process_cwd(pid)
+def process_cwd(pid, fallback=None):
+    """The folder a process runs in, else fallback, else Rook's own folder."""
+    return PLATFORM.process_cwd(pid, fallback)
 
 
 def desktop_capabilities(timeout=1.0):
@@ -1318,6 +1440,32 @@ def microphone_busy(timeout=0.4):
     return PLATFORM.microphone_busy(timeout=timeout)
 
 
+def audio_device(direction="input"):
+    """The default input or output device: {"name": str or None, "kind": "real" | "virtual" | "none" | "unknown"}."""
+    return PLATFORM.audio_device(direction)
+
+
+def input_problem(device=None):
+    """Why Rook cannot hear the person, as the one sentence Rook says, or None when the input is real or cannot be
+    told. device is an audio_device("input") result, looked up when not given. The turn path and relay.py verify share
+    these words."""
+    device = device or audio_device("input")
+    if device["kind"] == "none":
+        return f"I can't hear you: this computer has no microphone. Plug one in, or pick it in {PLATFORM.sound_settings}."
+    if device["kind"] == "virtual":
+        return (f"I can't hear you: the only input here is {device['name']}, which is not a microphone. Plug one in, "
+                f"or pick it in {PLATFORM.sound_settings}.")
+    return None
+
+
+def silence_sentence(device=None):
+    """What Rook says after a recording of pure digital silence: a dead or virtual input. device as in input_problem."""
+    device = device or audio_device("input")
+    heard = f"from {device['name']}" if device.get("name") else "from the microphone"
+    return (f"I heard only silence {heard}. If that is not your microphone, pick a real one in "
+            f"{PLATFORM.sound_settings}, then try again.")
+
+
 def set_sink_input_volume(index, values, timeout=0.5):
     return PLATFORM.set_sink_input_volume(index, values, timeout=timeout)
 
@@ -1345,6 +1493,22 @@ def service_restart(try_only=False):
 def remote_size_command(path):
     """Portable command to print a file's byte size (following symlinks) on Linux or macOS."""
     return ["sh", "-c", 'stat -L -c %s -- "$1" 2>/dev/null || stat -L -f %z -- "$1"', "sh", path]
+
+
+def mac_app():
+    """Rook.app as Rook's launchd agent runs it: ProgramArguments[0] of its plist names the app's RookHelper, wherever
+    the installer put the app (/Applications or ~/Applications). Without that plist, ~/Applications/Rook.app."""
+    import plistlib
+    label = os.environ.get("ROOK_LAUNCHD_LABEL") or "com.rook.companion"
+    helper_tail = "/Contents/MacOS/RookHelper"
+    try:
+        with open(Path.home() / "Library/LaunchAgents" / f"{label}.plist", "rb") as plist:
+            program = plistlib.load(plist)["ProgramArguments"][0]
+        if isinstance(program, str) and program.endswith(helper_tail):
+            return Path(program[:-len(helper_tail)])
+    except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException):
+        pass
+    return Path.home() / "Applications/Rook.app"
 
 
 def exit_process(code):
@@ -1768,7 +1932,93 @@ def _check():
                 server.close()
             for key, value in saved.items():
                 os.environ.pop(key, None) if value is None else os.environ.__setitem__(key, value)
+    _check_setup_helpers()
     print("Desk platform seam: all checks passed.")
+
+
+def _check_setup_helpers():
+    """audio_device, input_problem, silence_sentence and the agents' signin_status, against stand-in pactl,
+    system_profiler, claude and codex programs in a scratch folder: never the real ones, never a real credential."""
+    import json
+    import stat
+    import tempfile
+    import harness
+    import codex_harness
+
+    def stand_in(folder, name, out, code=0):
+        script = Path(folder) / name
+        data = Path(folder) / f"{name}.out"
+        data.write_text(out)
+        script.write_text(f"#!/bin/sh\ncat '{data}'\nexit {code}\n")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    saved_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory(prefix="dk-") as folder:
+        os.environ["PATH"] = f"{folder}:/usr/bin:/bin"
+        try:
+            linux = _Linux()
+
+            def pactl(default, rows):
+                script = Path(folder) / "pactl"
+                (Path(folder) / "default").write_text(default + "\n")
+                (Path(folder) / "rows").write_text(json.dumps(rows))
+                script.write_text(f"#!/bin/sh\ncase \"$1\" in get-default-*) cat '{folder}/default' ;; "
+                                  f"*) cat '{folder}/rows' ;; esac\n")
+                script.chmod(0o755)
+                return linux.audio_device("input")
+            mic = {"name": "alsa_input.mic", "description": "USB Mic", "properties": {"device.api": "alsa",
+                                                                                        "device.class": "sound"}}
+            monitor = {"name": "out.monitor", "description": "Monitor of Speakers",
+                       "properties": {"device.api": "alsa", "device.class": "monitor"}}
+            fil = {"name": "mono_mic", "description": "Mono Mic", "properties": {"device.class": "filter"}}
+            assert pactl("alsa_input.mic", [mic, monitor]) == {"name": "USB Mic", "kind": "real", "muted": False}
+            assert pactl("alsa_input.mic", [{**mic, "mute": True}])["muted"] is True
+            assert pactl("out.monitor", [mic, monitor]) == {"name": "Monitor of Speakers", "kind": "virtual"}
+            assert pactl("mono_mic", [fil, mic])["kind"] == "unknown"  # A filter in front of a real microphone.
+            assert pactl("", [monitor]) == {"name": None, "kind": "none"}
+            effects = {"name": "denoise", "description": "Noise Canceling Source",
+                       "properties": {"factory.name": "support.null-audio-sink", "media.class": "Audio/Source/Virtual"}}
+            assert pactl("denoise", [effects, mic])["kind"] == "unknown"  # In front of a real microphone: say nothing.
+            dummy = {"name": "auto_null", "description": "Dummy Output", "properties": {"factory.name": "support.null-audio-sink"}}
+            assert pactl("auto_null", [dummy]) == {"name": "Dummy Output", "kind": "virtual"}
+            mac = _Mac()
+            blackhole = {"_name": "BlackHole 2ch", "coreaudio_default_audio_input_device": "spaudio_yes",
+                         "coreaudio_default_audio_output_device": "spaudio_yes", "coreaudio_device_input": 2,
+                         "coreaudio_device_output": 2, "coreaudio_device_transport": "coreaudio_device_type_virtual"}
+            speakers = {"_name": "Mac mini Speakers", "coreaudio_device_output": 2,
+                        "coreaudio_device_transport": "coreaudio_device_type_builtin"}
+            stand_in(folder, "system_profiler", json.dumps({"SPAudioDataType": [{"_items": [blackhole, speakers]}]}))
+            assert mac.audio_device("input") == {"name": "BlackHole 2ch", "kind": "virtual"}
+            assert mac.audio_device("output") == {"name": "BlackHole 2ch", "kind": "virtual"}
+            builtin = {**blackhole, "_name": "MacBook Pro Microphone",
+                       "coreaudio_device_transport": "coreaudio_device_type_builtin"}
+            stand_in(folder, "system_profiler", json.dumps({"SPAudioDataType": [{"_items": [builtin]}]}))
+            assert mac.audio_device("input") == {"name": "MacBook Pro Microphone", "kind": "real"}
+            assert "BlackHole 2ch, which is not a microphone" in input_problem({"name": "BlackHole 2ch", "kind": "virtual"})
+            assert "no microphone" in input_problem({"name": None, "kind": "none"})
+            assert input_problem({"name": "USB Mic", "kind": "real"}) is None
+            assert input_problem({"name": None, "kind": "unknown"}) is None
+            assert silence_sentence({"name": "USB Mic", "kind": "real"}).startswith("I heard only silence from USB Mic.")
+            claude, codex = harness.Claude(), codex_harness.Codex()
+            assert claude.signin_status() == ("unknown", None) and codex.signin_status() == ("unknown", None)  # None here.
+            stand_in(folder, "claude", json.dumps({"loggedIn": False}), 1)
+            state, said = claude.signin_status()
+            assert state == "out" and said == (f"Claude Code is not signed in. Run {folder}/claude auth login in a "
+                                               "terminal on this computer, then ask again."), said
+            stand_in(folder, "claude", json.dumps({"loggedIn": True, "loginExpiresAt": "2001-01-01T00:00:00.000Z"}))
+            assert claude.signin_status()[0] == "out" and "sign-in has ended" in claude.signin_problem()
+            stand_in(folder, "claude", json.dumps({"loggedIn": True, "loginExpiresAt": "2999-01-01T00:00:00.000Z"}))
+            assert claude.signin_status() == ("in", None) and claude.signin_problem() is None
+            stand_in(folder, "claude", "error: unknown command 'status'", 1)  # An older Claude Code: no answer.
+            assert claude.signin_status() == ("unknown", None)
+            stand_in(folder, "codex", "Logged in using ChatGPT")
+            assert codex.signin_status() == ("in", None)
+            stand_in(folder, "codex", "Not logged in", 1)
+            assert codex.signin_status()[0] == "out" and f"{folder}/codex login" in codex.signin_problem()
+            stand_in(folder, "codex", "config error", 1)
+            assert codex.signin_status() == ("unknown", None)
+        finally:
+            os.environ["PATH"] = saved_path
 
 
 if __name__ == "__main__":

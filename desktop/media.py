@@ -464,6 +464,14 @@ def is_urgent(event, text="", extra=()):
     return False
 
 
+def is_blocked_agent(event, text="", extra=()):
+    """Whether an unprompted turn says an agent waits on the owner: the watcher's news of a thread's open question or a
+    blocked Herdr agent, or a tell whose report needs a decision. Its source says so with blocked. It goes ahead of
+    routine news, and waits for a playing video without pausing it."""
+    source = (extra[2] if len(extra) > 2 else None) if event == "watch" else (extra[0] if extra else None)
+    return event in ("watch", "inbox") and isinstance(source, dict) and bool(source.get("blocked"))
+
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 TITLE_LIMIT = 120

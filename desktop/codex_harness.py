@@ -41,7 +41,7 @@ import time
 import tomllib
 
 import desk
-from harness import Harness, plugin_user_skills, rook_skills_dir, skill_sources
+from harness import Harness, bare_skill_names, plugin_user_skills, rook_skills_dir, skill_sources
 import plugin_loader
 import settings as rook_settings
 
@@ -293,7 +293,7 @@ def render_skills(target, source=None, wow=False, table=None, banned=CLAUDE_ONLY
                     .replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT / "plugin")))
             if rel.name == "SKILL.md":  # Claude Code frontmatter; Codex ignores/doesn't enforce allowed-tools.
                 text = re.sub(r"(?m)^allowed-tools:.*\n", "", text, count=1)
-            text = edit(text, edits.pop(str(rel), []), f"{folder.name}/{rel}")
+            text = bare_skill_names(edit(text, edits.pop(str(rel), []), f"{folder.name}/{rel}"))  # As Codex and Pi list them.
             if left := [name for name in banned if name in text]:
                 raise ValueError(f"{folder.name}/{rel} still names {left}. Add an entry to SKILLS in {__file__}.")
             out.write_text(rook_settings.render(text))
@@ -622,6 +622,20 @@ class Codex(Harness):
         self.process, self.heard = None, 0
         self.home = None
 
+    def signin_status(self, env=None):
+        """codex login status: exit 0 is signed in; a failure that says "not logged in" is signed out; anything
+        else cannot be told. The output is dropped."""
+        from harness import signin_sentence, status_run
+        program = shutil.which("codex", path=(env if env is not None else os.environ).get("PATH"))
+        ran = program and status_run([program, "login", "status"], env=env)
+        if not ran:
+            return "unknown", None
+        if ran[0] == 0:
+            return "in", None
+        if re.search(r"not (logged|signed) in", ran[1], re.I):
+            return "out", signin_sentence(self.name, f"{program} login")
+        return "unknown", None
+
     def ready(self):
         """Return None when `codex` is installed, else one short sentence on why it cannot start."""
         if shutil.which("codex"):
@@ -680,9 +694,7 @@ class Codex(Harness):
         self.first_words = None
         self.setup_uuid, self.setup_done, self.stages = uuid, False, {}
         self.setup_problem = None
-        pid = getattr(process, "pid", None)  # macOS has no /proc: use the folder Rook started Codex in.
-        self.cwd = (os.readlink(f"/proc/{pid}/cwd") if pid and Path(f"/proc/{pid}").is_dir()
-                    else getattr(self, "workspace", None) or os.getcwd())
+        self.cwd = desk.process_cwd(getattr(process, "pid", None), getattr(self, "workspace", None))
         self.call("initialize", {
             "clientInfo": {"name": "rook", "title": "Rook", "version": "1"},
             "capabilities": {"experimentalApi": True},
@@ -1534,7 +1546,7 @@ def check():
 
     # 1. Text tables against live skills/, desktop/rook.py, and harness.Claude.setup.
     has_wow_skill = (ROOT / "wow/skills/wow/SKILL.md").is_file()
-    core_skills = ("dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show")
+    core_skills = ("about", "dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show")
     with tempfile.TemporaryDirectory(prefix="rook-codex-check-") as tmp:
         base = Path(tmp)
         render_skills(base / "skills", wow=False)
@@ -1542,6 +1554,9 @@ def check():
             body = (base / "skills" / name / "SKILL.md").read_text()
             assert body.startswith(f"---\nname: {name}\n"), name
             assert "allowed-tools:" not in body, name
+        # Codex and Pi list Rook's skills by bare name, so the rendered skills name each other that way too.
+        left = [str(f) for f in (base / "skills").rglob("*.md") if re.search(r"\brook:[a-z]", f.read_text())]
+        assert not left, left
         assert not (base / "skills/wow").exists()
         render_skills(base / "skills-wow", wow=True)
         for name in core_skills + (("wow",) if has_wow_skill else ()):

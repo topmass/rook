@@ -32,12 +32,24 @@ relay.py set KEY VALUE [--say TEXT]
                             With --say, Rook speaks TEXT as part of the change: a new voice says it, and a
                             new font shows it as a caption. agent, agent_model, and agent_effort only save:
                             they take effect at Rook's next start.
+relay.py pronounce list|add WORD SPELLING [--voice small|medium]|remove WORD [--voice small|medium]
+                            List, add or remove a word the voice says by another spelling, in
+                            ~/.config/rook/pronunciations.json. Captions keep the word. It applies from the next sentence.
 relay.py audition           Play two medium voices, Late-Night Architect then Velvet Wit, through the running
                             Rook. Without the medium voice it plays two small voices. It saves nothing.
 relay.py onboard --scan [--as t3|herdr|pi|none]
                             Print what onboarding detects: system, agent, memory, coding tools, machines, code
                             folders and the shared agent setup. --as prints a rehearsal stand-in for that tool.
 relay.py onboard --tour     Print the optional tour after setup: one line and one thing to try per feature.
+relay.py everystate install [--dry-run]
+                            Install Everystate, a free checker for a Rook build thread, for this user only. Every file
+                            is checked against its pinned SHA-256 first.
+relay.py verify [--json] [--only ROW[,ROW]] [--talk]
+                            Check every piece of a working first turn, for a coding agent setting Rook up: Python,
+                            models, a speech round trip, the service, the desktop, the agent's sign-in as Rook runs
+                            it, the microphone and speakers, the permissions and the talk key. Each row that fails
+                            prints its fix. --talk adds one real turn: hold the talk key and speak. It reads no
+                            credential.
 relay.py onboard [CHOICES] [--dry-run]
                             Apply the onboarding choices: one settings write, then the projects folder, the shared
                             agent setup, the shared memory, Everystate and a T3 build thread, as chosen. A record goes
@@ -152,6 +164,7 @@ relay.py restart [--timeout DURATION] [--reason TEXT]
                             first. It waits for a quiet moment and may take minutes, so run it with a long
                             shell timeout. It prints blockers at most once a minute and exits non-zero without
                             restarting after the limit (9m by default). A stopped Rook starts.
+relay.py update --check     Print the installed version and the newest one on GitHub. It changes nothing.
 relay.py update [TAG|COMMIT]
                             Update an installed Rook: fetch its source, move the checkout to the newest
                             commit or to TAG or COMMIT, run the installer again when the requirements
@@ -242,6 +255,7 @@ from settings import (
     theme_pack_in_force, theme_packs,
     valid, valid_medium_voice_url, voice_python, voices, write_settings,
 )
+import update_check
 import watch
 import work
 OWNER = settings.OWNER_TOKEN  # The owner's name, filled in when the text leaves Rook.
@@ -477,6 +491,11 @@ def settings_command(argv):
         )
         # The thread watcher reads this one from the file at each look, so the file is what is in force.
         values["thread_milestones"] = dict(zip(("value", "source"), settings.thread_milestones_in_force(saved_file)))
+        values["debug_replay"] = dict(zip(("value", "source"), settings.debug_replay_in_force(saved_file)))
+        # The daily check reads the file at each look. A developer checkout never checks.
+        check, source = update_check.mode(saved_file)
+        why = update_check.developer()
+        values["update_check"] = {"value": check, "source": f"{source}; off here, since {why}" if why else source}
         values["plugins"] = {"value": saved_file.get("plugins") or {},
                              "source": "settings file" if saved_file.get("plugins") else "not set"}
         for key in keys:
@@ -619,6 +638,31 @@ def settings_command(argv):
         utter(f"Saved {key} = {value}" + (", with that agent's default model and effort" if key == "agent" else "")
               + f". It takes effect at Rook's next start, not now. Rook never restarts itself. {OWNER_START} or the build "
               f"thread restarts it with relay.py restart, or the daily restart at 04:30 does.{note}")
+        return
+    if key == "debug_replay":  # Rook reads the file at each Shift+right-click, so nothing is applied now.
+        value = value.strip().lower()
+        old = settings.debug_replay_in_force(saved)[0]
+        if value == "previous":
+            if key not in previous:
+                leave(f"There is no previous {key} to go back to.")
+            value = previous[key]
+        if value not in settings.DEBUG_REPLAY_MODES:
+            leave(f"debug_replay must be {' or '.join(settings.DEBUG_REPLAY_MODES)}. {value} is not one of them.")
+        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
+        utter(f"Saved debug_replay = {value}. Shift and a right-click on the resting loop use it from now on.")
+        return
+    if key == "update_check":  # The daily check reads the file at each look, so nothing is applied now.
+        value = value.strip().lower()
+        old = update_check.mode(saved)[0]
+        if value == "previous":
+            if key not in previous:
+                leave(f"There is no previous {key} to go back to.")
+            value = previous[key]
+        if value not in ("on", "off"):
+            leave(f"update_check must be on or off. {value} is not one of them.")
+        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
+        utter(f"Saved update_check = {value}. " + ("Rook looks on GitHub for a newer Rook once a day, after 10:00."
+                                                    if value == "on" else "Rook no longer looks for a newer Rook."))
         return
     if key == "thread_milestones":  # The thread watcher reads the file at each look, so nothing is applied now.
         value = value.strip().lower()
@@ -785,6 +829,8 @@ def settings_command(argv):
         value = value.lower()
         if value not in SMART_TURNS:
             leave(f"smart_turn must be {' or '.join(SMART_TURNS)}. {value} is not one of them.")
+        if value != "off":
+            fetch_smart_turn_model()
     elif key == "speak_thoughts":
         value = value.lower()
         if value not in SPEAK_THOUGHTS_MODES:
@@ -999,6 +1045,59 @@ def check_settings():
     left = {where: sorted({m.group(1) for m in word.finditer(text)}) + settings.unknown_tokens(text)
             for where, text in texts.items() if word.search(text) or settings.unknown_tokens(text)}
     assert not left, left
+    # Every shipped skill is found on every agent. Antigravity, Codex and Pi show only a skill's name and description,
+    # so its triggers live in description, as quoted example phrases, within the Agent Skills limit of 1,024
+    # characters (Pi's; Claude Code cuts at 1,536), even with the longest owner name. The front matter must be strict
+    # YAML: Codex and Pi parse it as such.
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    for f in [*(root / "skills").glob("*/SKILL.md"), *(root / "wow/skills").glob("*/SKILL.md"),
+              *(root / "plugins").glob("*/skills/*/SKILL.md")]:
+        head = f.read_text().split("\n---\n", 1)[0].removeprefix("---\n")
+        if yaml:
+            front = yaml.safe_load(head)
+        else:  # Without PyYAML, a description must at least be one quoted string, which is valid YAML as JSON is.
+            front = {k: json.loads(v) if k == "description" else v for k, v in re.findall(r"(?m)^([a-z_-]+): (.*)$", head)}
+        assert isinstance(front, dict) and isinstance(front.get("description"), str), f"{f}: no description"
+        assert "when_to_use" not in front, f"{f}: put its triggers in description, the field every agent shows"
+        assert re.search(r'"[^"]{3,}"', front["description"]), f"{f}: description gives no quoted trigger phrase"
+        shown = len(settings.render(front["description"], "N" * 40, "they"))
+        assert shown <= 1024, f"{f}: description is {shown} characters, over 1,024"
+    # The about skill stays true. Each path it names exists. Each relay.py command it names is in relay.py's command
+    # table, main(). Each class, function or constant it names is defined in a file named on the same line. Each skill
+    # it names has a folder. It names no setting key, since rook:settings owns those.
+    about = (root / "skills/about/SKILL.md").read_text()
+    code = "\n".join(f.read_text() for f in (root / "desktop").glob("*.py"))
+    table = ast.get_source_segment(Path(__file__).read_text(), next(
+        n for n in ast.parse(Path(__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "main"))
+    commands = {"--help", *re.findall(r'sys\.argv\[1\] == "([a-z-]+)"', table),
+                *(w for group in re.findall(r"sys\.argv\[1\] in \(([^)]*)\)", table) for w in re.findall(r'"([a-z-]+)"', group))}
+    stale = [s for s in re.findall(r"\brook:([a-z][a-z0-9-]*)", about) if not any(
+        (d / s / "SKILL.md").is_file() for d in (root / "skills", root / "wow/skills", *root.glob("plugins/*/skills")))]
+    stale += [c for c in re.findall(r"relay\.py ([a-z-]+)", about) if c not in commands]
+    for line in about.splitlines():
+        items = re.findall(r"`([^`\s]+)`", line)
+        files = [root / i for i in items if re.fullmatch(r"desktop/\w+\.py", i)]
+        for item in items:
+            if item.startswith(("desktop/", "skills/", "plugins/", "prompts/", "themes/")):
+                ok = (root / item).exists()
+            elif item.startswith("~/"):
+                ok = "/rook" not in item or item.rstrip("/").split("/rook", 1)[1].strip("/") in (
+                    "", *re.findall(r"rook/([\w/.-]+)", code))
+            elif m := re.fullmatch(r"([A-Z]\w*)(?:\.(\w+))?", item):
+                defined = [f.read_text() for f in files if f.is_file()]
+                ok = any(re.search(rf"(?m)^(class {m[1]}\b|{m[1]} = )", src) and (
+                    m[2] is None or re.search(rf"(?m)^    (async )?def {m[2]}\(", src)) for src in defined)
+            elif re.fullmatch(r"[\w.-]+\.(json|jsonl|db|md|sock)|rook-[a-z]+|[a-z]+/", item):
+                ok = item.rstrip("/") in code
+            else:
+                ok = True  # A command line or a pattern such as rook:<name>.
+            assert item not in settings.KNOWN_SETTINGS_KEYS, f"skills/about names the setting {item}: name rook:settings instead"
+            if not ok:
+                stale.append(item)
+    assert not stale, f"skills/about names what no longer exists: {stale}"
     assert points_to_engine("voice_pace", 100) == -0.5
     assert points_to_engine("voice_pace", 1) == 0.49
     assert points_to_engine("voice_volume", 0) == 0.0
@@ -1030,7 +1129,7 @@ def check_settings():
             env = {k: v for k, v in os.environ.items() if k not in ("T3CODE_THREAD_ID", "ROOK_MEDIUM_VOICE_URL")}
             env.update(XDG_CONFIG_HOME=str(cfg_home), XDG_RUNTIME_DIR=str(rt_dir),
                        XDG_STATE_HOME=str(base / "state"), XDG_DATA_HOME=str(base / "data"),
-                       XDG_CACHE_HOME=str(base / "cache"), **extra)
+                       XDG_CACHE_HOME=str(base / "cache"), ROOK_NO_MODEL_DOWNLOAD="1", **extra)
             if med_url is not None:
                 env["ROOK_MEDIUM_VOICE_URL"] = med_url  # Never nimbus-pc.
             return subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=env)
@@ -1964,7 +2063,7 @@ def pi_command(argv):
         print(f"Pi session {sid[:8]}, {name or 'untitled'}, in {herdr.short_path(cwd)}.")
         for role, text in messages[-count:]:
             text = " ".join(text.split())
-            print(f"{'User' if role == 'user' else 'Pi'}: {text if len(text) <= 600 else text[:600] + '...'}")
+            print(f"{'User' if role == 'user' else 'Pi'}: {text if len(text) <= settings.READBACK_LIMIT else text[:settings.READBACK_LIMIT] + '...'}")
         return
     if verb == "t3-login" and not args:
         # Pi's sign-in belongs to the server's name and address, so a short-lived t3 entry in Pi's own file carries it.
@@ -2484,6 +2583,57 @@ def work_command(argv):
         print(work.line(entry, now))
 
 
+SMART_TURN_FETCH_SECONDS = 120  # The most the switch-on download may take.
+
+
+def fetch_smart_turn_model():
+    """Fetch and check Smart Turn's model now, as it is switched on, so no live turn waits for a download. A failed
+    download leaves Smart Turn off. ROOK_NO_MODEL_DOWNLOAD=1 (the self-checks) fetches nothing."""
+    if os.environ.get("ROOK_NO_MODEL_DOWNLOAD") == "1":
+        return
+    import contextlib
+    import threading
+    import turn_end
+    path = turn_end.default_model_path()
+    own = bool(os.environ.get(turn_end.MODEL_ENV_VAR, "").strip())  # The person's own model path: never deleted.
+    if path.is_file() and not own:
+        if path.stat().st_size == turn_end.MODEL_SIZE_BYTES and turn_end._sha256_file(path) == turn_end.MODEL_SHA256:
+            return
+        path.unlink()  # The wrong size or checksum can never pass its check, so Rook's own copy is fetched again.
+    elif path.is_file():
+        try:
+            turn_end.ensure_model(path)
+        except ValueError as error:
+            leave(f"Smart Turn stays off: {error} That path comes from {turn_end.MODEL_ENV_VAR}, so Rook leaves the file "
+                  "as it is.")
+        return
+    print(f"Fetching Smart Turn's model (about {round(turn_end.MODEL_SIZE_BYTES / 1e6)} MB) and checking it...", flush=True)
+    started = time.time()
+    outcome = {}
+
+    def fetch():
+        try:
+            turn_end.ensure_model(path)
+            outcome["ok"] = True
+        except Exception as error:  # noqa: BLE001 - any failure leaves Smart Turn off, with its reason.
+            outcome["error"] = error
+
+    worker = threading.Thread(target=fetch, daemon=True, name="smart-turn-fetch")
+    worker.start()
+    worker.join(SMART_TURN_FETCH_SECONDS)  # The whole download, not only each read.
+    if worker.is_alive():
+        for part in path.parent.glob(f".{path.name}.*.tmp"):  # This run's unfinished download, by its start time.
+            with contextlib.suppress(OSError):
+                if part.stat().st_mtime >= started - 1:
+                    part.unlink()
+        leave(f"Smart Turn stays off: its model did not finish downloading in {SMART_TURN_FETCH_SECONDS // 60} "
+              "minutes. Try again on a faster connection.")
+    if "error" in outcome:
+        leave(f"Smart Turn stays off: its model did not download ({outcome['error']}). Try again when this computer is "
+              "online.")
+    print("Smart Turn's model is ready.")
+
+
 def ask_command(argv):
     flags = [arg for arg in argv[1:] if arg in ("--no-image", "--test")]
     args = [arg for arg in argv[1:] if arg not in flags]
@@ -2986,6 +3136,53 @@ WL_COPY = "/usr/bin/wl-copy"
 WL_PASTE = "/usr/bin/wl-paste"
 CLIP_MAX = 2000
 CLIP_WAIT = 1.0
+
+
+def pronounce_command(argv):
+    """List, add or remove an entry of the pronunciations file. Other keys in the file are kept as they are."""
+    import speech
+    usage = "Usage: relay.py pronounce list|add WORD SPELLING [--voice small|medium]|remove WORD [--voice small|medium]"
+    path, argv, group = speech.PRONUNCIATIONS, list(argv), "words"
+    if "--voice" in argv:
+        at = argv.index("--voice")
+        group = (argv[at + 1:at + 2] or [""])[0]
+        del argv[at:at + 2]
+        if group not in ("small", "medium"):
+            sys.exit("--voice takes small or medium.")
+    if argv == ["list"]:
+        data = speech.read_pronunciations(path)
+        rows = [f'"{w}" is said like "{s}"' + ("" if g == "words" else f" on the {g} voice")
+                for g in ("words", "small", "medium") if group in ("words", g) for w, s in sorted(data.get(g, {}).items())]
+        print("\n".join(rows) or "No pronunciations yet.")
+        return
+    if not (argv[:1] == ["add"] and len(argv) == 3 or argv[:1] == ["remove"] and len(argv) == 2):
+        sys.exit(usage)
+    word = argv[1].strip()
+    if not word or "\n" in word or argv[0] == "add" and (not argv[2].strip() or "\n" in argv[2]):
+        sys.exit("Give a word and a spelling, each on one line.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError) as error:
+        sys.exit(f"{path} is not valid JSON, so nothing changed. Fix or delete it first: {error}")
+    if not isinstance(data, dict) or not all(isinstance(data.get(g, {}), dict) for g in ("words", "small", "medium")):
+        sys.exit(f"{path} is not a pronunciations file, so nothing changed. Fix or delete it first.")
+    on = "" if group == "words" else f" on the {group} voice"
+    if argv[0] == "add":
+        data.setdefault(group, {})[word] = argv[2].strip()
+        told = f'Rook now says "{word}" like "{argv[2].strip()}"{on}. Captions keep "{word}".'
+    else:
+        groups = [group] if group != "words" else ["words", "small", "medium"]
+        gone = [(g, w) for g in groups for w in list(data.get(g, {})) if w.lower() == word.lower()]
+        if not gone:
+            sys.exit(f'No pronunciation of "{word}"{on} to remove.')
+        for g, w in gone:
+            del data[g][w]
+        told = f'Rook says "{word}" as written again{on}.'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scratch = path.with_name(path.name + ".tmp")
+    scratch.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(scratch, path)
+    print(told + " It applies from the next sentence.")
 
 
 def clip_command(argv):
@@ -3886,7 +4083,7 @@ def mac_access_command(argv):
     if verb == "ask" and grant == "automation":
         print("macOS asks about each app the first time Rook controls it. Nothing to ask now.")
         return
-    helper = os.environ.get("ROOK_MAC_HELPER") or str(Path.home() / "Applications/Rook.app/Contents/MacOS/RookHelper")
+    helper = os.environ.get("ROOK_MAC_HELPER") or str(desk.mac_app() / "Contents/MacOS/RookHelper")
 
     def access(ask=None):
         try:
@@ -3918,11 +4115,31 @@ def mac_access_command(argv):
 def update_command(argv):
     """relay.py update [TAG|COMMIT]: fetch Rook's source, move this install's checkout to the new commit, run
     install/install.sh again when the requirements changed, and restart Rook through the idle restart grant.
-    It updates only a checkout that install/install.sh made, with no local changes."""
+    It updates only a checkout that install/install.sh made, with no local changes.
+
+    relay.py update --install is the one form Rook's agent may run, when the owner asks: it updates to the public
+    main branch, only on a checkout that tracks production, then leaves a detached wait for the restart grant, so
+    Rook restarts once this turn has ended and reports the new version. A failure exits before any restart."""
+    install = argv == ["--install"]
+    if install:
+        if why := update_check.developer():
+            sys.exit(f"This is a developer checkout, since {why}, so Rook installs no update here. Update it with git.")
+        argv = ["main"]
+    if argv == ["--check"]:  # Read-only: it never moves the checkout.
+        old, new = update_check.installed(), update_check.latest()
+        print(f"Installed: {old[:7] if old else 'unknown'}")
+        if not new:
+            sys.exit(f"Latest: unknown. Rook could not reach {update_check.PUBLIC}.")
+        print(f"Latest on GitHub: {new[:7]}")
+        print("Rook is up to date." if new == old else "A newer Rook is on GitHub. Update with: relay.py update")
+        if not update_check.is_public():
+            print("This checkout's origin is not Rook's public repository, so relay.py update fetches from that origin, "
+                  "and the daily check is off here.")
+        return
     if len(argv) > 1 or argv[:1] and argv[0].startswith("-"):
-        sys.exit("Usage: relay.py update [TAG|COMMIT]")
-    if os.environ.get("ROOK_AGENT"):
-        sys.exit("Rook never updates or restarts itself. Run relay.py update in a terminal.")
+        sys.exit("Usage: relay.py update [--check | TAG | COMMIT]")
+    if os.environ.get("ROOK_AGENT") and not install:
+        sys.exit("Rook updates itself only with relay.py update --install, when its owner asks.")
     try:
         entries = json.loads((desk.data_dir() / "rook/install-manifest.json").read_text()).get("entries") or []
     except (OSError, ValueError, AttributeError):
@@ -3937,13 +4154,15 @@ def update_command(argv):
 
     if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
         sys.exit(f"{ROOT} has local changes, so Rook did not update it.")
-    # get.sh installs a .tar.gz through a temporary folder that it deletes, so that origin points at nothing.
+    # An older get.sh installed a .tar.gz through a temporary folder that it deleted, so that origin points at nothing.
+    # A folder install whose folder is gone is the same. Both now update from Rook's public repository.
     source = git("remote", "get-url", "origin").stdout.strip().removeprefix("file://")
     if source.startswith("/") and not Path(source).exists():
-        sys.exit(f"Rook was installed from a .tar.gz file or a folder that is gone ({source}), so it has no source to "
-                 f"update from. Point it at Rook's git repository with: git -C {ROOT} remote set-url origin <git URL>. "
-                 "Then run relay.py update again.")
-    fetched = git("fetch", "-q", "origin", *argv)
+        if git("remote", "set-url", "origin", update_check.PUBLIC).returncode:
+            sys.exit(f"Rook's source folder {source} is gone, and Rook could not point origin at {update_check.PUBLIC}.")
+        print(f"Rook's source folder {source} is gone, so Rook now updates from {update_check.PUBLIC}.", flush=True)
+    # With no name, fetch main alone: from a detached HEAD, a plain fetch's FETCH_HEAD can be another branch, such as dev.
+    fetched = git("fetch", "-q", "origin", *(argv or ["main"]))
     if fetched.returncode:
         sys.exit(f"Rook could not fetch its source. Check the network and try again. ({fetched.stderr.strip()})")
     old, new = git("rev-parse", "HEAD").stdout.strip(), git("rev-parse", "FETCH_HEAD^{commit}").stdout.strip()
@@ -3975,11 +4194,28 @@ def update_command(argv):
         if done.returncode:
             git("checkout", "-q", "--detach", old)
             sys.exit(f"The installer failed, so Rook moved back to {old[:7]}. Fix the problem above and run this again.")
-    restart_command(["--reason", f"an update to {new[:7]}"])
+    if not install:
+        restart_command(["--reason", f"an update to {new[:7]}"])
+        return
+    # The agent's turn holds Rook busy, so the wait for the grant runs in a detached child. It is a fork, not a
+    # command, so the agent has no relay verb that restarts Rook on its own.
+    if os.fork() == 0:
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        try:
+            restart_command(["--timeout", "1h", "--reason", f"an update to {new[:7]}"], note=settings.render(
+                f"{OWNER_START} asked you to install the update, so Rook moved from {old[:7]} to {new[:7]}. Tell "
+                f"{OWNER} in one short sentence that the update is in, and name {new[:7]}."))
+        finally:
+            os._exit(0)
+    print("Rook restarts at the next quiet moment, once this turn ends, and reports the new version when it is back.")
 
 
-def restart_command(argv):
-    """Handle relay.py restart, restart --status, and restart --cancel."""
+def restart_command(argv, note=None):
+    """Handle relay.py restart, restart --status, and restart --cancel. note is the restart note of update --install,
+    left once the grant holds: that is the one restart Rook's agent may ask for, and only through that command."""
     if argv == ["--status"]:
         answer = ask_rook("restart status", wait=5)
         if answer is None:
@@ -4005,7 +4241,7 @@ def restart_command(argv):
         blocker = f"Blocked by {blocker_text(busy)}." if busy else "Ready to go."
         utter(f"{subject} waits since {since}, {asked_phrase(who)} for {reason}. {blocker}")
         return
-    if os.environ.get("ROOK_AGENT"):
+    if os.environ.get("ROOK_AGENT") and note is None:
         leave(f"Rook never restarts, reloads, or cancels restarts for itself. Only {OWNER} or the build thread runs this command.")
     if argv == ["--cancel"]:
         answer = ask_rook("restart cancel", wait=5)
@@ -4026,10 +4262,12 @@ def restart_command(argv):
     active = [None]
     prior_signals = install_stop_signals()
     try:
-        token, note = wait_for_grant("restart", reason, timeout, active=active)
-        utter(note, flush=True)
+        token, waited = wait_for_grant("restart", reason, timeout, active=active)
+        utter(waited, flush=True)
         if token == "restarted":
             return
+        if note:
+            write_note(note)
         if desk.IS_MAC:
             rc, detail = desk.service_restart(try_only=False)
             mgr = "launchctl"
@@ -4226,8 +4464,11 @@ def check():
                 first_line, rest = comb_res.stdout.split("\n", 1)
                 key_line, printed_rest = print_res.stdout.split("\n", 1)
                 # Each run prints a key of its own: the same brief sent twice on purpose is two messages.
-                key = re.fullmatch(r"Send it with clientRequestId (rook-[0-9a-f]{24})\.", key_line)
-                assert key and first_line.startswith("Added work 1, drafted. Send it with clientRequestId rook-")
+                # Line one says how to send the brief, with the thread id from settings, and ends on its key.
+                key = re.fullmatch(r"This goes to the build thread named \w+\. When the T3 tools are missing or fail, .* call t3_thread_send with threadId "
+                                   + re.escape(thread_id) + r", .*mode auto, .* clientRequestId (rook-[0-9a-f]{24})\.", key_line)
+                assert key and first_line.startswith("Added work 1, drafted. This goes to the build thread named ")
+                assert f"threadId {thread_id}," in first_line and "\"Work 1 on Rook's list.\" above" in first_line, first_line
                 assert key.group(1) not in first_line, (first_line, key_line)
                 assert rest == printed_rest, (rest, printed_rest)
                 assert "Work 1 on Rook's list.\n\n" in rest, rest
@@ -4616,18 +4857,30 @@ def handoff_description(text):
     return " ".join(re.sub(r"\bWork \d+ on Rook's list\.", "", text).split())[:120]
 
 
+def handoff_send_line(key, thread, number=None):
+    """Line one of a printed handoff: how to send the brief below it, so Rook's prompt names no thread id. The key
+    ends the line."""
+    env = watch.machines().get(watch.local_machine(), {}).get("environmentId")
+    again = (f"with \"Work {number} on Rook's list.\" above your brief" if number else "with the same brief")
+    name = next((name for name, tid in active_build_threads().items() if tid == thread), None)
+    return ((f"This goes to the build thread named {name.capitalize()}. " if name else "")
+            + f"When the T3 tools are missing or fail, run handoff again without --print or --work, {again}. Otherwise "
+            f"call t3_thread_send with threadId {thread}, " + (f"environmentId {env}, " if env else "")
+            + f"mode auto, everything after this line unchanged, and clientRequestId {key}.")
+
+
 def handoff_again(key):
     """Print a handoff that did not reach its thread, with its key, to send again unchanged."""
     import journal
     if key.startswith("cli-"):
         sys.exit("T3 never saw a key for a command-line send, so a second send would be a second message.")
-    rows = record_send(lambda conn: conn.execute("SELECT brief, told FROM sends WHERE client = ? AND key = ? AND "
-                                                 "brief IS NOT NULL", (journal.CLIENT, key)).fetchall())
+    rows = record_send(lambda conn: conn.execute("SELECT brief, told, thread, work FROM sends WHERE client = ? AND "
+                                                 "key = ? AND brief IS NOT NULL", (journal.CLIENT, key)).fetchall())
     if not rows:
         sys.exit("Rook keeps no brief under that key: it was settled or never saved.")
     if rows[0][1] == "unknown":
         sys.exit("That handoff may have arrived, so Rook does not send it again.")
-    print(f"Send it with clientRequestId {key}.")
+    print(handoff_send_line(key, rows[0][2], rows[0][3]))
     print(rows[0][0])
 
 
@@ -4723,7 +4976,8 @@ def handoff_command(argv):
             "UPDATE sends SET outcome = 'superseded', settled = ?, brief = NULL WHERE client = ? AND tool = 'handoff' "
             "AND outcome IS NULL AND thread = ? AND work = ?", (time.time(), journal.CLIENT, build_thread, number)))
     if printed:
-        print(f"{added_line + ' ' if added_line else ''}Send it with clientRequestId {key}.")
+        print(f"{added_line + ' ' if added_line else ''}"
+              + handoff_send_line(key, build_thread, entry["id"] if wish is not None else work.named(text)))
         print(message)
         return
     try:
@@ -4846,15 +5100,45 @@ def check_memory():
             agy_prompt = antigravity_home.prompt(sample_rook_prompt, str(base))
             assert "full Antigravity session" in agy_prompt and "relay.py remember" in agy_prompt
 
-            # Newest incoming notes win when incoming.jsonl exceeds INCOMING_LIMIT.
-            old_limit = memory.INCOMING_LIMIT
-            memory.INCOMING_LIMIT = 90
+            # Untidied incoming.jsonl notes are kept in full in chronological order (no 10,000-char drop),
+            # and MEMORY.md stays uncut past 8,000 bytes up to INDEX_LINES (200) lines / INDEX_BYTES (25,000) UTF-8 bytes.
+            assert memory.INDEX_LINES == 200 and memory.INDEX_BYTES == 25_000 and memory.DREAM_TIMEOUT == 3600
+            saved_incoming = inc_file.read_bytes()
+            saved_index = (xdg_data / "rook/memory/MEMORY.md").read_text()
             try:
-                trimmed_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
-                assert "Morning standup is at 9:30 AM." in trimmed_prompt
-                assert "older untidied notes" in trimmed_prompt
+                long_a = "First untidied note: " + ("a" * 6000)
+                long_b = "Second untidied note: " + ("b" * 6000)
+                inc_file.write_text(
+                    json.dumps({"ts": "2026-11-27T01:00:00+00:00", "text": long_a}) + "\n"
+                    + json.dumps({"ts": "2026-11-27T02:00:00+00:00", "text": long_b}) + "\n"
+                )
+                med_index = "\n".join(f"- [Item {i}](item-{i}.md): " + ("m" * 100) for i in range(100))
+                assert 8000 < len(med_index.encode("utf-8")) < memory.INDEX_BYTES
+                (xdg_data / "rook/memory/MEMORY.md").write_text(med_index + "\n")
+                full_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                assert long_a in full_prompt and long_b in full_prompt
+                assert full_prompt.index(long_a) < full_prompt.index(long_b)
+                assert "older untidied notes" not in full_prompt
+                assert med_index in full_prompt and "(truncated)" not in full_prompt
+
+                # >200 lines trims at 200 lines and appends (truncated).
+                over_lines = "\n".join(f"- [Line {i}](line-{i}.md): short." for i in range(210))
+                (xdg_data / "rook/memory/MEMORY.md").write_text(over_lines + "\n")
+                lines_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                assert "[Line 199]" in lines_prompt and "[Line 200]" not in lines_prompt
+                assert "\n(truncated)\n--- End of memory index ---" in lines_prompt
+
+                # >25,000 UTF-8 bytes trims cleanly on a UTF-8 boundary and appends (truncated).
+                over_bytes = "\n".join(f"- [Byte {i}](byte-{i}.md): " + ("é" * 300) for i in range(50))
+                assert len(over_bytes.encode("utf-8")) > memory.INDEX_BYTES
+                (xdg_data / "rook/memory/MEMORY.md").write_text(over_bytes + "\n")
+                bytes_prompt = memory.startup_prompt("/usr/bin/python", SCRIPT)
+                idx_body = bytes_prompt.split("--- Memory index (MEMORY.md) ---\n", 1)[1].split("\n--- End of memory index ---", 1)[0]
+                assert idx_body.endswith("\n(truncated)")
+                assert len(idx_body[: -len("\n(truncated)")].encode("utf-8")) <= memory.INDEX_BYTES
             finally:
-                memory.INCOMING_LIMIT = old_limit
+                inc_file.write_bytes(saved_incoming)
+                (xdg_data / "rook/memory/MEMORY.md").write_text(saved_index)
 
             # Shared mode when ~/.agents/hooks/memory-context.sh exists.
             shared_hook = fake_home / ".agents/hooks/memory-context.sh"
@@ -4948,6 +5232,49 @@ def check_memory():
             assert turn_only.returncode == 0 and "Tidied memory (0 incoming, 1 turns)." in turn_only.stdout
             assert "oat cortado" in marker.read_text()
             marker.unlink()
+
+            # 4b. new_turns_since() reads full turns.jsonl (>128 KB), keeps >120 turns, skips PASS,
+            # keeps >1,200-char turns uncut, and head+tail cuts a single >100 KB block via _cut_block.
+            saved_turns = turns_file.read_bytes()
+            try:
+                base_ts = 1_700_000_000.0
+                rows_big = []
+                # Early turn at byte 0 (>128 KB before EOF and >120 turns before end).
+                early_at = datetime.fromtimestamp(base_ts + 1, _tz.utc).isoformat()
+                rows_big.append(json.dumps({"at": early_at, "session": "sb", "event": "request", "turn": "early",
+                                            "source": "spoken", "text": "EARLY_MARKER_START"}))
+                rows_big.append(json.dumps({"at": early_at, "session": "sb", "event": "response", "turns": ["early"],
+                                            "text": "PASS"}))
+                # Long (>1,200-char) user and Rook turns stay completely uncut.
+                long_u_at = datetime.fromtimestamp(base_ts + 2, _tz.utc).isoformat()
+                long_u_text = "LONG_USER_HEAD " + ("u" * 2500) + " LONG_USER_TAIL"
+                long_r_text = "LONG_ROOK_HEAD " + ("r" * 2500) + " LONG_ROOK_TAIL"
+                rows_big.append(json.dumps({"at": long_u_at, "session": "sb", "event": "request", "turn": "long1",
+                                            "source": "typed", "text": long_u_text}))
+                rows_big.append(json.dumps({"at": long_u_at, "session": "sb", "event": "response", "turns": ["long1"],
+                                            "text": long_r_text}))
+                # 130 filler turns (~1.2 KB each -> >150 KB total and >120 turns).
+                for idx in range(130):
+                    t_iso = datetime.fromtimestamp(base_ts + 10 + idx, _tz.utc).isoformat()
+                    rows_big.append(json.dumps({"at": t_iso, "session": "sb", "event": "request", "turn": f"f{idx}",
+                                                "source": "spoken", "text": f"Filler turn {idx} " + ("z" * 1200)}))
+                # Single >100 KB message cut cleanly with head + tail.
+                huge_at = datetime.fromtimestamp(base_ts + 200, _tz.utc).isoformat()
+                huge_text = "HUGE_HEAD_MARKER " + ("h" * (130 * 1024)) + " HUGE_TAIL_MARKER"
+                rows_big.append(json.dumps({"at": huge_at, "session": "sb", "event": "request", "turn": "huge1",
+                                            "source": "typed", "text": huge_text}))
+                turns_file.write_text("\n".join(rows_big) + "\n")
+                assert turns_file.stat().st_size > 128 * 1024
+                got_turns, got_max = memory.new_turns_since(base_ts)
+                # 1 early req (PASS response skipped) + 2 long + 130 filler + 1 huge = 134 turns.
+                assert len(got_turns) == 134 and got_max == base_ts + 200, (len(got_turns), got_max)
+                assert "EARLY_MARKER_START" in got_turns[0], got_turns[0]
+                assert not any(line.endswith("Rook: PASS") for line in got_turns)
+                assert long_u_text in got_turns[1] and long_r_text in got_turns[2]
+                assert "HUGE_HEAD_MARKER" in got_turns[-1] and "HUGE_TAIL_MARKER" in got_turns[-1]
+                assert "[... 30 KB cut ...]" in got_turns[-1], got_turns[-1][:120]
+            finally:
+                turns_file.write_bytes(saved_turns)
 
             # 5. Antigravity nightly dream: missing agy skip, dream-guard confinement, and fake agy ACP tests.
             (xdg_config / "rook").mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -5538,6 +5865,7 @@ def check_memory():
 
 def check_shared_memory():
     """Self-check shared memory install, partial-failure recovery, hook merge, note moves, cap, and removal."""
+    import plistlib
     import shlex
     import tempfile
 
@@ -5568,16 +5896,24 @@ def check_shared_memory():
         fake_claude = fake_bin / "claude"
         fake_claude.write_text(
             f"#!{sys.executable}\n"
-            "import json, pathlib, sys\n"
+            "import fcntl, json, pathlib, sys\n"
             f"p = pathlib.Path({str(claude_count)!r})\n"
-            "p.write_text(str(int(p.read_text()) + 1 if p.exists() else 1))\n"
+            "with open(p, 'a+') as fh:\n"
+            "    fcntl.flock(fh, fcntl.LOCK_EX)\n"
+            "    fh.seek(0)\n"
+            "    cur = int(fh.read().strip() or '0')\n"
+            "    fh.seek(0)\n"
+            "    fh.truncate()\n"
+            "    fh.write(str(cur + 1))\n"
             'print(json.dumps({"is_error": False, "result": "PROPOSALS\\n1. ADD\\n   Note: prefs.md", "modelUsage": {}}))\n'
         )
         fake_claude.chmod(0o755)
 
         def make_env(extra=None):
+            # A hook or memory-dir finds a project from these, so a coding session's own must never reach the check.
             env = {k: v for k, v in os.environ.items()
-                   if k not in ("T3CODE_THREAD_ID", "ROOK_AGENT", "CLAUDE_CONFIG_DIR", "ROOK_DREAM_COMMAND", "SYSTEMCTL")}
+                   if k not in ("T3CODE_THREAD_ID", "ROOK_AGENT", "CLAUDE_CONFIG_DIR", "ROOK_DREAM_COMMAND", "SYSTEMCTL",
+                                "CLAUDE_PROJECT_DIR", "PROJECT_ROOTS", "NO_MEMORY") and not k.startswith("GIT_")}
             env.update(
                 HOME=str(fake_home),
                 XDG_DATA_HOME=str(xdg_data),
@@ -5590,8 +5926,35 @@ def check_shared_memory():
             env.update(extra or {})
             return env
 
+        real_base = os.path.realpath(base)  # On a Mac, /var is /private/var.
+
+        def inside(path):
+            return os.path.realpath(path).startswith(real_base + "/")
+
+        def run_scratch(cmd, extra=None, cwd=None, **kwargs):
+            """Every command of this check: in a scratch folder, with the scrubbed scratch environment, so a hook's
+            $PWD fallback or a failing memory-dir never finds this repository or a real project."""
+            folder = str(cwd or base)
+            assert inside(folder) or os.path.realpath(folder) == real_base, folder
+            return subprocess.run([str(word) for word in cmd], cwd=folder, env=make_env(extra), text=True,
+                                  capture_output=True, **kwargs)
+
         def run_cli(*args, extra=None):
-            return subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=make_env(extra))
+            return run_scratch([sys.executable, SCRIPT, *args], extra=extra)
+
+        # 0. Before any command runs: the memory folder the check resolves, as the hook and its fallbacks do, is scratch.
+        for start in (fake_home / "Work", base):
+            resolved = run_scratch([memory.SHARED_SOURCE / "bin/memory-dir", "--start", start]).stdout.strip()
+            assert inside(resolved), resolved
+        bare_bin = base / "bin-bare"  # No jq and no timeout: the hook falls back to $PWD, here the scratch base.
+        bare_bin.mkdir(mode=0o700)
+        for tool in ("bash", "git", "python3", "dirname", "basename", "readlink", "realpath", "mkdir", "grep", "head",
+                     "find", "tr"):
+            (bare_bin / tool).symlink_to(shutil.which(tool))
+        bare_hook = run_scratch(["bash", memory.SHARED_SOURCE / "hooks/memory-context.sh"], extra={"PATH": str(bare_bin)},
+                                input="{}")
+        fallback = re.search(r"^Memory folder: (.+) \(private", bare_hook.stdout, re.M)
+        assert fallback and inside(fallback.group(1)), (bare_hook.stdout, bare_hook.stderr)
 
         # 1. Refusal when ~/.agents/bin/dream exists and was not installed by Rook (regular file and symlink).
         foreign_dream = fake_home / ".agents/bin/dream"
@@ -5694,7 +6057,8 @@ def check_shared_memory():
                 assert p.is_file() and not p.is_symlink(), p
             conf_text = (fake_home / ".agents/memory.conf").read_text()
             assert "PROJECT_ROOTS=" in conf_text.splitlines(), conf_text
-            assert "DREAM_MAX_RUNS=12" in conf_text, conf_text
+            assert "DREAM_MAX_RUNS=12" not in conf_text, conf_text
+            assert not any(line.strip().startswith("DREAM_MAX_RUNS=") for line in conf_text.splitlines()), conf_text
             assert f"CLAUDE_BIN={fake_claude}" in conf_text.splitlines(), conf_text
             for forbidden in (*( (saved_home,) if saved_home else () ), *filter(None, os.environ.get("ROOK_CHECK_PRIVATE_NAMES", "").split(","))):
                 assert forbidden not in conf_text, (forbidden, conf_text)
@@ -5730,21 +6094,20 @@ def check_shared_memory():
             assert not (own_dir / "incoming.jsonl").exists()
 
             # Standalone session hook prints instructions to read notes and save with ~/.agents/bin/remember.
-            hook_run = subprocess.run(
-                ["bash", str(fake_home / ".agents/hooks/memory-context.sh")],
-                input=json.dumps({"cwd": str(fake_home / "Work")}),
-                text=True, capture_output=True, env=make_env(),
-            )
+            hook_run = run_scratch(["bash", fake_home / ".agents/hooks/memory-context.sh"],
+                                   input=json.dumps({"cwd": str(fake_home / "Work")}))
             assert hook_run.returncode == 0 and str(rook_shared) in hook_run.stdout, hook_run.stdout
             assert "Read the notes related to your task before starting." in hook_run.stdout, hook_run.stdout
             assert "~/.agents/bin/remember" in hook_run.stdout, hook_run.stdout
 
-            # 4. Nightly dream: empty-night skip, CLAUDE_BIN without fake_bin on PATH, DREAM_MAX_RUNS clamp (>=2), and cut part progress.
+            # 4. Nightly dream: empty-night skip, CLAUDE_BIN without fake_bin on PATH, uncapped default,
+            # opt-in DREAM_MAX_RUNS clamp (>=2), and cut part progress.
             minimal_path = {"PATH": "/usr/bin:/bin"}
-            empty_dream = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            empty_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert empty_dream.returncode == 0 and "nothing to dream" in empty_dream.stdout, (empty_dream.stdout, empty_dream.stderr)
 
-            # Create a multi-part session (>400 KB) in ProjA plus a session in ProjB, set DREAM_MAX_RUNS=1 (must clamp to 2).
+            # Create a multi-part session (>400 KB) in ProjA plus a session in ProjB.
+            # Default memory.conf has no DREAM_MAX_RUNS cap, so all parts and both projects run uncapped.
             pmem_a = fake_home / "ProjA/.agent-memory"
             pmem_a.mkdir(parents=True, exist_ok=True)
             (pmem_a / "MEMORY.md").write_text("# Memory index\n[[note]] - Note.\n")
@@ -5767,9 +6130,22 @@ def check_shared_memory():
             os.utime(sfile_b, (time.time() - 3600,) * 2)
 
             (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
+            claude_count.unlink(missing_ok=True)
+            uncapped_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
+            assert uncapped_dream.returncode == 0, (uncapped_dream.stdout, uncapped_dream.stderr)
+            assert int(claude_count.read_text()) >= 5, claude_count.read_text()
+            assert "capped at" not in uncapped_dream.stdout and "cut s1.jsonl" not in uncapped_dream.stdout, uncapped_dream.stdout
+            uncapped_state = json.loads((fake_home / ".agents/dream/state.json").read_text())
+            assert uncapped_state["files"][str(sfile_a)] == len(big_lines), uncapped_state["files"]
+            assert uncapped_state["files"][str(sfile_b)] == 1, uncapped_state["files"]
+            assert uncapped_state["retry"] == [], uncapped_state["retry"]
+
+            # Explicitly configuring DREAM_MAX_RUNS=1 clamps to 2 and defers the remaining parts/sessions.
+            (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
+            claude_count.unlink(missing_ok=True)
             orig_conf = (fake_home / ".agents/memory.conf").read_text()
-            (fake_home / ".agents/memory.conf").write_text(orig_conf.replace("DREAM_MAX_RUNS=12", "DREAM_MAX_RUNS=1"))
-            capped_dream = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            (fake_home / ".agents/memory.conf").write_text(orig_conf + "\nDREAM_MAX_RUNS=1\n")
+            capped_dream = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert capped_dream.returncode == 0, (capped_dream.stdout, capped_dream.stderr)
             assert int(claude_count.read_text()) == 2, claude_count.read_text()
             assert "cut s1.jsonl to 1 of" in capped_dream.stdout, capped_dream.stdout
@@ -5792,15 +6168,15 @@ def check_shared_memory():
             sfile_split.write_text("\n".join(split_lines) + "\n")
             os.utime(sfile_split, (time.time() - 3600,) * 2)
             (fake_home / ".agents/dream/state.json").unlink(missing_ok=True)
-            night1 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night1 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night1.returncode == 0 and "cut split.jsonl to 1 of" in night1.stdout, (night1.stdout, night1.stderr)
             st1 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st1["files"][str(sfile_split)] == 1 and str(sfile_split) in st1["retry"], st1
-            night2 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night2 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night2.returncode == 0 and "single line in split.jsonl spans more than 1 part(s)" in night2.stdout, (night2.stdout, night2.stderr)
             st2 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st2["files"][str(sfile_split)] == 2 and str(sfile_split) in st2["retry"], st2
-            night3 = subprocess.run([str(fake_home / ".agents/bin/dream")], text=True, capture_output=True, env=make_env(minimal_path))
+            night3 = run_scratch([fake_home / ".agents/bin/dream"], extra=minimal_path)
             assert night3.returncode == 0, (night3.stdout, night3.stderr)
             st3 = json.loads((fake_home / ".agents/dream/state.json").read_text())
             assert st3["files"][str(sfile_split)] == 3 and str(sfile_split) not in st3["retry"], st3
@@ -5808,10 +6184,8 @@ def check_shared_memory():
             # bin/remember falls back to claude on PATH when CLAUDE_BIN is stale.
             stale_conf = orig_conf.replace(f"CLAUDE_BIN={fake_claude}", "CLAUDE_BIN=/nonexistent/claude")
             (fake_home / ".agents/memory.conf").write_text(stale_conf)
-            rem_fallback = subprocess.run(
-                [str(fake_home / ".agents/bin/remember"), "stale path fallback fact"],
-                cwd=str(fake_home / "ProjA"), text=True, capture_output=True, env=make_env(),
-            )
+            rem_fallback = run_scratch([fake_home / ".agents/bin/remember", "stale path fallback fact"],
+                                       cwd=fake_home / "ProjA")
             assert rem_fallback.returncode == 0, (rem_fallback.stdout, rem_fallback.stderr)
 
             # 5. User-edited memory.conf is preserved on reinstall AND left in place on remove; pre-existing file kept too.
@@ -5857,18 +6231,94 @@ def check_shared_memory():
             repo_a, repo_b = fake_home / "Code/repo-a", fake_home / "Code/repo-b"
             for repo in (repo_a, repo_b):
                 repo.mkdir(parents=True)
-                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                run_scratch(["git", "init", "-q", repo], check=True)
             inst2 = run_cli("memory", "install-shared")
             assert inst2.returncode == 0, (inst2.returncode, inst2.stdout, inst2.stderr)
             assert json.loads(claude_settings.read_text())["autoMemoryEnabled"] is False
             for repo in (repo_a, repo_b):
-                md_out = subprocess.run([str(fake_home / ".agents/bin/memory-dir"), "--start", str(repo)],
-                                        text=True, capture_output=True, env=make_env())
+                md_out = run_scratch([fake_home / ".agents/bin/memory-dir", "--start", repo])
                 assert md_out.returncode == 0 and md_out.stdout.strip() == f"{os.path.realpath(str(repo))}/.agent-memory", md_out.stdout
             assert run_cli("memory", "remove-shared").returncode == 0
             assert not (fake_home / ".agents/memory.conf").exists()  # Unedited memory.conf IS removed.
             restored = json.loads(claude_settings.read_text())
             assert restored == {"model": "opus"}, restored
+
+            # 7. A Mac: no systemctl, so the dream is a launchd job; realpath has no -m and there is no timeout.
+            mac_bin = base / "bin-mac"
+            mac_bin.mkdir(mode=0o700)
+            for tool in ("bash", "git", "python3", "dirname", "basename", "readlink", "mkdir", "grep", "head", "find", "tr",
+                         "jq"):
+                (mac_bin / tool).symlink_to(shutil.which(tool))
+            (mac_bin / "claude").symlink_to(fake_claude)
+            real_realpath = shutil.which("realpath")
+            (mac_bin / "realpath").write_text(  # BSD realpath, as on a Mac.
+                f'#!/bin/sh\n[ "$1" = -m ] && {{ echo "realpath: illegal option -- m" >&2; exit 1; }}\nexec {real_realpath} "$@"\n')
+            launch_log, launch_loaded = base / "launchctl.log", base / "launchctl.loaded"
+            no_domain = base / "launchctl.no-domain"  # As over ssh: no gui domain, so every call fails.
+            (mac_bin / "launchctl").write_text(
+                "#!/bin/sh\n"
+                f'echo "$*" >> {shlex.quote(str(launch_log))}\n'
+                f'[ -f {shlex.quote(str(no_domain))} ] && {{ echo "Bad request." >&2; exit 125; }}\n'
+                'case "$1" in\n'
+                f'  bootstrap) [ -f {shlex.quote(str(launch_loaded))} ] && exit 5; : > {shlex.quote(str(launch_loaded))} ;;\n'
+                f'  bootout) [ -f {shlex.quote(str(launch_loaded))} ] || exit 3; {shutil.which("rm")} -f {shlex.quote(str(launch_loaded))} ;;\n'
+                f'  print) [ -f {shlex.quote(str(launch_loaded))} ] || exit 113 ;;\n'
+                "esac\n")
+            for tool in ("realpath", "launchctl"):
+                (mac_bin / tool).chmod(0o755)
+            mac = {"PATH": str(mac_bin)}
+            agents_dir_ = fake_home / "Library/LaunchAgents"
+            agents_dir_.mkdir(parents=True)
+            other_plist = agents_dir_ / "com.example.other.plist"
+            other_plist.write_text("not Rook's\n")
+            plist = agents_dir_ / "com.rook.agent-dream.plist"
+            job = f"gui/{os.getuid()}/com.rook.agent-dream"
+            sys_log.write_text("")
+            mac_inst = run_cli("memory", "install-shared", extra=mac)
+            assert mac_inst.returncode == 0, (mac_inst.returncode, mac_inst.stdout, mac_inst.stderr)
+            assert sys_log.read_text() == "" and not (xdg_config / "systemd/user/agent-dream.timer").exists()
+            job_plist = plistlib.loads(plist.read_bytes())
+            assert job_plist["Label"] == "com.rook.agent-dream", job_plist
+            assert job_plist["ProgramArguments"] == [str(fake_home / ".agents/bin/dream")], job_plist
+            assert job_plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 0} and job_plist["Nice"] == 10, job_plist
+            assert job_plist["EnvironmentVariables"]["PATH"] == (f"{fake_home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:"
+                                                                  "/usr/bin:/bin"), job_plist
+            assert launch_log.read_text().splitlines() == [f"bootout {job}", f"bootstrap gui/{os.getuid()} {plist}"]
+            mac_manifest = json.loads((fake_home / ".agents/rook-shared-manifest.json").read_text())
+            assert mac_manifest["timer"] == {"label": "com.rook.agent-dream", "loaded": True}, mac_manifest["timer"]
+            assert mac_manifest["rook_memory_dir"] == str(rook_shared), mac_manifest  # memory-dir ran without realpath -m.
+            # With no timeout, the hook still takes the session's folder from its payload, not its own folder.
+            assert not (mac_bin / "timeout").exists()
+            mac_hook = run_scratch(["bash", fake_home / ".agents/hooks/memory-context.sh"], extra=mac,
+                                   input=json.dumps({"cwd": str(fake_home / "Work")}))
+            assert mac_hook.returncode == 0 and f"Memory folder: {rook_shared} " in mac_hook.stdout, (mac_hook.stdout, mac_hook.stderr)
+            assert f"{fake_home / 'Work'}\t{rook_shared}" in (fake_home / ".agents/dream/dirs.tsv").read_text().splitlines()
+            # A second install reloads the job it owns.
+            again = run_cli("memory", "install-shared", extra=mac)
+            assert again.returncode == 0 and launch_loaded.exists(), (again.stdout, again.stderr)
+            # Unable to reach the job from this session: nothing is removed, so a later run can finish.
+            no_domain.write_text("")
+            own_before = sorted((p.name, p.read_bytes()) for p in own_dir.iterdir())
+            stuck = run_cli("memory", "remove-shared", extra=mac)
+            assert stuck.returncode != 0 and "from this session" in stuck.stderr, (stuck.stdout, stuck.stderr)
+            assert "on the Mac itself, while signed in at its screen" in stuck.stderr, stuck.stderr
+            assert sorted((p.name, p.read_bytes()) for p in own_dir.iterdir()) == own_before, "own notes changed"
+            assert plist.is_file() and launch_loaded.exists() and (fake_home / ".agents/rook-shared-manifest.json").is_file()
+            no_domain.unlink()
+            launch_log.write_text("")
+            mac_rem = run_cli("memory", "remove-shared", extra=mac)
+            assert mac_rem.returncode == 0, (mac_rem.returncode, mac_rem.stdout, mac_rem.stderr)
+            assert launch_log.read_text().splitlines() == [f"print {job}", f"bootout {job}"], launch_log.read_text()
+            assert not launch_loaded.exists() and sorted(agents_dir_.iterdir()) == [other_plist]
+            assert other_plist.read_text() == "not Rook's\n" and sys_log.read_text() == ""
+            assert not (fake_home / ".agents/rook-shared-manifest.json").exists() and not (fake_home / ".agents/bin").exists()
+            # A job Rook did not write is never replaced, loaded or unloaded.
+            plist.write_text("their own job\n")
+            launch_log.write_text("")
+            assert run_cli("memory", "install-shared", extra=mac).returncode == 0
+            assert json.loads((fake_home / ".agents/rook-shared-manifest.json").read_text())["timer"]["loaded"] is False
+            assert run_cli("memory", "remove-shared", extra=mac).returncode == 0
+            assert plist.read_text() == "their own job\n" and launch_log.read_text() == "", launch_log.read_text()
         finally:
             if saved_home is None:
                 os.environ.pop("HOME", None)
@@ -5897,6 +6347,8 @@ def main():
         return dream_command(sys.argv[2:])
     if sys.argv[1:] == ["--check-herdr"]:
         return check_herdr()
+    if sys.argv[1:] == ["--check-verify"]:
+        return _onboard().check_verify()
     if sys.argv[1:] == ["--check-plugins"]:
         import plugin_loader  # Its check lives there, so relay.py stays small for every command.
         return plugin_loader.check()
@@ -5924,12 +6376,18 @@ def main():
         return project_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] in ("set", "get", "voices", "fonts", "dusts", "themes"):
         return settings_command(sys.argv[1:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "pronounce":
+        return pronounce_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "audition":
         return _onboard().audition_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "shared-agents":
         return _onboard().shared_agents_command(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "everystate":
+        return _onboard().everystate_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard":
         return _onboard().onboard_command(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "verify":
+        return _onboard().verify_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] in ("watch", "watching"):
         return watch_command(sys.argv[1:])
     if len(sys.argv) >= 2 and sys.argv[1] == "inbox":

@@ -22,6 +22,7 @@ Worth keeping:
 - For a feature still being built, the current status in a few lines: the goal, what the developer decided, what is open, and where the details live (branch, pull request, review files).
 
 Not worth keeping:
+- Anything the developer's global agent instructions state. They are the single source of truth for models, tools, delegation, and working style. A note that repeats or contradicts them is obsolete.
 - Anything the project's code, git history, or instruction files already show. A future agent can read those.
 - State that changes on its own or can be read from the environment, such as a branch name, a running process, or task progress.
 - Summaries of web pages or documentation that can be fetched again. Keep only the conclusion the session drew and where it came from.

@@ -103,7 +103,7 @@ def dialog(tail):
 
 def screen_tail(text, lines):
     """The last lines of a pane's text, without trailing space, runs of blank lines, the blank padding at the bottom
-    and the input box and footer of Claude Code or Codex, at most 3000 characters. A dialog is kept whole."""
+    and the input box and footer of Claude Code or Codex, at most settings.READBACK_LIMIT characters. A dialog is kept whole."""
     kept = []
     for line in (text or "").splitlines():
         line = line.rstrip()
@@ -119,7 +119,7 @@ def screen_tail(text, lines):
                 kept = kept[:at - (mark == "❯")]
                 break
     tail = "\n".join(kept[-lines:]).strip()
-    return tail if len(tail) <= 3000 else "..." + tail[-3000:]
+    return tail if len(tail) <= settings.READBACK_LIMIT else "..." + tail[-settings.READBACK_LIMIT:]
 
 
 def read_screen(machine, agent, lines, timeout=SECONDS):

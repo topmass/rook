@@ -149,8 +149,8 @@ SCRIPTS = {ROOT / "desktop/relay.py", ROOT / "skills/delegate/scripts/t3_threads
 # going dark is reversible, and set only saves a checked setting for the next start). RELAY_PROMPT are the prompt's own
 # commands. restart, reload and daily-restart are refused outright, by antigravity_home: Rook never restarts itself.
 RELAY_SKILLS = ("get", "voices", "fonts", "dusts", "set ", "show ", "dark ", "media", "forge ", "wow-note ", "wow-data ", "project new ",
-                "watch ", "work ", "inbox", "threads", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ", "mac-access",
-                "herdr agents", "herdr read ", "herdr install", "pi ")
+                "watch ", "work ", "inbox", "threads", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ",
+                "herdr agents", "herdr read ", "pi ", "update --install", "pronounce ")
 RELAY_CARD = ()
 RELAY_PROMPT = ("timer ", "remember ")
 # Phone pairing passes with no card, though no shipped skill offers it: the owner's own workspace skill does.
@@ -552,6 +552,8 @@ class Antigravity(Harness):
         self.held_reported = False  # Whether Rook was notified that a background command is held.
         self.woke = self.release_now = False  # The held tool finished; a new request ends the held turn.
         self.abandoned = set()  # Prompts the watchdog ended whose answers have not come yet.
+        self.spoke_at = None  # When agy's last step spoke with no tool call: its answer, if its prompt stays open.
+        self.late_held = None  # The turn ended that way while its background command still runs.
         self.prompt_states = {}  # rpc -> Machine tracking each prompt's life in log-only mode.
         self.folded_rpcs = []  # rpcs folded into self.folded until the steered turn ends.
         self.context, self.turn_began, self.first_words = 0, time.monotonic(), None  # For one journal line a turn.
@@ -584,7 +586,8 @@ class Antigravity(Harness):
 
     def quiet(self):
         """How long agy may send nothing before the watchdog ends the turn."""
-        return HELD_QUIET_SECONDS if self.held and not self.tools else STALL_SECONDS
+        return (HELD_QUIET_SECONDS if self.held and not self.tools or self.spoke_at and not self.held
+                else STALL_SECONDS)
 
     def held_tools(self):
         """Names of tools still running in the background of a held turn, never their inputs."""
@@ -640,6 +643,29 @@ class Antigravity(Harness):
         self.withdrawn.clear()
         if self.release_now and self.held:
             yield from self.release()
+        if self.late_held and not self.tools:  # The command of a turn that ended while it ran is done.
+            yield {"type": "rook_held", "active": False, "turn": self.late_held}
+            self.late_held = None
+
+    def answered_open(self):
+        """End a turn agy has spoken its answer to but never answered, since a command it put in the background keeps
+        its session busy (2026-11-27). Its words are the answer; its prompts' late answers are ignored."""
+        print(f"antigravity: agy spoke, then sent nothing for {HELD_QUIET_SECONDS} s with its prompt open; "
+              "the turn ends", file=sys.stderr)
+        uuids = self.folded + [self.calls[rpc][1] for rpc in self.open]
+        for rpc in self.open:
+            self.calls[rpc] = ("late", self.calls[rpc][1])
+            self.prompt_move(rpc, Prompt.DONE, "spoke")
+        self.finish_folded("spoke")
+        self.turn_line(self.turn_began, self.first_words, {})
+        self.open, self.folded, self.spoke_at, self.declined = [], [], None, None
+        answer, self.answer = self.answer, ""
+        yield from self.close_text()
+        yield {"type": "result", "user_message_uuids": uuids, "result": answer, "terminal_reason": "completed",
+               "is_error": False, "errors": []}
+        if self.tools:  # After the result, which clears the turn's notes: this one stays until the command ends.
+            self.late_held = uuids[-1]
+            yield {"type": "rook_held", "active": True, "turn": uuids[-1], "tools": self.held_tools()}
 
     def stalled(self, problem=UNSET):
         """End the open turn when agy has sent nothing for STALL_SECONDS: tell the owner in words Rook speaks, cancel the
@@ -694,6 +720,7 @@ class Antigravity(Harness):
         """Cancel the running turn and any queued ones. A permission ask still open is answered cancelled, and so is
         any ask that comes before the cancelled prompts end."""
         self.outbox.clear()
+        self.spoke_at = None
         if self.held:  # Stop ends a held turn too, with what it has.
             self.release_now = True
         if self.session:
@@ -740,10 +767,11 @@ class Antigravity(Harness):
                 waiting = waiting or asyncio.ensure_future(stream.__anext__())
                 if not (await asyncio.wait({waiting}, timeout=limit))[0]:
                     if watching and time.monotonic() - self.heard >= self.quiet():
-                        problem = (None if self.held and not self.tools
+                        problem = (None if self.held and not self.tools or self.spoke_at and not self.held
                                    else await asyncio.to_thread(failure, antigravity_home.HOME, self.session))
                         if self.open and not self.asks and not self.release_now and time.monotonic() - self.heard >= self.quiet():
-                            for converted in self.stalled(problem=problem):
+                            for converted in (self.answered_open() if self.spoke_at and not self.held
+                                              else self.stalled(problem=problem)):
                                 yield converted
                     continue
                 try:
@@ -806,6 +834,8 @@ class Antigravity(Harness):
             self.answer = ""  # Text agy wrote with no prompt open, such as a late wake, is not this answer.
             self.heard = self.turn_began = time.monotonic()  # The watchdog counts from the prompt, not an old message.
             self.first_words = None
+            self.tools.clear()  # A command of a turn that ended open is not this turn's; flush() clears its note.
+        self.spoke_at = None  # agy has not spoken to this prompt yet.
         if uuid == self.setup_uuid:
             self.stages.setdefault("setup sent", round(time.monotonic() - self.began, 1))
         rpc = self.call("session/prompt", {"sessionId": self.session or "", "prompt": blocks},
@@ -903,7 +933,7 @@ class Antigravity(Harness):
             self.process.kill()
         elif kind == "session/set_config_option" and error:
             print(f"antigravity: an option was refused: {error}", file=sys.stderr)
-        elif kind == "abandoned":  # The late answer to a turn the watchdog ended.
+        elif kind in ("abandoned", "late"):  # The late answer to a turn the watchdog or answered_open() ended.
             self.settle(rpc)
         elif kind == "prompt":
             if ((message.get("result") or {}).get("stopReason") == "end_turn" and not error and self.tools
@@ -967,6 +997,7 @@ class Antigravity(Harness):
                 yield {"type": "thought", "text": text}
         elif kind == "tool_call":
             yield from self.close_text()
+            self.spoke_at = None  # A tool step: agy is still working.
             name, tool_input = claude_tool(update, self.names)
             self.answer = ""  # Like Claude Code's result: the text after the last tool call.
             if update.get("status") not in ("completed", "failed"):  # agy sends a declined call's twin born failed.
@@ -979,6 +1010,7 @@ class Antigravity(Harness):
         elif kind == "tool_call_update" and update.get("status") in ("completed", "failed") \
                 and update.get("toolCallId") in self.tools:
             self.tools.discard(update["toolCallId"])
+            self.spoke_at = None  # A tool result starts another step: agy is not done.
             self.woke = self.woke or bool(self.held and not self.tools)  # The held turn's command finished.
             output = tool_output(update)
             if (not output and update["status"] == "completed"
@@ -995,6 +1027,7 @@ class Antigravity(Harness):
             self.context = update.get("used") or self.context  # Tokens in the session's context now.
             spoke = self.texting  # A step that only called a tool, such as command_status, has said nothing yet.
             yield from self.close_text()
+            self.spoke_at = time.monotonic() if spoke and self.open and not self.held else None
             if self.held and self.woke and not self.tools and spoke:  # agy's wake after the held command has spoken.
                 yield from self.release()
 
@@ -1189,6 +1222,9 @@ def check():
     assert [bash(f"{relay} {c}") for c in ("device pair", "device list", "device revoke Pixel")] == [
         "allow", "allow", "ask"]
     assert [bash(f"{relay} {c}") for c in ("restart", "daily-restart", "reload overlay")] == ["deny"] * 3
+    # The one update Rook may run when its owner asks passes; a bare restart of the service stays refused.
+    assert bash(f"{relay} update --install") == "allow"
+    assert bash("systemctl --user restart rook") == bash("systemctl --user restart rook.service") == "deny"
     # Herdr and Pi: reads, and the guarded sends, pass with no card. A Herdr command Rook lacks goes to the card.
     assert [bash(f"{relay} {c}") for c in ("herdr agents", "herdr read fixer --lines 20", "pi sessions --limit 5",
                                            "pi read 01a1", "herdr send fixer 'Carry on.'",
@@ -1287,7 +1323,7 @@ def check():
     assert out(asked("7", call, options))[0]["type"] == "control_request"  # After it, asks show again.
     # The hang of 2026-11-23: a card the owner never answered held agy, and their next request waited behind it. Now a new
     # turn declines the open card and takes it back from Rook, and the watchdog ends a turn agy has gone silent on.
-    global STALL_SECONDS
+    global STALL_SECONDS, HELD_QUIET_SECONDS
     agy.asks.clear()  # Card 7 above is done with.
     card = out(asked("11", call, options))[0]
     agy.turn(process, "s", "next", "Next request.", [], True)
@@ -1477,6 +1513,75 @@ def check():
     assert [m["user_message_uuids"] for m in agy.flush() if m["type"] == "result"] == [["stopped-held"]]
     assert not agy.held and not agy.open and agy.declined is None
     agy.stale_until = 0
+    # 2026-11-27: a command agy put in the background kept its session busy, so agy spoke but never answered the prompt
+    # or the steered ones after it. Once agy has spoken and is quiet for HELD_QUIET_SECONDS, the turn ends with its words.
+    agy.turn(process, "s", "bg", "Run it.", [], False)
+    bg = agy.open[-1]
+    out(update({**call, "toolCallId": "c16"}))
+    out(chunk("It runs in the background."))
+    out(usage)
+    assert agy.spoke_at and agy.quiet() == HELD_QUIET_SECONDS
+    agy.turn(process, "s", "bg-steer", "And?", [], True)  # A steered prompt the busy session never answers either.
+    steered = agy.open[-1]
+    assert not agy.spoke_at and agy.quiet() == STALL_SECONDS
+    out(chunk(" Still running."))
+    out(usage)
+    quiet_saved, HELD_QUIET_SECONDS = HELD_QUIET_SECONDS, 0.2
+    feed = asyncio.Queue()
+
+    async def background():
+        reader = agy.read(lines())
+        seen = [await asyncio.wait_for(reader.__anext__(), 2) for _ in range(2)]
+        for line in (update({**call, "toolCallId": "c16", "sessionUpdate": "tool_call_update", "status": "completed",
+                             "rawOutput": {"output": "done"}}),
+                     {"id": bg, "result": {"stopReason": "end_turn"}},
+                     {"id": steered, "result": {"stopReason": "end_turn"}}, None):
+            await feed.put(line)
+        return seen + [message async for message in reader]
+    msgs = asyncio.run(background())
+    HELD_QUIET_SECONDS = quiet_saved
+    assert msgs[0] == {"type": "result", "user_message_uuids": ["bg", "bg-steer"], "terminal_reason": "completed",
+                       "result": "It runs in the background. Still running.", "is_error": False, "errors": []}, msgs
+    assert msgs[1] == {"type": "rook_held", "active": True, "turn": "bg-steer", "tools": ["Bash"]}, msgs
+    assert msgs[2]["type"] == "user" and msgs[3] == {"type": "rook_held", "active": False, "turn": "bg-steer"}, msgs
+    assert len(msgs) == 4 and not agy.open and not agy.tools and not agy.late_held  # The late answers say nothing.
+    assert bg not in agy.calls and steered not in agy.calls and not agy.prompt_states
+    # A tool call after agy speaks means it is still working: the ten-minute limit holds.
+    agy.turn(process, "s", "tool-after", "Go.", [], False)
+    out(chunk("Checking."))
+    out(usage)
+    out(update({**call, "toolCallId": "c17"}))
+    assert not agy.spoke_at and agy.quiet() == STALL_SECONDS
+    out(update({**call, "toolCallId": "c17", "sessionUpdate": "tool_call_update", "status": "completed"}))
+    out(chunk("Done."))
+    assert [m["result"] for m in out({"id": agy.open[-1], "result": {"stopReason": "end_turn"}})
+            if m["type"] == "result"] == ["Done."] and not agy.open
+    # A new turn while a previous answered_open command still runs clears the old tool and held note cleanly.
+    agy.turn(process, "s", "bg-a", "Start A.", [], False)
+    bg_a = agy.open[-1]
+    out(update({**call, "toolCallId": "c18"}))
+    out(chunk("A running."))
+    out(usage)
+    a_msgs = list(agy.answered_open())
+    assert a_msgs[0]["user_message_uuids"] == ["bg-a"] and a_msgs[1]["active"] is True and agy.late_held == "bg-a"
+    agy.turn(process, "s", "plain-b", "Quick B.", [], False)
+    assert not agy.tools
+    assert list(agy.flush()) == [{"type": "rook_held", "active": False, "turn": "bg-a"}] and agy.late_held is None
+    out(chunk("B answer."))
+    b_res = [m for m in out({"id": agy.open[-1], "result": {"stopReason": "end_turn"}}) if m["type"] == "result"]
+    assert len(b_res) == 1 and b_res[0]["result"] == "B answer." and not agy.held
+    out({"id": bg_a, "result": {"stopReason": "end_turn"}})
+    # A tool completing after agy spoke resets spoke_at so the wake step is not cut short by HELD_QUIET_SECONDS.
+    agy.turn(process, "s", "wake-step", "Run fast.", [], False)
+    out(update({**call, "toolCallId": "c19"}))
+    out(chunk("Running now."))
+    out(usage)
+    assert agy.spoke_at and agy.quiet() == HELD_QUIET_SECONDS
+    out(update({**call, "toolCallId": "c19", "sessionUpdate": "tool_call_update", "status": "completed"}))
+    assert not agy.spoke_at and agy.quiet() == STALL_SECONDS
+    out(chunk(" Finished cleanly."))
+    assert [m["result"] for m in out({"id": agy.open[-1], "result": {"stopReason": "end_turn"}})
+            if m["type"] == "result"] == ["Running now. Finished cleanly."] and not agy.open
     # T3's tool server: only with the owner's current agy sign-in, by a link, never a copy; otherwise the t3 command.
     global T3_TOKENS
     tokens, url = T3_TOKENS, "http://127.0.0.1:3773/mcp"

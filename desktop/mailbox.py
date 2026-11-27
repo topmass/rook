@@ -28,17 +28,21 @@ OWNER_START = settings.OWNER_START_TOKEN  # The same, as the first word of a sen
 
 SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5000
-ANSWER_LIMIT = 200
+ANSWER_LIMIT = 1000
 SUMMARY_LIMIT = 300
 # An item's detail is stored up to this size, so one item cannot flood Rook's context. A list shows this much of it.
 DETAIL_LIMIT = 2000
 DESCRIPTION_LIMIT = 240
-# Check-ins ride only on the owner's own turns. An item is first named once it is this old.
+# An item is first named once it is this old.
 CHECKIN_AGE_SECONDS = 15 * 60
 # After each mention, the item is due again after the next of these waits. The last one repeats while it is open.
 CHECKIN_REPEAT_SECONDS = (60 * 60, 3 * 60 * 60, 24 * 60 * 60)
-# At most one check-in line in this long, whatever is due.
-CHECKIN_GAP_SECONDS = 30 * 60
+# Each item keeps its own schedule: (first wait, then the waits after each mention). An agent that waits on the owner
+# comes back every 30 minutes for as long as it waits, and a decision every hour.
+CHECKIN_CADENCE = {"needs": (10 * 60, (20 * 60, 30 * 60)), "question": (10 * 60, (20 * 60, 30 * 60)),
+                   "decision": (15 * 60, (30 * 60, 60 * 60))}
+# A focus lock set with no end ends once the owner has not touched it for this long.
+DEFAULT_FOCUS_IDLE_SECONDS = 90 * 60
 
 KINDS = ("question", "needs", "decision", "review", "pr", "reminder")
 CHECKIN_KINDS = ("question", "needs", "decision", "review", "reminder")
@@ -646,6 +650,10 @@ def _observe_in_tx(
         if kind == "needs":
             clean_summary, detail, request_data = _merge_needs(existing, clean_summary, detail, request_data,
                                                                resolved_machine, clean_thread)
+            if existing["state"] in CLOSED_STATES and existing["state"] != "dismissed" and obs_at > existing["updated"]:
+                # The live count wins over done/answered: a read after close still sees the agent wait, so reopen it.
+                conn.execute("UPDATE items SET state = 'open', resolution = NULL, closed_at = NULL WHERE id = ?",
+                             (existing["id"],))
         merged_detail = existing["detail"] if detail is None else _capped_detail(detail)
         merged_parent = clean_parent if clean_parent is not None else existing["parent_thread"]
         merged_project = clean_project if clean_project is not None else existing["project"]
@@ -1068,10 +1076,11 @@ def _focus_from_conn(conn, target_path, now):
     row = conn.execute("SELECT * FROM focus WHERE id = 1").fetchone()
     if row is None:
         return None
-    if row["until"] is not None and now >= row["until"]:
+    ends = row["until"] if row["until"] is not None else row["set_at"] + DEFAULT_FOCUS_IDLE_SECONDS
+    if now >= ends:
         try:
             with _write_tx(conn, target_path):
-                conn.execute("DELETE FROM focus WHERE id = 1 AND until IS NOT NULL AND until <= ?", (now,))
+                conn.execute("DELETE FROM focus WHERE id = 1 AND set_at = ?", (row["set_at"],))
         except sqlite3.OperationalError:
             pass
         return None
@@ -1118,6 +1127,19 @@ def focus_get(*, now=None, path=None):
         return _focus_from_conn(conn, target, ts)
 
 
+def focus_touch(*, now=None, path=None):
+    """The owner is active: a focus set with no end starts its idle wait again. Return the active focus or None."""
+    ts = float(time.time() if now is None else now)
+    target = _db_path(path)
+    with _connect(target) as conn:
+        focus = _focus_from_conn(conn, target, ts)
+        if focus and focus["until"] is None:
+            with _write_tx(conn, target):
+                conn.execute("UPDATE focus SET set_at = ? WHERE id = 1 AND until IS NULL", (ts,))
+            focus["set_at"] = ts
+        return focus
+
+
 def focus_clear(*, path=None):
     """Clear the focus lock. Return True when a lock was active."""
     target = _db_path(path)
@@ -1157,34 +1179,34 @@ def related(item, focus):
 
 
 def checkin_due_at(item):
-    """When an item is next due in a check-in. The first mention waits CHECKIN_AGE_SECONDS from its creation, or
-    from its last wake. Each later one waits the next step of CHECKIN_REPEAT_SECONDS from the last mention."""
+    """When an item is next due in a check-in, by its kind's CHECKIN_CADENCE, else CHECKIN_AGE_SECONDS then
+    CHECKIN_REPEAT_SECONDS. The first mention waits from its creation, or from its last wake. Each later one waits
+    the next step from the last mention, and the last step repeats."""
     count, start = item["checkin_count"], item["checkin_from"]
+    first, repeats = CHECKIN_CADENCE.get(item["kind"], (CHECKIN_AGE_SECONDS, CHECKIN_REPEAT_SECONDS))
     if not count:
-        return max(item["created"], start or 0) + CHECKIN_AGE_SECONDS
-    return start + CHECKIN_REPEAT_SECONDS[min(count, len(CHECKIN_REPEAT_SECONDS)) - 1]
+        return max(item["created"], start or 0) + first
+    return start + repeats[min(count, len(repeats)) - 1]
 
 
-def checkin(now=None, *, path=None):
-    """Return (due items, how many other open items wait) for a check-in, or ([], 0) when none is due or the last
-    check-in was under CHECKIN_GAP_SECONDS ago. Under a focus, only related items count."""
+def checkin(now=None, *, kinds=CHECKIN_KINDS, path=None):
+    """Return (due items, how many other open items wait) for a check-in, or ([], 0) when none is due. Each item keeps
+    its own schedule, so one item's mention never holds another back. Only items of kinds count, and under a focus,
+    only related ones."""
     ts = float(time.time() if now is None else now)
     target = _db_path(path)
     with _connect(target) as conn:
         _wake_expired_snoozes(conn, target, ts)
         active_focus = _focus_from_conn(conn, target, ts)
         rows = conn.execute("SELECT * FROM items WHERE state = 'open'").fetchall()
-        last = conn.execute("SELECT offered_at FROM checkin_state WHERE id = 1").fetchone()
-    if last and ts - last["offered_at"] < CHECKIN_GAP_SECONDS:
-        return [], 0
-    waiting = [item for item in map(_row_to_item, rows) if item["kind"] in CHECKIN_KINDS
+    waiting = [item for item in map(_row_to_item, rows) if item["kind"] in kinds
                and (active_focus is None or related(item, active_focus))]
     due = sorted((item for item in waiting if checkin_due_at(item) <= ts), key=_item_sort_key)
     return (due, len(waiting) - len(due)) if due else ([], 0)
 
 
 def checkin_done(ids, *, now=None, path=None):
-    """Count one check-in mention for each named item, and start the quiet gap before the next check-in."""
+    """Count one check-in mention for each named item, which starts its own next wait."""
     ts = float(time.time() if now is None else now)
     clean_ids = sorted({str(item_id).strip() for item_id in ids if str(item_id).strip()})
     target = _db_path(path)
@@ -1192,11 +1214,6 @@ def checkin_done(ids, *, now=None, path=None):
         with _write_tx(conn, target):
             conn.executemany("UPDATE items SET checkin_count = checkin_count + 1, checkin_from = ? WHERE id = ?",
                              [(ts, item_id) for item_id in clean_ids])
-            conn.execute(
-                "INSERT INTO checkin_state (id, offered_ids, offered_at) VALUES (1, '[]', ?) "
-                "ON CONFLICT(id) DO UPDATE SET offered_at = excluded.offered_at",
-                (ts,),
-            )
     return clean_ids
 
 
@@ -1760,6 +1777,18 @@ def _run_check_body(root, now, relay_script):
         assert get(q1_id, path=db)["state"] == "answered" and get(q1_id, path=db)["answer"] == "Use 8080"
         assert get(q2["id"], path=db)["state"] == "open" and get(q2["id"], path=db)["answer"] is None
 
+        # 2b. Answer receipt preserves up to ANSWER_LIMIT (1000) chars and truncates longer answers cleanly.
+        assert ANSWER_LIMIT == 1000
+        db_ans = root / "answer-limit/mailbox.db"
+        q_ok = observe("decision", "Keep 500-char answer?", machine="oak", thread="t-ans", run="r-ok", observed_at=now, path=db_ans)
+        ans_500 = "a" * 500
+        answer(q_ok["id"], ans_500, now=now + 1, path=db_ans)
+        assert get(q_ok["id"], path=db_ans)["answer"] == ans_500
+        q_long = observe("decision", "Cap 1200-char answer?", machine="oak", thread="t-ans", run="r-long", observed_at=now + 2, path=db_ans)
+        answer(q_long["id"], "b" * 1200, now=now + 3, path=db_ans)
+        got_long = get(q_long["id"], path=db_ans)["answer"]
+        assert len(got_long) == 1000 and got_long == ("b" * 997) + "...", (len(got_long), got_long[-10:])
+
         # 3. Deterministic ID collision extends hash length.
         coll_key = "reminder:2026-11-23:" + _norm_hash("collide test")
         base_id = id_for(coll_key, 4)
@@ -2045,16 +2074,15 @@ def _run_check_body(root, now, relay_script):
             assert [item["id"] for item in due] == [k1["id"]] and more == 0, (wait, due, more)
             checkin_done([k1["id"]], now=at, path=db_chk)
         assert get(k1["id"], path=db_chk)["checkin_count"] == 5 and get(k1["id"], path=db_chk)["checkin_from"] == at
-        # Staggered items: the gap holds a due item back, and a line names and counts only what is due.
+        # Staggered items: each keeps its own schedule, so one mention never holds another due item back.
         db_gap = root / "gap/mailbox.db"
         a = observe("reminder", "A", observed_at=now, path=db_gap)
         b = observe("reminder", "B", observed_at=now + 10 * minute, path=db_gap)
         due, more = checkin(now + 15 * minute, path=db_gap)
         assert [item["id"] for item in due] == [a["id"]] and more == 1  # B waits, unnamed.
         checkin_done([a["id"]], now=now + 15 * minute, path=db_gap)
-        assert checkin(now + 25 * minute, path=db_gap) == ([], 0)  # B is due, but the gap holds it.
-        due, more = checkin(now + 45 * minute, path=db_gap)
-        assert [item["id"] for item in due] == [b["id"]] and more == 1  # A is due again only at 1h15m.
+        due, more = checkin(now + 25 * minute, path=db_gap)
+        assert [item["id"] for item in due] == [b["id"]] and more == 1  # No global gap: B is due at its own time.
         checkin_done([b["id"]], now=now + 45 * minute, path=db_gap)
         assert [get(x["id"], path=db_gap)["checkin_count"] for x in (a, b)] == [1, 1]
         assert [item["id"] for item in checkin(now + 75 * minute, path=db_gap)[0]] == [a["id"]]
@@ -2085,6 +2113,47 @@ def _run_check_body(root, now, relay_script):
         n_new = observe("needs", "Waits again", machine="oak", thread="t-new", observed_at=now + 3 * hour, path=db_fc)
         assert n_new["checkin_count"] == 0 and n_new["created"] == now + 3 * hour
 
+        # An agent that waits on the owner: first at 10m, then 20m, then every 30m for as long as it waits. A decision:
+        # 15m, 30m, then every hour. A mention of one never holds the other back.
+        db_cad = root / "cadence/mailbox.db"
+        blocked = observe("needs", "Waits", machine="oak", thread="t-blk", observed_at=now, path=db_cad)
+        asks = observe("decision", "Ship it?", machine="oak", thread="t-dec", run="r1", observed_at=now, path=db_cad)
+        assert checkin(now + 10 * minute - 1, path=db_cad) == ([], 0)
+        assert [item["id"] for item in checkin(now + 10 * minute, path=db_cad)[0]] == [blocked["id"]]
+        at = now + 10 * minute
+        for wait in (0, 20 * minute, 30 * minute, 30 * minute, 30 * minute):
+            at += wait
+            if wait:
+                assert blocked["id"] not in [item["id"] for item in checkin(at - 1, path=db_cad)[0]], wait
+            assert blocked["id"] in [item["id"] for item in checkin(at, path=db_cad)[0]], wait
+            checkin_done([blocked["id"]], now=at, path=db_cad)
+        assert [checkin_due_at(dict(asks, checkin_count=n, checkin_from=now)) - now for n in (0, 1, 2, 3)] == [
+            15 * minute, 30 * minute, 60 * minute, 60 * minute]
+        assert asks["id"] in [item["id"] for item in checkin(now + 15 * minute, path=db_cad)[0]]
+
+        # A live count wins over a closed needs row: a read after a premature done opens it again. An older read does not.
+        db_live = root / "live/mailbox.db"
+        live = observe("needs", "Waits", machine="oak", thread="t-live", observed_at=now, path=db_live)
+        done(live["id"], now=now + 60, path=db_live)
+        assert observe("needs", "Waits", machine="oak", thread="t-live", observed_at=now + 30,
+                       path=db_live)["state"] == "done"
+        again = observe("needs", "Waits", machine="oak", thread="t-live", observed_at=now + 120, path=db_live)
+        assert again["id"] == live["id"] and again["state"] == "open" and again["closed_at"] is None, again
+        snooze(live["id"], until=now + hour, now=now + 130, path=db_live)
+        assert observe("needs", "Waits", machine="oak", thread="t-live", observed_at=now + 140,
+                       path=db_live)["state"] == "snoozed"  # The owner's snooze stands.
+
+        # A focus set with no end ends after 90 idle minutes. Each touch starts the wait again. A set end stands.
+        db_idle = root / "idle/mailbox.db"
+        focus_set(topic="long work", now=now, path=db_idle)
+        assert focus_get(now=now + DEFAULT_FOCUS_IDLE_SECONDS - 1, path=db_idle) is not None
+        assert focus_touch(now=now + 80 * minute, path=db_idle)["set_at"] == now + 80 * minute
+        assert focus_get(now=now + 80 * minute + DEFAULT_FOCUS_IDLE_SECONDS - 1, path=db_idle) is not None
+        assert focus_get(now=now + 80 * minute + DEFAULT_FOCUS_IDLE_SECONDS, path=db_idle) is None
+        focus_set(topic="all day", until=now + 10 * hour, now=now, path=db_idle)
+        assert focus_touch(now=now + 5 * hour, path=db_idle)["set_at"] == now
+        assert focus_get(now=now + 9 * hour, path=db_idle) is not None
+
         # Migration: a version 1 database keeps its items, focus and check-in memory.
         db_v1 = root / "v1/mailbox.db"
         db_v1.parent.mkdir(mode=0o700)
@@ -2109,8 +2178,7 @@ def _run_check_body(root, now, relay_script):
         with _connect(db_v1) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         focus_clear(path=db_v1)
-        assert checkin(now + 90 * minute - 1, path=db_v1) == ([], 0)  # The old offer's time starts the gap.
-        due, more = checkin(now + 90 * minute, path=db_v1)
+        due, more = checkin(now + 15 * minute, path=db_v1)
         assert [item["id"] for item in due] == ["mb-bbbb"] and more == 1  # The offered one is on its next step.
         assert [item["id"] for item in checkin(now + 2 * hour, path=db_v1)[0]] == ["mb-aaaa", "mb-bbbb"]
 

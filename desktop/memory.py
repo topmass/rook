@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import select
 import shlex
@@ -47,14 +48,14 @@ SHARED_FILES = (
     ("prompts/remember.md", 0o644),
 )
 SHARED_UNITS = ("agent-dream.service", "agent-dream.timer")
+DREAM_LABEL = "com.rook.agent-dream"  # On a Mac, the launchd job that stands in for agent-dream.timer.
 GIT_IGNORE_LINE = ".agent-memory/"
 MANIFEST_NAME = "rook-shared-manifest.json"
 MAX_BACKUPS = 7
-INDEX_LIMIT = 8000
-INCOMING_LIMIT = 10000
-TURNS_TAIL_BYTES = 128 * 1024
-MAX_TURNS = 120
-DREAM_TIMEOUT = 900
+INDEX_LINES = 200
+INDEX_BYTES = 25_000
+BLOCK_KB = 100
+DREAM_TIMEOUT = 3600
 
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
@@ -197,17 +198,41 @@ def _drain_incoming(consumed_raw):
             path.unlink(missing_ok=True)
 
 
+def _trim_index(text):
+    """Trim MEMORY.md to at most INDEX_LINES lines and INDEX_BYTES UTF-8 bytes."""
+    text = text.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    truncated = len(lines) > INDEX_LINES
+    trimmed = "\n".join(lines[:INDEX_LINES])
+    encoded = trimmed.encode("utf-8")
+    if len(encoded) > INDEX_BYTES:
+        trimmed = encoded[:INDEX_BYTES].decode("utf-8", errors="ignore").rstrip()
+        truncated = True
+    return trimmed + "\n(truncated)" if truncated else trimmed
+
+
+def _cut_block(text):
+    """Keep the head and tail of a single message larger than BLOCK_KB (UTF-8 bytes)."""
+    cap = BLOCK_KB * 1024
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text
+    head = raw[:cap * 3 // 4].decode("utf-8", errors="ignore")
+    tail = raw[-(cap // 4):].decode("utf-8", errors="ignore")
+    return f"{head}\n[... {(len(raw) - cap) // 1024} KB cut ...]\n{tail}"
+
+
 def startup_prompt(python_exe, relay_path):
     """Return Rook's own-memory prompt section, or empty string when shared memory is active."""
     if is_shared():
         return ""
     mem_dir = memory_dir()
     try:
-        index_text = (mem_dir / "MEMORY.md").read_text(errors="replace").strip()
+        index_text = _trim_index((mem_dir / "MEMORY.md").read_text(errors="replace"))
     except OSError:
         index_text = ""
-    if len(index_text) > INDEX_LIMIT:
-        index_text = index_text[:INDEX_LIMIT].rstrip() + "\n(truncated)"
     try:
         incoming = _parse_incoming_bytes((mem_dir / "incoming.jsonl").read_bytes())
     except OSError:
@@ -224,19 +249,7 @@ def startup_prompt(python_exe, relay_path):
     if index_text:
         parts.append("--- Memory index (MEMORY.md) ---\n" + index_text + "\n--- End of memory index ---")
     if incoming:
-        # Keep the newest incoming notes first so a large backlog never drops recent facts.
-        kept, used, trimmed = [], 0, False
-        for item in reversed(incoming):
-            ts = item.get("ts") or ""
-            row = ((f"- [{ts}] " if ts else "- ") + item["text"])[:INCOMING_LIMIT]
-            if kept and used + len(row) > INCOMING_LIMIT:
-                trimmed = True
-                break
-            kept.append(row)
-            used += len(row) + 1
-        kept.reverse()
-        if trimmed:
-            kept.insert(0, "- (older untidied notes in incoming.jsonl)")
+        kept = [(f"- [{item['ts']}] " if item.get("ts") else "- ") + item["text"] for item in incoming]
         parts.append("--- Recent notes not yet tidied (incoming.jsonl) ---\n"
                      + "\n".join(kept)
                      + "\n--- End of recent notes ---")
@@ -248,59 +261,56 @@ def startup_prompt(python_exe, relay_path):
 def new_turns_since(since_ts):
     """Return (formatted turn lines, newest timestamp) for spoken/typed turns newer than since_ts."""
     path = desk.state_dir() / "rook/turns.jsonl"
+    found, max_ts, user_turns = [], since_ts, set()
     try:
-        with open(path, "rb") as handle:
-            size = handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, size - TURNS_TAIL_BYTES))
-            lines = handle.read().decode(errors="replace").splitlines()
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                if not raw.strip():
+                    continue
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                event = row.get("event")
+                if event not in ("request", "response"):
+                    continue
+                session = row.get("session")
+                if event == "request":
+                    if row.get("source") not in ("spoken", "typed"):
+                        continue
+                    turn_id = row.get("turn")
+                    if turn_id is not None:
+                        user_turns.add((session, turn_id))
+                at = row.get("at")
+                if not isinstance(at, str):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(at)
+                except ValueError:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                ts = parsed.timestamp()
+                if ts <= since_ts:
+                    continue
+                if event == "request":
+                    text = str(row.get("text") or "").strip()
+                    if text:
+                        found.append(f"[{at}] User ({row['source']}): {_cut_block(text)}")
+                        max_ts = max(max_ts, ts)
+                else:
+                    turns = row.get("turns") or ([row["turn"]] if row.get("turn") is not None else [])
+                    if not any((session, turn_id) in user_turns for turn_id in turns):
+                        continue
+                    text = str(row.get("text") or "").strip() or str(row.get("spoken") or "").strip()
+                    if text and text != "PASS":
+                        found.append(f"[{at}] Rook: {_cut_block(text)}")
+                        max_ts = max(max_ts, ts)
     except OSError:
         return [], since_ts
-    found, max_ts, user_turns = [], since_ts, set()
-    for raw in lines:
-        if not raw.strip():
-            continue
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        event = row.get("event")
-        if event not in ("request", "response"):
-            continue
-        session = row.get("session")
-        if event == "request":
-            if row.get("source") not in ("spoken", "typed"):
-                continue
-            turn_id = row.get("turn")
-            if turn_id is not None:
-                user_turns.add((session, turn_id))
-        at = row.get("at")
-        if not isinstance(at, str):
-            continue
-        try:
-            parsed = datetime.fromisoformat(at)
-        except ValueError:
-            continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        ts = parsed.timestamp()
-        if ts <= since_ts:
-            continue
-        if event == "request":
-            text = str(row.get("text") or "").strip()
-            if text:
-                found.append(f"[{at}] User ({row['source']}): {text[:1200]}")
-                max_ts = max(max_ts, ts)
-        else:
-            turns = row.get("turns") or ([row["turn"]] if row.get("turn") is not None else [])
-            if not any((session, turn_id) in user_turns for turn_id in turns):
-                continue
-            text = str(row.get("text") or row.get("spoken") or "").strip()
-            if text:
-                found.append(f"[{at}] Rook: {text[:1200]}")
-                max_ts = max(max_ts, ts)
-    return found[-MAX_TURNS:], max_ts
+    return found, max_ts
 
 
 def backup_memory(keep=MAX_BACKUPS):
@@ -539,16 +549,39 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
         watchdog.start()
 
         deadline = time.monotonic() + timeout
+        in_fd = proc.stdin.fileno()
         out_fd = proc.stdout.fileno()
+        os.set_blocking(in_fd, False)
         buf = bytearray()
+        out_eof = False
         rpc_seq = 0
         all_text = []
         after_tool_text = []
 
         def send_rpc(message):
+            nonlocal out_eof
             payload = (json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode()
-            proc.stdin.write(payload)
-            proc.stdin.flush()
+            view = memoryview(payload)
+            sent = 0
+            while sent < len(view):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"timed out after {timeout}s")
+                rlist = [] if out_eof else [out_fd]
+                readable, writable, _ = select.select(rlist, [in_fd], [], remaining)
+                if not readable and not writable:
+                    raise TimeoutError(f"timed out after {timeout}s")
+                if readable:
+                    chunk = os.read(out_fd, 65536)
+                    if chunk:
+                        buf.extend(chunk)
+                    else:
+                        out_eof = True
+                if writable:
+                    try:
+                        sent += os.write(in_fd, view[sent:])
+                    except BlockingIOError:
+                        pass
 
         def call_rpc(method, params):
             nonlocal rpc_seq
@@ -557,12 +590,19 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
             return rpc_seq
 
         def read_line():
+            nonlocal out_eof
             while True:
                 nl = buf.find(b"\n")
                 if nl != -1:
                     line = bytes(buf[:nl])
                     del buf[:nl + 1]
                     return line.decode(errors="replace")
+                if out_eof:
+                    if buf:
+                        line = bytes(buf)
+                        buf.clear()
+                        return line.decode(errors="replace")
+                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"timed out after {timeout}s")
@@ -571,6 +611,7 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
                     raise TimeoutError(f"timed out after {timeout}s")
                 chunk = os.read(out_fd, 65536)
                 if not chunk:
+                    out_eof = True
                     if buf:
                         line = bytes(buf)
                         buf.clear()
@@ -1266,6 +1307,37 @@ def _run_systemctl(*args):
     return True, ""
 
 
+def _run_launchctl(*args):
+    try:
+        done = subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or f"exit {done.returncode}").strip()
+        return False, detail
+    return True, ""
+
+
+def _dream_plist_path():
+    return Path.home() / "Library/LaunchAgents" / f"{DREAM_LABEL}.plist"
+
+
+def _render_dream_plist():
+    """agent-dream.service and its timer as one launchd job: the dream at 04:00, at Nice 10, with the PATH of
+    Rook's own launchd jobs. Like Persistent=true, launchd runs a time missed in sleep when the Mac wakes."""
+    home = Path.home()
+    log = str(home / "Library/Logs/agent-dream.log")
+    return plistlib.dumps({
+        "Label": DREAM_LABEL,
+        "ProgramArguments": [str(agents_dir() / "bin/dream")],
+        "EnvironmentVariables": {"PATH": f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
+        "StartCalendarInterval": {"Hour": 4, "Minute": 0},
+        "Nice": 10,
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    })
+
+
 def _resolve_shared_dir(memory_dir_bin, workspace):
     done = subprocess.run([str(memory_dir_bin), "--start", str(workspace)], capture_output=True, text=True, timeout=15)
     if done.returncode == 3:
@@ -1397,7 +1469,8 @@ def _render_memory_conf():
 
 def install_shared():
     """Install the vendored shared memory system into ~/.agents/. Return (ok, message)."""
-    if not shutil.which("systemctl"):  # Its nightly tidy is agent-dream.timer: refuse before anything is written.
+    launchd = not shutil.which("systemctl") and bool(shutil.which("launchctl"))  # A Mac: the timer is a launchd job.
+    if not shutil.which("systemctl") and not launchd:  # No nightly timer at all: refuse before anything is written.
         return False, ("Refused: the shared memory tidies its notes each night with a systemd timer, and this computer "
                        "has no systemd, so Rook keeps its own memory.")
     agents = agents_dir()
@@ -1429,7 +1502,8 @@ def install_shared():
         "files": prior_files,
         "git_ignore": prior.get("git_ignore") if prior else None,
         "claude_hook": prior.get("claude_hook") if prior else None,
-        "timer": dict(prior_timer) if prior_timer else {"unit": "agent-dream.timer", "enabled": False},
+        "timer": dict(prior_timer) if prior_timer else (
+            {"label": DREAM_LABEL, "loaded": False} if launchd else {"unit": "agent-dream.timer", "enabled": False}),
         "rook_memory_dir": prior.get("rook_memory_dir") if prior else None,
         "moved_notes": list(prior.get("moved_notes") or []) if prior else [],
     }
@@ -1458,13 +1532,23 @@ def install_shared():
         save_manifest()
 
     systemd_dir = _systemd_user_dir()
-    for unit in SHARED_UNITS:
+    for unit in () if launchd else SHARED_UNITS:
         dest = systemd_dir / unit
         key = str(dest)
         if (dest.exists() or dest.is_symlink()) and key not in manifest["files"]:
             continue
         _copy_file(SHARED_SOURCE / "systemd" / unit, dest, 0o644)
         manifest["files"][key] = _sha256_file(dest)
+        save_manifest()
+
+    plist = _dream_plist_path()
+    if launchd and (str(plist) in manifest["files"] or not (plist.exists() or plist.is_symlink())):
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        if plist.is_symlink():
+            plist.unlink()
+        plist.write_bytes(_render_dream_plist())
+        plist.chmod(0o644)
+        manifest["files"][str(plist)] = _sha256_file(plist)
         save_manifest()
 
     git_path = _git_ignore_path()
@@ -1502,14 +1586,24 @@ def install_shared():
     }
     save_manifest()
 
-    ok, detail = _run_systemctl("daemon-reload")
-    if not ok:
-        return False, f"Could not reload user systemd units: {detail}"
-    ok, detail = _run_systemctl("enable", "--now", "agent-dream.timer")
-    if not ok:
-        return False, f"Could not enable agent-dream.timer: {detail}"
-    manifest["timer"] = {"unit": "agent-dream.timer", "enabled": True}
-    save_manifest()
+    if launchd:
+        if str(plist) in manifest["files"]:  # Rook loads only the job it wrote, never one it found.
+            domain = f"gui/{os.getuid()}"
+            _run_launchctl("bootout", f"{domain}/{DREAM_LABEL}")  # A loaded job refuses a second bootstrap.
+            ok, detail = _run_launchctl("bootstrap", domain, str(plist))
+            if not ok:
+                return False, f"Could not load {DREAM_LABEL}: {detail}"
+            manifest["timer"] = {"label": DREAM_LABEL, "loaded": True}
+            save_manifest()
+    else:
+        ok, detail = _run_systemctl("daemon-reload")
+        if not ok:
+            return False, f"Could not reload user systemd units: {detail}"
+        ok, detail = _run_systemctl("enable", "--now", "agent-dream.timer")
+        if not ok:
+            return False, f"Could not enable agent-dream.timer: {detail}"
+        manifest["timer"] = {"unit": "agent-dream.timer", "enabled": True}
+        save_manifest()
 
     try:
         rook_shared = _resolve_shared_dir(agents / "bin/memory-dir", rook_workspace())
@@ -1532,10 +1626,24 @@ def remove_shared():
     if manifest is None:
         return False, "Shared memory was not installed by Rook."
 
+    timer = manifest.get("timer") or {}
+    if timer.get("loaded") and timer.get("label"):  # First, so nothing changes when the job cannot be unloaded.
+        label, job = timer["label"], f"gui/{os.getuid()}/{timer['label']}"
+        try:
+            # 113: launchd has no such job, so it is already unloaded. Any other answer needs a bootout.
+            if subprocess.run(["launchctl", "print", job], capture_output=True, timeout=30).returncode != 113:
+                done = subprocess.run(["launchctl", "bootout", job], capture_output=True, text=True, timeout=30)
+                if done.returncode != 0:  # Over ssh there is often no gui domain.
+                    detail = (done.stderr or done.stdout or f"exit {done.returncode}").strip()
+                    return False, (f"Could not unload {label} from this session: {detail}. Nothing was changed. "
+                                   "Run relay.py memory remove-shared again in a terminal on the Mac itself, "
+                                   "while signed in at its screen.")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return False, f"Could not run launchctl to unload {label}: {error}. Nothing was changed."
+
     rook_shared = Path(manifest["rook_memory_dir"]) if manifest.get("rook_memory_dir") else None
     copied = _copy_shared_notes_to_own(rook_shared, manifest.get("moved_notes") or [])
 
-    timer = manifest.get("timer") or {}
     timer_enabled = bool(timer.get("enabled") and timer.get("unit"))
     if timer_enabled:
         ok, detail = _run_systemctl("disable", "--now", str(timer["unit"]))

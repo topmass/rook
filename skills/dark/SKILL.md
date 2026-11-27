@@ -1,7 +1,6 @@
 ---
 name: dark
-description: Turn Rook dark, as if ⟦owner⟧ turned it off for a while, and bring it back online. While dark, the swarm is gone, Rook takes no screenshots, and every message waits until Rook comes back. Use when ⟦owner⟧ asks Rook to go dark or quiet, to stay dark longer, or to come back online.
-when_to_use: Trigger phrases include "go dark", "go dark for an hour", "go quiet until three", "stay dark", "stay dark for another hour", "come back online", "you can come back", "are you dark".
+description: "Turn Rook dark, as if ⟦owner⟧ turned it off for a while, and bring it back online. While dark, the swarm is gone, Rook takes no screenshots, and every message waits until Rook comes back. Use when ⟦owner⟧ asks Rook to go dark or quiet, to stay dark longer, or to come back online, such as \"go dark for an hour\", \"go quiet until three\", \"stay dark for another hour\", \"come back online\", \"you can come back\" or \"are you dark\"."
 allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py dark *)
 ---
 

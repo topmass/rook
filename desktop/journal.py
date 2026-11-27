@@ -1086,9 +1086,14 @@ def check():
         # opens it again with every row.
         with mailbox._connect(path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == mailbox.SCHEMA_VERSION == 2
+            # A file from a Rook that had the retired action ledger opens as before, and its rows stay.
+            conn.execute("CREATE TABLE actions (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, state TEXT)")
+            conn.execute("INSERT INTO actions (key, state) VALUES ('act-1', 'confirmed')")
+            conn.execute("INSERT INTO journal_meta (key, value) VALUES ('action_seq', '1')")
         mailbox.observe("reminder", "Renew the passport.", path=path)
         again = Journal(path).open()
         assert len(again.read("SELECT * FROM requests")) == 5 and mailbox.items(path=path)[0]["kind"] == "reminder"
+        assert [tuple(row) for row in again.read("SELECT key, state FROM actions")] == [("act-1", "confirmed")]
         # Events: each beside the change it describes, published after the commit in order, two for a turn.
         record = Journal(Path(folder) / "events/mailbox.db").open()
         heard = []

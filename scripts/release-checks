@@ -96,7 +96,7 @@ run() {
 }
 PICK="$*"
 
-for flag in speech start journal restart agent steps dark timing mailbox desktop; do  # The slowest first.
+for flag in speech start journal restart agent steps replay dark timing mailbox desktop; do  # The slowest first.
     run "rook-$flag" "$PY" desktop/rook.py "--check-$flag"
 done
 # Slower checks with a headless browser or media: they run only when named, such as rook-media.
@@ -113,7 +113,9 @@ run relay-herdr "$SYS_PY" desktop/relay.py --check-herdr
 run obsidian-notes "$SYS_PY" scripts/check_obsidian_notes.py
 run request-perf "$SYS_PY" desktop/perf.py
 run relay-memory "$SYS_PY" desktop/relay.py --check-memory
+run relay-shared-memory "$SYS_PY" desktop/relay.py --check-shared-memory
 run relay-plugins "$SYS_PY" desktop/relay.py --check-plugins
+run relay-verify "$PY" desktop/relay.py --check-verify
 run work "$SYS_PY" desktop/work.py
 run watch "$SYS_PY" desktop/watch.py
 run mailbox "$SYS_PY" desktop/mailbox.py
@@ -125,11 +127,17 @@ run speech-words "$PY" desktop/speech.py --check-words
 run turn-end "$PY" desktop/turn_end.py --check
 run desk "$SYS_PY" desktop/desk.py
 run start-limit "$SYS_PY" desktop/start_limit.py --check
+run update-check "$SYS_PY" desktop/update_check.py --check
 run machine "$SYS_PY" desktop/machine.py
 run boundaries "$SYS_PY" scripts/check_boundaries.py
 run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
+run overlay-viewer "$SYS_PY" desktop/overlay.py --check-viewer
 wait
 
+if [ ! -d "$X" ]; then
+    echo "release-checks: the scratch folder $X vanished during the run, so every result is lost. Another job deleted it." >&2
+    exit 2
+fi
 failed=0
 for name in $names; do
     read -r code secs < "$X/res-$name" 2>/dev/null || { code=99; secs=0; }

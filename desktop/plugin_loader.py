@@ -30,7 +30,7 @@ PROGRAM = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}\Z")  # A bare program na
 LABEL = re.compile(r"[a-z][a-z0-9_-]{0,39}\Z")  # An activity label, such as windows.
 MANIFEST_MAX = 64 * 1024
 SNAPSHOT_MAX = 1024 * 1024
-FRAGMENT_MAX = {"bundled": 4000, "user": 600}  # Characters. Every fragment is paid on every turn by every agent.
+FRAGMENT_MAX = {"bundled": 4000, "user": 4000}  # Characters. Every fragment is paid on every turn by every agent.
 SLOT_MAX = 8000  # Characters of all fragments in one slot.
 ACTIVATIONS = ("always", "auto", "opt-in")
 FIELDS = {"name", "description", "version", "activation", "detect", "skills", "commands", "prompt_slots", "mcp",
@@ -605,7 +605,7 @@ argv = harness.Claude().command("p", servers, "s", root / "plugin", ())
 dirs = [argv[at + 1] for at, word in enumerate(argv) if word == "--plugin-dir"]
 claude = {key: text for at, folder in enumerate(dirs) for key, text in listed(Path(folder) / "skills", ("rook:", "rook-user:")[at]).items()}
 home = antigravity_home.build()
-agy = listed(home / "config/plugins/rook/skills", "rook:")
+agy = listed(home / "config/plugins/rook/skills", "")  # agy lists Rook's skills by bare name, as its live record shows.
 for entry in json.loads((home / "config/skills.json").read_text())["entries"]:
     agy.update({key: text for key, text in listed(entry["path"], "user:").items()
                 if "include_only" not in entry or key[5:] in entry["include_only"]})
@@ -663,7 +663,7 @@ FIXTURE_FILES = {
     "relay_commands.py": 'HELP = """relay.py fixture-hello       Print the fixture\'s line."""\n'
                          'COMMANDS = {"fixture-hello": lambda argv: print("The fixture plugin says hello.")}\n',
     "skills/fixture-skill/SKILL.md": "---\nname: fixture-skill\ndescription: Say hello through the fixture.\n---\n\n"
-                                     "Run relay.py fixture-hello.\n",
+                                     "Run ⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py fixture-hello for ⟦owner⟧.\n",
     "prompts/slot.md": "Fixture line one.\n  Two spaces, a tab\there, no final newline",
     "server.py": "",
 }
@@ -746,9 +746,18 @@ def check():
         on = surface()
         for agent, key in (("claude", "rook-user:fixture-skill"), ("antigravity", "user:fixture-skill"),
                            ("codex", "fixture-skill")):
-            assert on[agent][key] == FIXTURE_FILES["skills/fixture-skill/SKILL.md"], agent
+            # Rendered as Rook's own skills are, so the plugin needs no path to Rook of its own.
+            python = "/usr/bin/python" if os.path.exists("/usr/bin/python") else sys.executable
+            assert on[agent][key] == FIXTURE_FILES["skills/fixture-skill/SKILL.md"].replace(
+                "⟦python⟧ ${CLAUDE_PLUGIN_ROOT}", f"{python} {root}/plugin").replace("⟦owner⟧", "the person"), agent
             assert {k: v for k, v in on[agent].items() if k != key} == bare[agent], agent
         assert on["fragment"] == FIXTURE_FILES["prompts/slot.md"] and on["entries"] == [["fixture", on["fragment"]]]
+        # User plugin prompt fragments allow up to 4000 characters (matching bundled plugins).
+        ok_frag = "U" * 2500
+        (users / "fixture/prompts/slot.md").write_text(ok_frag)
+        assert surface()["fragment"] == ok_frag
+        assert relay("plugin", "check")[0] == 0
+        (users / "fixture/prompts/slot.md").write_text(FIXTURE_FILES["prompts/slot.md"])
         assert on["claude_denied"] == ["mcp__fixture__secret"] and on["codex_mcp"] == bare["codex_mcp"] + 1
         assert "mcp__fixture__ping" in on["setup"] and "mcp__fixture__ping" not in bare["setup"]
         assert on["guard_policy"] == {"schema_version": 1, "servers": {"fixture": {"denied_tools": ["secret"]}},
@@ -831,6 +840,8 @@ def check():
         os.mkfifo(users / "fifo/plugin.json")
         write(users / "fifofrag", {"plugin.json": json.dumps({**manifest, "prompt_slots": {"fixture_slot": "slot.md"}})})
         os.mkfifo(users / "fifofrag/slot.md")
+        write(users / "toolong", {"plugin.json": json.dumps({**manifest, "prompt_slots": {"fixture_slot": "slot.md"}}),
+                                  "slot.md": "X" * 4001})
         started = time.monotonic()
         code, listing = relay("plugin", "check")
         assert time.monotonic() - started < 20, "a FIFO made the plugin check wait"
@@ -842,6 +853,7 @@ def check():
                            ("hostskill", "the skill omarchy is already a shared host skill's"),
                            ("fifo", "its plugin.json is not a regular file"),
                            ("fifofrag", "is not a readable UTF-8 text file"),
+                           ("toolong", "longer than 4000 characters. Rook leaves it out."),
                            ("badhost", "its detect host_skill_present must be a plain skill name"),
                            ("badprefix", "activity_prefixes must map program names to plain labels"),
                            ("badallow", "its host skills must be a list of plain names"),
@@ -852,7 +864,7 @@ def check():
             assert any(line.startswith(f"The {pid} ") and words in line for line in listing.splitlines()), (pid, listing)
         assert relay("fixture-hello") == (0, "The fixture plugin says hello.\n")
         assert relay("get", "voice_engine")[0] == 0 and "is not a setting" not in relay("get", "plugins")[1]
-        for pid in (*bad, "badjson", "huge", "hostskill", "fifo", "fifofrag"):
+        for pid in (*bad, "badjson", "huge", "hostskill", "fifo", "fifofrag", "toolong"):
             shutil.rmtree(users / pid)
         (users / "linked").unlink()
         assert relay("plugin", "disable", "fixture") == (0, "The fixture plugin is off. The agent sees the change "

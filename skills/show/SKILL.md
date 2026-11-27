@@ -1,7 +1,6 @@
 ---
 name: show
-description: Show ⟦owner⟧ a picture or a video in Rook's media viewer, where the swarm opens a frame in the middle of ⟦his⟧ screen. Use when ⟦owner⟧ asks to see an image, a render, a screenshot, a chart, or a video clip, from this machine or from another one, or when a thread's message hands you media meant for ⟦him⟧.
-when_to_use: Trigger phrases include "show me", "let me see it", "pull up that image", "put the render on screen", "play the clip", "grab the picture from Fable", "close the picture", "close that". A picture or video that a thread made counts too, when ⟦owner⟧ asks to see it.
+description: "Show ⟦owner⟧ a picture or a video in Rook's media viewer, where the swarm opens a frame in the middle of ⟦his⟧ screen. Use when ⟦owner⟧ asks to see an image, a render, a screenshot, a chart, or a video clip, from this machine or from another one, or when a thread's message hands you media meant for ⟦him⟧, such as \"show me\", \"let me see it\", \"pull up that image\", \"play the clip\", \"grab the picture from Fable\" or \"close the picture\"."
 allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py show *)
 ---
 
@@ -13,13 +12,14 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 - `relay.py show /full/path/file.mp4 --title "A few words" --machine <machine>` copies a file from another machine first. Rook keeps the copy in memory and removes it when the viewer closes.
 - `relay.py show --close` closes the viewer.
 
-It shows PNG, JPEG, WebP and GIF pictures, animated or not, and video such as MP4 and WebM, with sound. The command prints `Shown.`, or a plain sentence that says why the file was refused. A refused file moves nothing on screen.
+It shows PNG, JPEG, WebP and GIF pictures, animated or not, and video such as MP4 and WebM, with sound. The command prints `Shown.`, or `Shown, in place of ...` when it replaced the open one, or a plain sentence that says why the file was refused. A refused file moves nothing on screen.
 
 ## When
 
 - Show media when ⟦owner⟧ asks to see it. Also show it when a thread's message hands you media and says it is for ⟦him⟧.
 - Never show a screenshot of ⟦owner⟧'s own screen back to ⟦him⟧, and never show files ⟦he⟧ did not ask about.
-- Show one thing at a time. A new show replaces the one open, so you can step through a few files when ⟦verb:he asks|they ask⟧.
+- A diagram of how things connect is not media: write the `{diagram ...}` mark from your instructions instead.
+- Show one thing at a time. A new show replaces the one open, so never close it first. You can step through a few files when ⟦verb:he asks|they ask⟧.
 - When you do not know the file's full path, find it first. On another machine, read the thread or run `ls` through the machine's route. Never guess a path.
 
 ## How

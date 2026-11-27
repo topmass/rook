@@ -1114,7 +1114,8 @@ def run_check() -> None:
 
 
 def _vm_rss_mb() -> float:
-    """Read current process VmRSS in MiB from /proc/self/status (Linux)."""
+    """Read current process VmRSS in MiB from /proc/self/status (Linux). A Mac has no /proc, so there it is the
+    process's peak resident size from getrusage (ru_maxrss, in bytes on macOS), which never goes down."""
     try:
         with open("/proc/self/status", "r", encoding="utf-8") as handle:
             for line in handle:
@@ -1122,7 +1123,9 @@ def _vm_rss_mb() -> float:
                     kb = int(line.split()[1])
                     return kb / 1024.0
     except OSError:
-        pass
+        if sys.platform == "darwin":
+            import resource
+            return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0
     return float("nan")
 
 

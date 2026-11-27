@@ -165,6 +165,38 @@ die() {
   exit 1
 }
 
+# bounded_out SECONDS COMMAND...: print COMMAND's output, run with no input, for at most SECONDS. Its exit code, or
+# 124 at the limit. Bash 3.2 and the Mac's BSD tools have no timeout command.
+bounded_out() {
+  local secs="$1"
+  shift
+  "$@" </dev/null 2>/dev/null &
+  local pid=$!
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local killer=$!
+  local rc=0
+  wait "$pid" || rc=$?
+  kill "$killer" 2>/dev/null || true
+  wait "$killer" 2>/dev/null || true
+  if [ "$rc" -eq 143 ]; then
+    return 124
+  fi
+  return "$rc"
+}
+
+# The setting, if any, that stops uv from fetching a Python (then any uv looks too old): printed as written.
+uv_download_blocker() {
+  case "${UV_PYTHON_DOWNLOADS:-}" in never|manual) echo "UV_PYTHON_DOWNLOADS=$UV_PYTHON_DOWNLOADS"; return 0 ;; esac
+  if [ "${UV_PYTHON_PREFERENCE:-}" = only-system ]; then echo "UV_PYTHON_PREFERENCE=only-system"; return 0; fi
+  local f line
+  for f in "$XDG_CONFIG_HOME/uv/uv.toml" /etc/uv/uv.toml; do
+    [ -f "$f" ] || continue
+    line="$(grep -E '^[[:space:]]*python-(downloads|preference)[[:space:]]*=[[:space:]]*"(never|manual|only-system)"' "$f" | head -n 1 || true)"
+    if [ -n "$line" ]; then echo "$(printf '%s' "$line" | tr -d ' ') in $f"; return 0; fi
+  done
+  return 1
+}
+
 require_abs_path() {
   local label="$1"
   local val="$2"
@@ -1109,7 +1141,14 @@ else
   say "Rook Linux installer"
 fi
 say "  Agent:      $AGENT"
-say "  Voice:      $VOICE"
+# A run with no --voice (relay.py update) keeps the saved voice, so it shows that one, not the default.
+VOICE_SHOWN="$VOICE"
+if [ "$VOICE_SET" -eq 0 ] && [ -f "$CONFIG_DIR/settings.json" ]; then
+  SAVED_VOICE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("voice_engine") or "")' \
+    "$CONFIG_DIR/settings.json" 2>/dev/null || true)"
+  [ -z "$SAVED_VOICE" ] || VOICE_SHOWN="$SAVED_VOICE (kept from your settings)"
+fi
+say "  Voice:      $VOICE_SHOWN"
 say "  Prefix:     $PREFIX"
 say "  Source:     $SOURCE"
 say "  Recogniser: $AIRTYPE_SPEC ($ASR_NAME)"
@@ -1366,6 +1405,8 @@ stage_and_install_prefix() {
   local replace_empty="$1"
   STAGE_TMP="$(make_stage_dir "$(dirname "$PREFIX")" ".rook-stage-prefix")"
   run_cmd git clone "$SOURCE" "$STAGE_TMP/checkout"
+  # get.sh names the repository that relay.py update fetches from when SOURCE is a folder it deletes.
+  [ -z "${ROOK_ORIGIN:-}" ] || git -C "$STAGE_TMP/checkout" remote set-url origin "$ROOK_ORIGIN"
   [ -f "$STAGE_TMP/checkout/desktop/rook.py" ] || die "Install check failed: desktop/rook.py is missing." "Check that $SOURCE is a valid Rook repository."
   [ -f "$STAGE_TMP/checkout/desktop/relay.py" ] || die "Install check failed: desktop/relay.py is missing." "Check that $SOURCE is a valid Rook repository."
   local clone_commit clone_branch
@@ -1444,6 +1485,25 @@ UV_BIN="$(command -v uv || true)"
 UV_FIX="sudo pacman -S --needed uv"
 [ "$IS_MAC" -eq 0 ] || UV_FIX="curl -LsSf https://astral.sh/uv/install.sh | sh, then open a new terminal"
 [ -n "$UV_BIN" ] || [ "$DRY_RUN" -eq 1 ] || die "uv is not on PATH." "Install uv with: $UV_FIX"
+# An old uv cannot fetch the pinned Python, and would stop at the first environment with a message about interpreters.
+# A check that hangs proves nothing, so the environment step goes on and shows uv's own error if there is one.
+if [ -n "$UV_BIN" ] && [ "$DRY_RUN" -eq 0 ] && [ -z "$FROM_CACHE" ]; then
+  UV_RC=0
+  UV_PYTHONS="$(bounded_out 30 "$UV_BIN" python list "$PYTHON_PIN")" || UV_RC=$?
+  if [ "$UV_RC" -ne 124 ]; then
+    case "$UV_PYTHONS" in
+      *"cpython-$PYTHON_PIN-"*) ;;
+      *)
+        if UV_BLOCKER="$(uv_download_blocker)"; then
+          die "$UV_BLOCKER stops uv from fetching Python $PYTHON_PIN, which Rook needs." \
+              "Change that setting for this install, then run install/install.sh again."
+        fi
+        UV_NAME="$(bounded_out 10 "$UV_BIN" --version | cut -d' ' -f1,2 || true)"
+        die "${UV_NAME:-The uv at $UV_BIN} is too old for Rook: it cannot fetch Python $PYTHON_PIN." \
+            "Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" ;;
+    esac
+  fi
+fi
 
 UV_COMMON_ARGS=()
 UV_VENV_ARGS=()
@@ -2029,7 +2089,7 @@ else:
         tmp.unlink(missing_ok=True)
         raise
 PY
-  say "  OK: Settings ready at $SETTINGS_FILE (agent=$AGENT, voice_engine=$VOICE, recogniser_model=$RECOGNISER_MODEL)."
+  say "  OK: Settings ready at $SETTINGS_FILE (agent=$AGENT, voice_engine=${VOICE_SHOWN%% *}, recogniser_model=$RECOGNISER_MODEL)."
   # The starter personality is the user's own file from now on: copied once, never overwritten, and not in the
   # manifest, so uninstall keeps it.
   PERSONALITY_FILE="$CONFIG_DIR/personality.md"
@@ -2143,7 +2203,15 @@ fi
 
 if [ "$AGENT" = "claude" ]; then
   if command -v claude >/dev/null 2>&1; then
-    say "  OK: claude CLI found at $(command -v claude). Sign in by hand with: claude auth login"
+    CLAUDE_RC=0
+    CLAUDE_STATUS="$(bounded_out 15 claude auth status)" || CLAUDE_RC=$?
+    [ "$CLAUDE_RC" -ne 124 ] || CLAUDE_STATUS=""  # A status that hangs proves nothing.
+    case "$CLAUDE_STATUS" in
+      *'"loggedIn": true'*|*'"loggedIn":true'*) say "  OK: claude CLI found at $(command -v claude), and it is signed in." ;;
+      *'"loggedIn": false'*|*'"loggedIn":false'*)
+        say "  OK: claude CLI found at $(command -v claude). Sign in by hand with: claude auth login" ;;
+      *) say "  OK: claude CLI found at $(command -v claude). I could not check the sign-in. If it is not signed in, run: claude auth login" ;;
+    esac
   else
     say "  Note: claude CLI is not on PATH yet. Install Claude Code and sign in with: claude auth login"
   fi
@@ -2161,7 +2229,7 @@ elif [ "$AGENT" = "antigravity" ]; then
   fi
 elif [ "$AGENT" = "pi" ]; then
   if command -v pi >/dev/null 2>&1; then
-    say "  OK: pi CLI found at $(command -v pi). Set up a model in Pi by hand. For T3, see INSTALL.md step 1."
+    say "  OK: pi CLI found at $(command -v pi). Set up a model in Pi by hand. For T3, see INSTALL.md step 5."
   else
     say "  Note: pi CLI is not on PATH yet. Install Pi and set up a model in it by hand."
   fi
@@ -2390,7 +2458,28 @@ TIMER_IS_USERS=0
 KEPT_DAILY_FOR_USER_TIMER=0
 
 # On a Mac, launchd runs the signed Rook.app, which runs Rook's Python, so every macOS permission belongs to the app.
+# It goes where an earlier run recorded it, so a rerun or an update never moves its identity; else to /Applications
+# when this user can write there and no other Rook.app is there; else to ~/Applications. ROOK_APP names it outright.
 MAC_APP="${ROOK_APP:-$HOME/Applications/Rook.app}"
+if [ "$IS_MAC" -eq 1 ] && [ -z "${ROOK_APP:-}" ]; then
+  SYSTEM_APPS="${ROOK_SYSTEM_APPS:-/Applications}"  # Tests point this at a scratch folder.
+  if MAC_APP_RECORDED="$(python3 - "$MANIFEST_PATH" <<'PY' 2>/dev/null
+import json, sys
+for entry in json.load(open(sys.argv[1])).get("entries") or []:
+    if isinstance(entry, dict) and entry.get("role") == "mac_app" and entry.get("created") is True:
+        print(entry["path"])
+        sys.exit(0)
+sys.exit(1)
+PY
+)"; then
+    MAC_APP="$MAC_APP_RECORDED"
+  # A Rook.app already in ~/Applications (kept, or from before the manifest) keeps the identity there: a second app
+  # in /Applications would carry the same bundle id while the grants stay with the first.
+  elif [ -d "$SYSTEM_APPS" ] && [ -w "$SYSTEM_APPS" ] && [ ! -e "$SYSTEM_APPS/Rook.app" ] && [ ! -L "$SYSTEM_APPS/Rook.app" ] \
+      && [ ! -e "$HOME/Applications/Rook.app" ] && [ ! -L "$HOME/Applications/Rook.app" ]; then
+    MAC_APP="$SYSTEM_APPS/Rook.app"
+  fi
+fi
 LAUNCHD_LABEL="${ROOK_LAUNCHD_LABEL:-com.rook.companion}"
 MAC_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
 MAC_DAILY_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.daily.plist"
@@ -2403,6 +2492,7 @@ if [ "$IS_MAC" -eq 1 ]; then
     if [ -L "$MAC_APP" ] || { [ -e "$MAC_APP" ] && ! prior_manifest_created "$MAC_APP"; }; then
       manifest_record_kept "$MAC_APP" "mac_app" "pre-existing Rook.app kept untouched"
       say "  Kept $MAC_APP as it is (not created by this installer). The launchd agent runs it."
+      say "  That app is not rebuilt, so it may be older than this Rook. To have the installer build it, move it to the Trash and run the install again."
     else
       # Rebuilt on every run from the installed checkout. The signing certificate stays the same, so grants survive.
       mkdir -p "$(dirname "$MAC_APP")"

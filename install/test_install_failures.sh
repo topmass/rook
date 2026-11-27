@@ -53,6 +53,14 @@ exit 0
 SH
 chmod +x "$FAKE_BIN/systemctl"
 
+# Never the real launchctl, even when this suite runs on a Mac: every case's launchd calls are logged only.
+cat >"$FAKE_BIN/launchctl" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "${FAKE_LAUNCHCTL_LOG:-/dev/null}"
+exit 0
+SH
+chmod +x "$FAKE_BIN/launchctl"
+
 # Without FAKE_GPU it fails like a computer with no NVIDIA driver.
 cat >"$FAKE_BIN/nvidia-smi" <<'SH'
 #!/usr/bin/env bash
@@ -253,9 +261,30 @@ fi
 if [ "$cmd" = "run" ]; then
   exit 0
 fi
+if [ "$cmd" = "python" ]; then  # python list PIN: an old uv (FAKE_UV_OLD=1) does not know the pinned Python.
+  [ -n "${FAKE_UV_OLD:-}" ] || echo "cpython-${2:-3.12.14}-linux-x86_64-gnu    <download available>"
+  exit 0
+fi
+if [ "$cmd" = "--version" ]; then
+  [ -z "${FAKE_UV_VERSION_FAILS:-}" ] || exit 2
+  [ -n "${FAKE_UV_OLD:-}" ] && echo "uv 0.5.8 (fake)" || echo "uv 0.13.10 (fake)"
+  exit 0
+fi
 exit 0
 SH
 chmod +x "$FAKE_BIN/uv"
+
+# Claude Code, signed out: the installer asks its status and must never reach the real one.
+cat >"$FAKE_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "auth status")
+    [ -z "${FAKE_CLAUDE_HANGS:-}" ] || exec sleep 60
+    [ -n "${FAKE_CLAUDE_SIGNED_IN:-}" ] && echo '{"loggedIn": true}' || echo '{"loggedIn": false}' ;;
+  *) echo "2.1.332 (fake Claude Code)" ;;
+esac
+SH
+chmod +x "$FAKE_BIN/claude"
 
 FAKE_WHEEL="$TEST_ROOT/airtype-2.1.2-py3-none-any.whl"
 echo "stub-wheel-v1" >"$FAKE_WHEEL"
@@ -289,8 +318,12 @@ run_in_sb() {
     XDG_STATE_HOME="$sb/.local/state" \
     XDG_RUNTIME_DIR="$sb/run" \
     FAKE_SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log" \
+    ROOK_SYSTEM_APPS="$sb/no-system-apps" \
+    ROOK_SIGN_IDENTITY=- \
     "$@"
 }
+# On a real Mac the cases below run as a Mac: ROOK_SYSTEM_APPS keeps Rook.app out of the real /Applications,
+# ROOK_SIGN_IDENTITY=- signs ad hoc instead of touching a keychain, and the fake launchctl loads no job.
 
 echo "=== Case 1: Pre-existing folder with notes.txt at each target is never deleted ==="
 for target in live venv voice-phonon; do
@@ -1378,6 +1411,7 @@ chmod +x "$MAC_BIN"/*
 # The fake curl refuses every call, so the medium voice server's health check never answers: the failed first run.
 set +e
 OUT28_1="$(run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+  ROOK_SYSTEM_APPS="$SB28/no-system-apps" \
   bash "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1)"
 RC28_1=$?
 set -e
@@ -1398,7 +1432,8 @@ sha = hashlib.sha256(open(want, "rb").read()).hexdigest()
 sys.exit(0 if any(e.get("path") == want and e.get("created") and e.get("sha256") == sha for e in entries) else 1)
 PY
 : >"$TEST_ROOT/launchctl.log"
-run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" bash "$UNINSTALL_SH" --yes >/dev/null
+run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" \
+  ROOK_SYSTEM_APPS="$SB28/no-system-apps" bash "$UNINSTALL_SH" --yes >/dev/null
 [ ! -e "$PLIST28" ] || fail "28 uninstall left the medium voice plist"
 [ ! -e "$SB28/.local/share/rook/medium-voice" ] || fail "28 uninstall left the medium voice folder"
 grep -qF "bootout gui/$(id -u)/com.rook.medium-voice" "$TEST_ROOT/launchctl.log" || fail "28 uninstall did not boot out the medium voice job"
@@ -1409,7 +1444,10 @@ mac_sb() {  # mac_sb SANDBOX [ENV=VALUE...] -- SCRIPT [OPTIONS...]: run install.
   local envs=()
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done
   shift
+  # ROOK_SYSTEM_APPS: a scratch stand-in for /Applications, so on a real Mac no case builds into the real one. A
+  # case's own ROOK_SYSTEM_APPS, given later, wins.
   run_in_sb "$sb" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+    ROOK_SYSTEM_APPS="$sb/no-system-apps" \
     "${envs[@]}" bash "$@"
 }
 medium_lines() { grep 'com.rook.medium-voice' "$TEST_ROOT/launchctl.log" || true; }
@@ -1587,4 +1625,192 @@ for mode in active inactive; do
 done
 pass "The start target follows the session, and a symlinked unit stays untouched either way"
 
-echo "All install failure and recovery tests passed (34/34)."
+echo "=== Case 35: An old uv that cannot fetch the pinned Python stops the install with one plain sentence ==="
+SB35="$(new_sandbox uv-old)"
+set +e
+OUT35="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 bash "$INSTALL_SH" --voice-model no --recogniser no --service no \
+  --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC35=$?
+set -e
+[ "$RC35" -eq 1 ] || fail "35 an old uv did not stop the install ($RC35): $OUT35"
+printf '%s\n' "$OUT35" | grep -qF "Error: uv 0.5.8 is too old for Rook: it cannot fetch Python 3.12.14." || fail "35 missing the plain sentence: $OUT35"
+printf '%s\n' "$OUT35" | grep -qF "Fix: Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" || fail "35 missing the fix: $OUT35"
+[ ! -e "$SB35/.local/share/rook/venv" ] || fail "35 built an environment with the old uv"
+OUT35B="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 FAKE_UV_VERSION_FAILS=1 bash "$INSTALL_SH" --voice-model no --recogniser no \
+  --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT35B" | grep -qF "Error: The uv at $FAKE_BIN/uv is too old for Rook" || fail "35 a uv with no version was not named: $OUT35B"
+OUT35C="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 UV_PYTHON_DOWNLOADS=never bash "$INSTALL_SH" --voice-model no --recogniser no \
+  --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT35C" | grep -qF "Error: UV_PYTHON_DOWNLOADS=never stops uv from fetching Python 3.12.14, which Rook needs." \
+  || fail "35 the download setting was not named: $OUT35C"
+pass "Old uv: the install stops before the environments with 'uv 0.5.8 is too old', names a uv with no version, and names a setting that forbids downloads"
+
+echo "=== Case 36: get.sh replaces an old uv with uv's own installer, and says so plainly when that fails ==="
+GET_SH="$SCRIPT_DIR/get.sh"
+UVI_BIN="$TEST_ROOT/fake-uv-installer-bin"
+mkdir -p "$UVI_BIN"
+NEW_UV="$TEST_ROOT/new-uv"  # The uv that uv's installer puts in place: a current one.
+printf '%s\n' '#!/usr/bin/env bash' "FAKE_UV_OLD= exec \"$FAKE_BIN/uv\" \"\$@\"" >"$NEW_UV"
+chmod +x "$NEW_UV"
+cat >"$UVI_BIN/curl" <<SH
+#!/usr/bin/env bash
+# uv's installer, in its own folder order. It records whether it was told to leave the shell files alone.
+# FAKE_UV_INSTALL_FAILS makes the download fail.
+case "\$*" in *astral.sh/uv/install.sh*) ;; *) echo "ERROR: curl must never be called (\$*)" >&2; exit 99 ;; esac
+[ -z "\${FAKE_UV_INSTALL_FAILS:-}" ] || { echo "curl: (6) Could not resolve host: astral.sh" >&2; exit 6; }
+echo 'd="\${UV_INSTALL_DIR:-\${XDG_BIN_HOME:-\${XDG_DATA_HOME:+\$XDG_DATA_HOME/../bin}}}"; d="\${d:-\$HOME/.local/bin}"; mkdir -p "\$d" && cp "$NEW_UV" "\$d/uv"'
+echo 'echo "UV_NO_MODIFY_PATH=\${UV_NO_MODIFY_PATH:-unset}" >> "\$HOME/uv-installer.log"; echo "everything is installed!"'
+SH
+chmod +x "$UVI_BIN/curl"
+SB36="$(new_sandbox get-uv-old)"
+set +e
+OUT36="$(run_in_sb "$SB36" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 sh "$GET_SH" "$REPO_ROOT" --agent claude --voice small \
+  --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36=$?
+set -e
+# Exit 2, not 0: --voice-model no and --recogniser no leave the setup incomplete on purpose, which install.sh reports
+# with 2. It proves the install ran to its end with the new uv.
+[ "$RC36" -eq 2 ] || fail "36 get.sh did not finish the install after replacing uv ($RC36): $OUT36"
+printf '%s\n' "$OUT36" | grep -qF "uv 0.5.8 cannot fetch Python 3.12.14, which Rook needs, so uv's own installer puts a newer uv in $SB36/.local/bin, ahead of the one at $FAKE_BIN/uv, which stays as it is." \
+  || fail "36 missing the replacement line: $OUT36"
+grep -qx "UV_NO_MODIFY_PATH=1" "$SB36/uv-installer.log" || fail "36 uv's installer was allowed to edit the shell files"
+! printf '%s\n' "$OUT36" | grep -qF "too old for Rook" || fail "36 still called uv too old after replacing it: $OUT36"
+[ -x "$SB36/.local/bin/uv" ] && [ -d "$SB36/.local/share/rook/venv" ] || fail "36 the new uv did not build the environments"
+SB36B="$(new_sandbox get-uv-old-fails)"
+set +e
+OUT36B="$(run_in_sb "$SB36B" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 FAKE_UV_INSTALL_FAILS=1 sh "$GET_SH" "$REPO_ROOT" \
+  --agent claude --voice small --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36B=$?
+set -e
+[ "$RC36B" -eq 1 ] || fail "36 a failed uv install did not stop get.sh ($RC36B): $OUT36B"
+printf '%s\n' "$OUT36B" | grep -qF "Error: uv 0.5.8 is too old for Rook: it cannot fetch Python 3.12.14. Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" \
+  || fail "36 missing the plain sentence after a failed uv install: $OUT36B"
+[ ! -e "$SB36B/.local/share/rook" ] || fail "36 installed something with the old uv"
+SB36C="$(new_sandbox get-uv-xdg-bin)"
+set +e
+OUT36C="$(run_in_sb "$SB36C" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 XDG_BIN_HOME="$SB36C/xbin" sh "$GET_SH" "$REPO_ROOT" \
+  --agent claude --voice small --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36C=$?
+set -e
+[ "$RC36C" -eq 2 ] || fail "36 with XDG_BIN_HOME the install did not finish ($RC36C): $OUT36C"
+printf '%s\n' "$OUT36C" | grep -qF "puts a newer uv in $SB36C/xbin, ahead of" || fail "36 named the wrong folder: $OUT36C"
+printf '%s\n' "$OUT36C" | grep -qF "To use that uv yourself later, add $SB36C/xbin to your shell's PATH." || fail "36 no PATH note: $OUT36C"
+pass "get.sh: an old uv was shadowed by uv's installer in its real folder, with no shell file changed, and the install went on; a failed replacement stopped with one plain sentence"
+
+echo "=== Case 37: 'Sign in by hand' only for an agent that reports it is signed out ==="
+SB37="$(new_sandbox sign-in-line)"
+OUT37_OUT="$(run_in_sb "$SB37" bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+OUT37_IN="$(run_in_sb "$SB37" env FAKE_CLAUDE_SIGNED_IN=1 bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+printf '%s\n' "$OUT37_OUT" | grep -qF "Sign in by hand with: claude auth login" || fail "37 signed out, but no sign-in line: $OUT37_OUT"
+printf '%s\n' "$OUT37_IN" | grep -qF ", and it is signed in." || fail "37 signed in, but not said: $OUT37_IN"
+! printf '%s\n' "$OUT37_IN" | grep -qF "Sign in by hand" || fail "37 told a signed-in person to sign in by hand: $OUT37_IN"
+OUT37_HANG="$(run_in_sb "$SB37" env FAKE_CLAUDE_HANGS=1 bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+printf '%s\n' "$OUT37_HANG" | grep -qF "I could not check the sign-in. If it is not signed in, run: claude auth login" \
+  || fail "37 a status that hangs was not 'could not check': $OUT37_HANG"
+! printf '%s\n' "$OUT37_HANG" | grep -qF "Sign in by hand" || fail "37 a hung status was told as signed out: $OUT37_HANG"
+pass "Sign-in line: printed for a signed-out Claude Code only; a status that hangs is 'could not check'"
+
+echo "=== Case 38: Mac: Rook.app goes to /Applications when writable, stays where it was recorded, and never replaces another ==="
+SB38="$(new_sandbox mac-app-place)"
+SYS38="$SB38/sysapps"  # Stands in for /Applications.
+mkdir -p "$SYS38"
+mac38() { mac_sb "$SB38" FAKE_CURL_OK=1 "$@" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no --service yes \
+  --recogniser-source "$FAKE_WHEEL"; }
+set +e
+mac38 ROOK_SYSTEM_APPS="$SYS38" >"$TEST_ROOT/out38.txt" 2>&1
+RC38=$?
+set -e
+[ "$RC38" -eq 2 ] || fail "38 install failed ($RC38): $(cat "$TEST_ROOT/out38.txt")"
+[ -x "$SYS38/Rook.app/Contents/MacOS/RookHelper" ] || fail "38 Rook.app did not go to the writable system folder"
+[ ! -e "$SB38/Applications/Rook.app" ] || fail "38 Rook.app also went to ~/Applications"
+grep -qF "$SYS38/Rook.app/Contents/MacOS/RookHelper" "$SB38/Library/LaunchAgents/com.rook.companion.plist" \
+  || fail "38 the launchd agent does not run the app where it was put"
+# The rerun names only mac_sb's empty scratch system folder, so only the recorded place can keep it there.
+set +e
+mac38 >"$TEST_ROOT/out38b.txt" 2>&1
+RC38B=$?
+set -e
+[ "$RC38B" -eq 2 ] && grep -qF "OK: Built and signed $SYS38/Rook.app." "$TEST_ROOT/out38b.txt" \
+  || fail "38 the rerun did not rebuild Rook.app where it was recorded ($RC38B): $(cat "$TEST_ROOT/out38b.txt")"
+[ ! -e "$SB38/Applications/Rook.app" ] || fail "38 the rerun moved Rook.app to ~/Applications"
+mac_sb "$SB38" ROOK_SYSTEM_APPS="$SYS38" -- "$UNINSTALL_SH" --yes >/dev/null
+[ ! -e "$SYS38/Rook.app" ] || fail "38 uninstall left Rook.app in the system folder"
+SB38C="$(new_sandbox mac-app-foreign)"
+SYS38C="$SB38C/sysapps"
+mkdir -p "$SYS38C/Rook.app"
+echo "someone else's app" >"$SYS38C/Rook.app/notes.txt"
+set +e
+mac_sb "$SB38C" FAKE_CURL_OK=1 ROOK_SYSTEM_APPS="$SYS38C" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no \
+  --service yes --recogniser-source "$FAKE_WHEEL" >/dev/null 2>&1
+RC38C=$?
+set -e
+[ "$RC38C" -eq 2 ] || fail "38 install beside a foreign Rook.app failed ($RC38C)"
+[ "$(cat "$SYS38C/Rook.app/notes.txt")" = "someone else's app" ] && [ ! -e "$SYS38C/Rook.app/Contents" ] \
+  || fail "38 a Rook.app that is not ours was changed"
+[ -x "$SB38C/Applications/Rook.app/Contents/MacOS/RookHelper" ] || fail "38 Rook.app did not fall back to ~/Applications"
+SB38D="$(new_sandbox mac-app-home-first)"
+SYS38D="$SB38D/sysapps"
+mkdir -p "$SYS38D" "$SB38D/Applications/Rook.app/Contents/MacOS"
+echo "an earlier Rook.app, made before the manifest" >"$SB38D/Applications/Rook.app/notes.txt"
+set +e
+mac_sb "$SB38D" FAKE_CURL_OK=1 ROOK_SYSTEM_APPS="$SYS38D" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no \
+  --service yes --recogniser-source "$FAKE_WHEEL" >"$TEST_ROOT/out38d.txt" 2>&1
+RC38D=$?
+set -e
+[ "$RC38D" -eq 2 ] || fail "38 install beside an earlier ~/Applications/Rook.app failed ($RC38D): $(cat "$TEST_ROOT/out38d.txt")"
+[ ! -e "$SYS38D/Rook.app" ] || fail "38 a second Rook.app went to the system folder beside the one in ~/Applications"
+grep -qF "Kept $SB38D/Applications/Rook.app as it is" "$TEST_ROOT/out38d.txt" || fail "38 the earlier app was not kept: $(cat "$TEST_ROOT/out38d.txt")"
+pass "Mac Rook.app: the system folder when writable, the recorded place on reruns and at uninstall, an earlier ~/Applications app keeps the place, and another Rook.app left alone"
+
+echo "=== Case 39: A run with no --voice (relay.py update) shows the saved voice, not the default small one ==="
+SB39="$(new_sandbox voice-banner)"
+mkdir -p "$SB39/.config/rook"
+printf '%s\n' '{"voice_engine": "medium", "medium_voice_url": "http://127.0.0.1:8090"}' >"$SB39/.config/rook/settings.json"
+OUT39="$(run_in_sb "$SB39" bash "$INSTALL_SH" --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT39" | grep -qF "  Voice:      medium (kept from your settings)" || fail "39 the banner did not show the saved voice: $OUT39"
+printf '%s\n' "$OUT39" | grep -qF "voice_engine=medium," || fail "39 the settings line did not show the saved voice: $OUT39"
+grep -qF '"voice_engine": "medium"' "$SB39/.config/rook/settings.json" || fail "39 the saved voice changed"
+pass "Voice banner: a run with no --voice shows the saved medium voice, and keeps it"
+
+echo "=== Case 40: get.sh leaves origin on the public repository, and relay.py update repoints a dead origin ==="
+PUB40="$TEST_ROOT/public40.git"  # Stands in for Rook's public repository, so GitHub is never reached.
+"$REAL_GIT" init -q --bare -b main "$PUB40"
+"$REAL_GIT" -C "$REPO_ROOT" push -q "$PUB40" HEAD:refs/heads/main
+HEAD40="$("$REAL_GIT" -C "$REPO_ROOT" rev-parse HEAD)"
+"$REAL_GIT" -C "$REPO_ROOT" archive --format=tar.gz --prefix=rook/ -o "$TEST_ROOT/rook40.tar.gz" HEAD
+get40() { run_in_sb "$1" env ROOK_PUBLIC_SOURCE="$PUB40" sh "$GET_SH" "$2" --agent claude --voice small --voice-model no \
+  --recogniser no --service no --recogniser-source "$FAKE_WHEEL"; }
+relay40() { run_in_sb "$1" env ROOK_PUBLIC_SOURCE="$3" "$REAL_PY3" "$1/.local/share/rook/live/desktop/relay.py" update $2; }
+# A git URL install keeps that URL as origin, and is up to date with it.
+SB40A="$(new_sandbox get-origin-url)"
+set +e
+OUT40A="$(get40 "$SB40A" "file://$PUB40" 2>&1)"
+RC40A=$?
+set -e
+[ "$RC40A" -eq 2 ] || fail "40 the git URL install failed ($RC40A): $OUT40A"
+[ "$("$REAL_GIT" -C "$SB40A/.local/share/rook/live" remote get-url origin)" = "file://$PUB40" ] || fail "40 a git URL install changed origin"
+OUT40A="$(relay40 "$SB40A" --check "file://$PUB40" 2>&1)" || fail "40 update --check failed: $OUT40A"
+printf '%s\n' "$OUT40A" | grep -qx "Installed: ${HEAD40:0:7}" && printf '%s\n' "$OUT40A" | grep -qx "Latest on GitHub: ${HEAD40:0:7}" \
+  && printf '%s\n' "$OUT40A" | grep -qx "Rook is up to date." || fail "40 update --check did not print both versions: $OUT40A"
+# A .tar.gz install is cloned from a folder get.sh deletes, so its origin is the public repository.
+SB40="$(new_sandbox get-origin-tarball)"
+set +e
+OUT40="$(get40 "$SB40" "$TEST_ROOT/rook40.tar.gz" 2>&1)"
+RC40=$?
+set -e
+LIVE40="$SB40/.local/share/rook/live"
+[ "$RC40" -eq 2 ] || fail "40 the .tar.gz install failed ($RC40): $OUT40"
+[ "$("$REAL_GIT" -C "$LIVE40" remote get-url origin)" = "$PUB40" ] || fail "40 a .tar.gz install left origin off the public repository"
+! printf '%s\n' "$OUT40" | grep -qF "cannot update it" || fail "40 still says a .tar.gz install cannot update: $OUT40"
+# An older install whose origin folder is gone: relay.py update points it at the public repository and updates.
+"$REAL_GIT" -C "$LIVE40" remote set-url origin "$TEST_ROOT/gone40"
+: >"$TEST_ROOT/systemctl.log"
+OUT40B="$(relay40 "$SB40" "" "$PUB40" 2>&1)" || fail "40 update after a dead origin failed: $OUT40B"
+printf '%s\n' "$OUT40B" | grep -qF "Rook's source folder $TEST_ROOT/gone40 is gone, so Rook now updates from $PUB40." \
+  || fail "40 update did not say it repointed origin: $OUT40B"
+[ "$("$REAL_GIT" -C "$LIVE40" remote get-url origin)" = "$PUB40" ] || fail "40 update did not repoint the dead origin"
+[ "$("$REAL_GIT" -C "$LIVE40" rev-parse HEAD)" = "$HEAD40" ] || fail "40 update did not move to the public commit: $OUT40B"
+grep -qx -- "--user restart rook.service" "$TEST_ROOT/systemctl.log" || fail "40 update did not restart Rook through systemctl"
+pass "Origin: a git URL install keeps its URL and update --check prints both versions; a .tar.gz install updates from the public repository; update repoints a dead origin and updates"
+
+echo "All install failure and recovery tests passed (40/40)."

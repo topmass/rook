@@ -1,7 +1,6 @@
 ---
 name: extend
-description: Add a new skill to Rook's own skills folder for ⟦owner⟧. Use when ⟦owner⟧ asks Rook to learn a routine, keep the steps for a task, or make a skill.
-when_to_use: Trigger phrases include "make a skill", "add a skill", "learn how to do this", "remember these steps".
+description: "Add a new skill to Rook's own skills folder for ⟦owner⟧. Use when ⟦owner⟧ asks Rook to learn a routine, keep the steps for a task, or make a skill, such as \"make a skill\", \"add a skill\", \"learn how to do this\" or \"remember these steps\"."
 ---
 
 # Adding a skill
