@@ -197,6 +197,10 @@
     "overlook3_a": {"kind": "tool3d",   "role": "threads",  "persp": 320.0},
     "overlook3_b": {"kind": "tool3d",   "role": "threads",  "persp": 320.0},
     "overlook3_c": {"kind": "tool3d",   "role": "threads",  "persp": 320.0},
-    "overlook3_d": {"kind": "tool3d",   "role": "threads",  "persp": 320.0}
+    "overlook3_d": {"kind": "tool3d",   "role": "threads",  "persp": 320.0},
+    "writing2_a":  {"kind": "write3d",  "role": "writing",  "persp": 320.0},
+    "writing2_b":  {"kind": "write3d",  "role": "writing",  "persp": 320.0},
+    "writing2_c":  {"kind": "write3d",  "role": "writing",  "persp": 320.0},
+    "writing2_d":  {"kind": "write3d",  "role": "writing",  "persp": 320.0}
   }
 }

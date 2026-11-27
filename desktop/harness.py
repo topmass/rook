@@ -207,11 +207,11 @@ def write_claude_files(runtime_dir=None, claude_dir=None, skills_dir=None, plugi
     return settings_path, custom_plugin
 
 
-def owned_plugin(plugin):
+def owned_plugin(plugin, runtime=None):
     """Rook's plugin as Claude Code reads it, with the owner tokens in its skills filled in. A copy Rook already made
     in its runtime folder (the --wow copy) is filled in place. Rook's own plugin is copied beside links to the rest of
     the repository, so each skill's relative paths, such as ${CLAUDE_PLUGIN_ROOT}/../desktop, still resolve."""
-    source, runtime = Path(plugin), claude_runtime_dir()
+    source, runtime = Path(plugin), claude_runtime_dir() if runtime is None else Path(runtime)
     files = [file for file in sorted(source.rglob("*"))
              if file.is_file() and "__pycache__" not in file.relative_to(source).parts]
     if all(settings.render(file.read_text()) == file.read_text() for file in files if file.suffix == ".md"):
@@ -299,6 +299,8 @@ class Harness(ABC):
     narrate_beats = False  # Opt-in: prompt allows brief spoken beats between later tool calls.
     heard = 0  # Monotonic timestamp of the last message received from the agent.
     rook_prefix = False  # True when the agent lists Rook's skills as rook:<name>. Otherwise they go by bare name.
+    plain_prompt = False  # True when the prompt is not Rook's main prompt, such as Hands': no rewrite table applies.
+    runtime_tag = ""  # Added to each runtime folder's name, so a second session, such as Hands', keeps apart.
 
     def __init__(self, model=None, effort=None):
         self.model, self.effort = model or self.model, effort or self.effort
@@ -421,9 +423,10 @@ class Claude(Harness):
         """The argv. servers are Rook's MCP servers by name. denied are T3 tools that must never run."""
         t3 = "t3" in servers
         plugin_dir = plugin
+        runtime = claude_runtime_dir().with_name("rook-claude" + self.runtime_tag)
         try:
-            settings_path, custom_plugin = write_claude_files()
-            plugin_dir = _write_wow_plugin(plugin, wow="wow" in servers)
+            settings_path, custom_plugin = write_claude_files(runtime)
+            plugin_dir = _write_wow_plugin(plugin, runtime, wow="wow" in servers)
         except OSError as exc:
             print(f"claude: write_claude_files failed ({type(exc).__name__})", file=sys.stderr)
             settings_path, custom_plugin = None, None
@@ -442,7 +445,7 @@ class Claude(Harness):
             "--include-partial-messages",
             "--append-system-prompt", prompt, "--session-id", session,
             # Rook's own skills, from skills/ (with rook:wow added only when --wow is active), naming the owner.
-            "--plugin-dir", str(owned_plugin(plugin_dir)),
+            "--plugin-dir", str(owned_plugin(plugin_dir, runtime)),
             # The owner's custom skills live in ~/.config/rook/skills and load as rook-user:<name>.
             *(["--plugin-dir", str(custom_plugin)] if custom_plugin else []),
             # Hide user coding skills and plugins while keeping user hooks such as DCG.

@@ -71,6 +71,7 @@ else:
     except ImportError:
         InputDevice = ecodes = list_devices = None
 
+import actions  # The silent outbox: {do: ...} orders, run in an agent session of their own, kept in a ledger.
 import constellation  # The diagram mark's parser; the overlay draws the diagram.
 import harness  # How Rook starts its main agent, writes to it, and reads from it.
 import journal  # The durable record of each request, and the notices the owner is owed after a restart.
@@ -142,7 +143,11 @@ LABELS = {"inbox": f"Message from a T3 thread, not something {OWNER} said.",
           "show": f"A T3 thread put a picture or a video on {OWNER}'s screen in your media viewer. {OWNER_START} did not ask "
                   "for it just now.",
           "batch": f"Messages that waited, not something {OWNER} said.",
-          "back": f"You are back online after being dark, not something {OWNER} said."}
+          "back": f"You are back online after being dark, not something {OWNER} said.",
+          "nudge": f"Rook's own reminder of something that waits on {OWNER}, not something {OWNER} said.",
+          "action": f"A report from your silent outbox, not something {OWNER} said. When {OWNER} waits for its answer, "
+                    f"give it in a sentence or two. A failed, stuck or blocked action: tell {pn('him')} in one short "
+                    "sentence when it matters, and otherwise answer PASS."}
 # Who each request came from in the replay, by the source its request row names. A source missing here is never
 # The owner: only spoken and typed requests are their words.
 SPEAKERS = {"spoken": f"{OWNER_START} said", "typed": f"{OWNER_START} typed", "test": f"A typed test from the build thread, not {OWNER}",
@@ -152,7 +157,9 @@ SPEAKERS = {"spoken": f"{OWNER_START} said", "typed": f"{OWNER_START} typed", "t
             "timer": f"A task timer came due with {OWNER}'s earlier words, not {OWNER} speaking now",
             "show": f"A T3 thread showed {OWNER} a picture or a video, not {OWNER}",
             "batch": f"Messages that waited reached you together, not {OWNER}",
-            "back": f"You came back online after being dark, not {OWNER}"}
+            "back": f"You came back online after being dark, not {OWNER}",
+            "nudge": f"You reminded {OWNER} of something that waits, not {OWNER}",
+            "action": f"Your silent outbox reported, not {OWNER}"}
 # Messages that are news, not tasks: thread messages, watcher news, and Rook's notes about its parts. One that
 # waited longer than BATCH_AFTER_SECONDS between coming in and its hand-over goes in one turn with every other such
 # message waiting then, oldest first, for Claude to judge what still matters. A fresh one goes alone at once.
@@ -165,6 +172,17 @@ DARK_SCREENSHOTS = False
 DARK_IMAGES = "Images: none. You are dark, so no screenshot was taken."
 # A watcher message that waited this long, such as through a long call, is dropped as old news.
 WATCH_STALE_SECONDS = 3 * 3600
+# The one unprompted reminder of what waits on the owner. Each tick, with the owner there and free, it queues one nudge
+# turn: right after a turn closed a flow and the speech has been over a little while, for the next item; or after two
+# quiet minutes, for an item its own check-in schedule makes due. Agents waiting on the owner come first.
+NUDGE_KINDS = ("question", "needs", "decision")
+NUDGE_TICK_SECONDS = 10
+NUDGE_CLOSED_SECONDS = 60  # A flow that closed this recently moves the owner on to the next item.
+NUDGE_SPEECH_SECONDS = 15  # The speech that closed it ended at least this long ago.
+NUDGE_QUIET_SECONDS = 120  # Or no turn and no speech for this long.
+NUDGE_RECENT_SECONDS = 10 * 60  # An item surfaced this recently is not surfaced again.
+# Tool calls that close a flow: an answer to a thread, a send, a launch, or a mailbox answer, done or snooze.
+CLOSING_COMMAND = re.compile(r"relay\.py mailbox (answer|done|snooze)\b")
 # A request's row whose first write failed is tried this many more times on the record's worker, this far apart.
 ACCEPT_TRIES = 5
 ACCEPT_RETRY_SECONDS = 0.2
@@ -692,8 +710,8 @@ def spoken_lead(answer):
 
 
 def undiagrammed(text):
-    """text with every diagram mark taken out, and the "{diagram" of a mark too long to be one."""
-    return DIAGRAM_OPENER.sub("", DIAGRAM_MARK.sub("", text))
+    """text with every diagram mark and outbox mark taken out, and the opener of a mark too long to be one."""
+    return actions.parse_do_marks(DIAGRAM_OPENER.sub("", DIAGRAM_MARK.sub("", text)))[0]
 
 
 def unmarked(text):
@@ -1685,7 +1703,8 @@ def observe_item(kind, summary, source):
     if kind is None:
         if any(item["kind"] in ("needs", "question") and (item["machine"], item["thread"]) == (machine, thread)
                for item in mailbox.items(("open", "snoozed"))):
-            mailbox.sync({"all_threads": [{"machine": machine, "thread_id": thread, "pending_count": 0}]})
+            mailbox.sync({"all_threads": [{"machine": machine, "thread_id": thread, "pending_count": 0}]},
+                         now=source.get("observed_at"))
         return None
     entry = work_entry(machine, thread) or {}
     project = source.get("project") or work_project(machine, thread)
@@ -1706,7 +1725,7 @@ def observe_item(kind, summary, source):
             return mailbox.revise(same["id"], summary, detail or None)
     return mailbox.observe(kind, summary, detail=detail or None, machine=machine, thread=thread,
                            parent_thread=source.get("parent_thread"), project=project, run=source.get("run"),
-                           pending_count=source.get("pending_count"))
+                           pending_count=source.get("pending_count"), observed_at=source.get("observed_at"))
 
 
 def thread_name(title, entry, project, thread):
@@ -1853,8 +1872,42 @@ def mailbox_recap():
 
 
 def mailbox_state(now):
-    """(focus, open items, (due check-in items, how many others wait)) for the owner's turn."""
-    return mailbox.focus_get(now=now), mailbox.items(("open",), now=now), mailbox.checkin(now)
+    """(focus, open items, (due check-in items, how many others wait)) for the owner's turn. The owner's turn keeps a
+    focus with no end alive. What waits on the owner from an agent never rides on their own turn: the nudge brings it."""
+    kinds = [kind for kind in mailbox.CHECKIN_KINDS if kind not in NUDGE_KINDS]
+    return mailbox.focus_touch(now=now), mailbox.items(("open",), now=now), mailbox.checkin(now, kinds=kinds)
+
+
+def nudge_items(now):
+    """(every open item that waits on the owner, the ids of those due by their own schedule), most pressing first,
+    under the focus while one is set."""
+    due, _ = mailbox.checkin(now, kinds=NUDGE_KINDS)
+    focus = mailbox.focus_get(now=now)
+    waiting = sorted((item for item in mailbox.items(("open",), focus=focus, now=now) if item["kind"] in NUDGE_KINDS),
+                     key=mailbox._item_sort_key)
+    return waiting, {item["id"] for item in due}
+
+
+def nudge_text(item, others):
+    """The nudge turn: one item, named whole, with a count of the rest."""
+    render = relay.settings.render
+    return (render(f"{OWNER_START} is free now, and this still waits on {pn('him')}: ")
+            + mailbox.format_line(item, time.time())[2:]
+            + (f"\n{relay.words(others).capitalize()} more {'waits' if others == 1 else 'wait'} after it." if others else "")
+            + render(f"\nBring it to {OWNER} now, in two or three sentences, as the one thing to deal with: what it is, "
+                     f"and what {pn('he has', 'they have')} to do or decide, with a question's options. When "
+                     f"{pn('he says', 'they say')} later or not right now, run {_desk.python_exe()} {ROOT}/desktop/relay.py "
+                     f"mailbox snooze {item['id']} --until 2h, or the time {pn('he names', 'they name')}."))
+
+
+def closing_call(name, tool_input):
+    """Whether a tool call closes a flow: an answer to a thread's question, a send, a launch, or a mailbox answer,
+    done or snooze."""
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    if name == "mcp__t3__t3_pending_request":
+        return tool_input.get("action") == "respond"
+    return name in ("mcp__t3__t3_thread_send", "mcp__t3__t3_thread_launch") or (
+        name == "Bash" and bool(CLOSING_COMMAND.search(str(tool_input.get("command") or ""))))
 
 
 def close_held():
@@ -1871,6 +1924,12 @@ def close_held_show(run_key, text):
         if item["kind"] == "review" and is_held(item["detail"]) and (
                 item["run"] == run_key or not item["run"] and item["detail"].partition("\n")[2] == text):
             mailbox.done(item["id"], f"shown to {OWNER}")
+
+
+def ahead(entry):
+    """Whether a queued (time, item) goes ahead of routine news: an urgent turn or a blocked agent."""
+    event, text, *extra = entry[1]
+    return media.is_urgent(event, text, extra) or media.is_blocked_agent(event, text, extra)
 
 
 def item_ids(entries):
@@ -1974,7 +2033,7 @@ class Inbox(asyncio.Queue):
     status notes, task timers that came due, threads' media shows, and the note of a startup report also stay in the
     durable store (or inbox.json without one) until they are delivered, so a restart loses none. Watcher news is not
     kept, since the watcher repeats it after a restart, and game events are stale by then."""
-    KEPT = ("inbox", "status", "timer", "show", "startup")
+    KEPT = ("inbox", "status", "timer", "show", "startup", "action")
 
     def __init__(self, path, run_write=None, run_write_async=None, initial=None):
         super().__init__()
@@ -2359,6 +2418,12 @@ class Companion:
     held_timers = ()  # (arrived, text) -> timer metadata for due task timers waiting in inbox; a dict in __init__.
     cancelled_inbox = ()  # (arrived, text) of held task timers cancelled before delivery; a set in __init__.
     deliver_hold_reason = None  # Current hold reason in deliver_one, for relay.py timer list.
+    action_agent = False  # Whether the silent outbox runs in this start (the action_agent setting).
+    outbox = None  # The silent outbox's worker (actions.ActionOutbox) while it runs.
+    last_ledger_seq = 0  # The highest outbox ledger seq a turn of the owner's carried and finished cleanly.
+    ledger_turns = {}  # turn -> the ledger seq it carries, until it ends; a dict in __init__ when the outbox runs.
+    agent_servers = {}  # The tool servers of the main agent's last launch, which the outbox's session shares.
+    turn_orders = ()  # Outbox orders the streamed answer carried, dispatched when its turn ends.
     timer_tick_at = 0.0  # Wall-clock time of the last run_timers tick; initialized to self.started.
     last_matt_wall = 0.0  # Wall-clock time of the owner's latest desk request, for releasing video-held updates.
     matt_turn_seq = 0  # Counter incremented on each desk request from the owner.
@@ -2494,6 +2559,10 @@ class Companion:
         # Every open thread and agent, kept across restarts. The agent gets its directory once per conversation, then
         # only its changes: roster_given is (conversation, the directory as last given).
         self.roster = watch.Roster(roster_rows, lambda puts, drops: self.journal_write("roster_save", puts, drops))
+        self.watcher.roster = self.roster  # The blocked-thread scan reads the projects the roster knows by id too.
+        self.flow_closed_at = 0.0  # When a turn's call last closed a flow, such as an answer to a thread.
+        self.closing_calls = set()  # tool_use ids of such calls, until their result comes.
+        self.nudged = {}  # mailbox item id: when a nudge last surfaced it.
         self.roster_given = None
         self.pending_lock = asyncio.Lock()
         # Held from the idle check to the submit by every typed or unprompted turn, so two never start at once.
@@ -2592,6 +2661,8 @@ class Companion:
         self.harness, problem = harness.pick(self.agent_choice)
         self.speak_thoughts = relay.speak_thoughts_in_force(saved_settings)[0]
         self.beats_started = self.speak_thoughts in ("beats", "both")
+        # The silent outbox, read once per start like the agent: its prompt paragraph and worker go together.
+        self.action_agent = relay.settings.action_agent_in_force(saved_settings)[0] == "on"
         self.harness.narrate_thoughts = self.speak_thoughts in ("thoughts", "both")
         self.harness.narrate_beats = self.beats_started
         self.agent_name = self.agent_choice.get("agent", "claude")  # Its name in the agent setting.
@@ -2836,7 +2907,9 @@ class Companion:
                   "was wrong, say so first. Search the web before you answer about a named product, a release, "
                   "or recent news, because your knowledge is old. For how your own code"
                   + (_slot("code_check") or (self.game.CODE_CHECK if self.game else " or keys"))
-                  + " behave, read the code first, or say \"I have not checked\".\n\n"
+                  + " behave, read the code first, or say \"I have not checked\". Bound every network command: use "
+                  "ssh -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2, curl --max-time 10, or "
+                  "wrap remote commands in timeout 60.\n\n"
                   "Use the rook:delegate skill for every handoff to a T3 Code thread and for every question "
                   f"about one, such as how it is going or what needs {OWNER}. When {OWNER} names another agent, "
                   "thread, or model, hand the work over and do not do it yourself, even when you could. If "
@@ -2875,7 +2948,9 @@ class Companion:
                   f"rook:delegate skill's mailbox steps for it. They cover what needs {pn('him')}, {pn('his')} answers, reminders, and "
                   "staying on one track. A line in a request may name items that still wait, or a focus lock. Follow "
                   f"what it says. Never say a work number or a mailbox id to {OWNER}, and use bracketed ids for commands "
-                  "only. Name each item by its project and what it is.\n\n"
+                  "only. Name each item by its project and what it is. Mention a waiting agent or mailbox item only "
+                  "when the current turn's input explicitly names it. Never bring up waiting items from earlier "
+                  "conversation history while talking about another topic.\n\n"
                   f"When {OWNER} asks you to go dark, write one short line first, such as \"Going dark for thirty "
                   f"minutes.\" Then run {_desk.python_exe()} {ROOT}/desktop/relay.py dark on, with --for 30m or --until "
                   f"3:30pm when {pn('he names', 'they name')} an end. Then end your turn and write nothing more, even if {pn('he repeats', 'they repeat')} "
@@ -2967,6 +3042,18 @@ class Companion:
                   "names. name:icon picks an icon, * marks the main node, > is an arrow, - a plain line, a comma "
                   "fans out, and ; starts another chain. The mark is never spoken, and each node lights as your "
                   "voice names it.\n"))
+        if self.action_agent:
+            prompt += render(
+                "\nYou have a silent outbox: a second agent of yours that carries out orders in the background while "
+                "you keep talking. To hand it an action, such as a message to send or a setting to change, put one "
+                "mark in your spoken answer, such as {do: turn off the desk lamp}. For a lookup whose answer "
+                f"{OWNER} wants to hear, write {{do wake: look up the build status}}. The mark is never spoken. Say "
+                "only that you are on it, never that it is done: a routine result reaches you silently, in a ledger "
+                f"block at the end of {OWNER}'s next request, and a failure, a stuck action or a lookup's answer "
+                "comes to you as a report. Never claim an action is done before the ledger says confirmed. Never "
+                "mention the outbox or your agent unless an action failed or is stuck. Anything you must answer now "
+                f"you still do with your own tools. {_desk.python_exe()} {ROOT}/desktop/relay.py actions lists the open "
+                f"actions, and actions cancel with a key stops one when {OWNER} asks.\n")
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
@@ -2980,6 +3067,7 @@ class Companion:
         if t3 := t3_server():
             servers["t3"] = t3
         servers.update(plugin_loader.server_configs())  # Active plugins' tool servers, after Rook's own.
+        self.agent_servers = servers
         self.t3_status = None
         workspace = Path(self.args.workspace)
         if not workspace.is_dir():
@@ -3194,6 +3282,7 @@ class Companion:
         at the desk. A device's request returns False, unsent, when a turn started while it waited here: it never
         joins another turn."""
         report, mail, release, carried, checkin_ids, lines, prefs_update = None, None, False, [], [], "", ""
+        ledger, ledger_seq = (), 0
         given = text  # As it came, for the watchdog to give again: the held report and fresh lines are added anew.
         spend = []  # What the mailbox lines use up, such as a check-in: it runs only once the turn really goes.
         self.end_listen_after()  # A new turn closes a listen window at once.
@@ -3213,6 +3302,12 @@ class Companion:
             # Every await of the mailbox comes before the turn is registered, so nothing can come between the two.
             lines, checkin_ids, release = await self.mailbox_lines(self.held_note is not None, spend)
             carried = carried + checkin_ids
+            if self.outbox:  # The outbox's ledger rows that changed since the last delta, appended to this turn alone.
+                try:
+                    ledger, ledger_seq = await asyncio.wait_for(self.outbox.unread(self.last_ledger_seq), MAILBOX_SECONDS)
+                except Exception as exc:
+                    self.log("action_error", error=repr(exc))
+                    ledger = ()
         if not self.agent or self.agent.returncode is not None:
             await self.launch_agent()
         # A question sent during the warm-up can be folded into it and lost. Wait for it to end.
@@ -3350,6 +3445,9 @@ class Companion:
             now += "\n" + prefs_update
         # Every part passes as it is: whoever made it filled the owner tokens in Rook's own words, and the data inside,
         # such as a thread's message, a mailbox line, the preferences file, a window title or game data, is never rendered.
+        if ledger:  # At the end of the turn, so nothing before it changes and the agent's cached prefix holds.
+            text += "\n\n" + actions.format_ledger_delta(ledger)
+            self.ledger_turns[self.latest_turn] = ledger_seq  # Seen only once this turn ends cleanly.
         self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
                           steer)
         silent = (self.latest_turn, given, label, shots, source, once, client, report, time.monotonic())
@@ -3378,8 +3476,10 @@ class Companion:
 
     async def roster_busy(self):
         """Whether the roster's refresh waits: the owner uses Rook, or plays. Its CPU would cost the game frames."""
-        if self.busy_with(quiet=True):
-            return True
+        return bool(self.busy_with(quiet=True)) or await self.wow_focused()
+
+    async def wow_focused(self):
+        """Whether the game has focus, so this machine's background reads slow down."""
         window = await self.hyprctl("activewindow") or {}
         return window.get("title", "").startswith("World of Warcraft")
 
@@ -3415,6 +3515,7 @@ class Companion:
                             self.last_reply = {"spoken": failed, "details": error}
                             self.speak()
                         continue
+                live = bool(self.pending_turns.intersection(completed)) or completed == [None] and len(self.pending_turns) == 1
                 self.pending_turns.difference_update(completed)
                 if completed == [None] and len(self.pending_turns) == 1:
                     completed = list(self.pending_turns)
@@ -3430,6 +3531,18 @@ class Companion:
                     answer = failed
                 if not message.get("is_error"):
                     answer = self.strip_pass(answer)
+                # The streamed blocks' marks, and any in the written part the stream did not read, once each.
+                orders, self.turn_orders = (*self.turn_orders, *actions.parse_do_marks(answer)[1]), ()
+                # Only a live turn that ran to its end dispatches: a stopped turn is no longer pending, even if agy
+                # releases a held turn with terminal_reason completed.
+                clean = live and not message.get("is_error") and (message.get("terminal_reason")
+                                                                  or message.get("subtype")) in ("completed", "success")
+                if self.outbox and orders and clean:  # The voice turn does not wait for them.
+                    self.loop.create_task(self.dispatch_orders(orders, completed[-1]))
+                for turn in completed:  # A ledger delta counts as seen once its turn ends cleanly, and only then.
+                    if (seq := self.ledger_turns.pop(turn, None)) is not None and clean and seq > self.last_ledger_seq:
+                        self.last_ledger_seq = seq
+                        self.journal_write("seen_actions", seq)
                 # The diagram mark leaves the spoken text too, so it matches what the stream spoke.
                 diagram, marked, answer = DIAGRAM_MARK.search(answer), undiagrammed(answer), unmarked(answer)
                 muted = self.latest_turn in completed and (self.dark_muted() or self.latest_turn in self.phone_turns)
@@ -3532,6 +3645,8 @@ class Companion:
                         self.stream_text = self.strip_pass(self.stream_text + event["delta"]["text"])
                         if "{" in self.stream_text:
                             self.take_diagram()
+                            self.stream_text, orders = actions.take_closed_marks(self.stream_text)  # Never spoken.
+                            self.turn_orders = (*self.turn_orders, *orders)
                         if (self.phone and self.phone.subscribers and not self.warming
                                 and self.latest_turn in self.pending_turns):
                             self.phone.draft(self.latest_turn, unmarked(self.stream_text))
@@ -3546,6 +3661,8 @@ class Companion:
                         elif self.stream_prefix is None:
                             self.speak_first()
                     case "content_block_stop" if self.stream_text:
+                        self.stream_text, orders = actions.parse_do_marks(self.stream_text)  # A mark the block closed.
+                        self.turn_orders = (*self.turn_orders, *orders)
                         self.speak_stream(answer=False)
             elif kind == "assistant":
                 self.turn_tools += [block.get("name") for block in message["message"]["content"]
@@ -3577,6 +3694,8 @@ class Companion:
                     if block.get("type") == "tool_use" and re.search(
                             r"relay\.py media (pause|play|toggle)", str((block.get("input") or {}).get("command"))):
                         self.hush_paused = []  # The owner asked for a media change, so Rook resumes nothing it paused.
+                    if block.get("type") == "tool_use" and closing_call(block.get("name"), block.get("input")):
+                        self.closing_calls = {*getattr(self, "closing_calls", ()), block.get("id")}
                     # A call that may hand work to a T3 thread. Its result, in the next user message, says.
                     if (block.get("type") == "tool_use" and block.get("name") == "Bash"
                             and "relay.py mailbox focus clear" in str((block.get("input") or {}).get("command"))):
@@ -3597,6 +3716,10 @@ class Companion:
                 for block in message["message"]["content"]:
                     if block.get("type") == "tool_result" and (call := (self.turn_calls or {}).get(block.get("tool_use_id"))):
                         call[2] = True
+                    if block.get("type") == "tool_result" and block.get("tool_use_id") in getattr(self, "closing_calls", ()):
+                        self.closing_calls.discard(block.get("tool_use_id"))
+                        if not block.get("is_error"):
+                            self.flow_closed_at = time.time()
                     if block.get("type") == "tool_result" and (call := self.delegating.pop(block.get("tool_use_id"), None)):
                         if call[0] in SEND_TOOLS and isinstance(call[1], dict) and (
                                 key := send_key(block.get("tool_use_id"), *call)):
@@ -3605,8 +3728,12 @@ class Companion:
                             self.settle_fan(key, outcome[0] if outcome else "unknown")
                         if roster := getattr(self, "roster", None):  # Stand-ins in the checks may have none.
                             watch.note_tool(roster, *call, block.get("content"), block.get("is_error"))
-                        if call[0] in ROSTER_TOOLS:
-                            pass  # Only the roster follows these.
+                        if call[0] in ROSTER_TOOLS:  # Only the roster follows these, and a settle quiets the watch.
+                            if (call[0] == "mcp__t3__t3_thread_organize" and not block.get("is_error")
+                                    and isinstance(call[1], dict) and call[1].get("action") == "settle"
+                                    and call[1].get("threadId")):
+                                self.watcher.note_settled(watch.machine_for(call[1].get("environmentId")),
+                                                          str(call[1]["threadId"]))
                         elif call[0] == "mcp__t3__t3_pending_request":  # Code, not the model, keeps questions current.
                             if seen := watch.pending(call[1], block.get("content"), block.get("is_error")):
                                 self.loop.create_task(self.note_pending(seen))
@@ -3682,6 +3809,7 @@ class Companion:
         self.pending_turns.clear()
         self.silent_turns = ()
         self.stream_text = None
+        self.turn_orders = ()  # The orders of a turn the agent never finished never run.
         self.finish_deferred(heard=False)
         # A warm-up that never finished must not hold back typed and unprompted turns. The next turn
         # starts a new Claude Code, as a spoken turn does.
@@ -3838,6 +3966,63 @@ class Companion:
             if report is not None and self.held_note is None:  # The held report goes along as it did, not as words.
                 self.held_note = report
             await self.submit(text, label, shots, source=source, note=note or None, turn=turn)
+
+    async def start_hands(self):
+        """Start the silent outbox's own agent session: a new instance of the chosen agent, with the main agent's
+        tool servers but none that draws on the screen. It shares nothing with the main session but the record."""
+        # The agent Rook runs on now: after a fallback, Claude Code with its defaults, as the main session.
+        choice = self.agent_choice if not self.fallback else {
+            "agent": "claude", "permission_mode": self.agent_choice.get("permission_mode")}
+        hands, problem = harness.pick(choice)
+        if problem:
+            self.log("outbox_fallback", reason=problem)
+        hands.plain_prompt, hands.runtime_tag = True, "-hands"  # Hands' prompt is not Rook's. Its files are its own.
+        hands.workspace = getattr(self.harness, "workspace", None) or str(Path.home())
+        session = str(uuid4())
+        servers = {name: spec for name, spec in self.agent_servers.items() if name not in ("render", "wow")}
+        prompt = actions.HANDS_PROMPT + (f"\n\nRook's command tool is {_desk.python_exe()} {ROOT}/desktop/relay.py, "
+                                         "and --help lists its commands. Never run its tell, ask or dark commands.")
+        process = await asyncio.create_subprocess_exec(
+            *hands.command(prompt, servers, session, ROOT / "plugin", T3_DENIED), cwd=hands.workspace,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env={**os.environ, "ROOK_AGENT": "1"})
+        self.log("outbox_started", agent=hands.name, model=hands.model)
+        return actions.HarnessSession(hands, process, session, messages, self.name_skills(hands.setup({}, [], False)))
+
+    async def dispatch_orders(self, orders, turn):
+        """Write each order's dispatched row and hand it to the outbox, once each, in the answer's order. The send
+        cue shows it pending: Rook is on it, and only the ledger says it is done."""
+        given = set()
+        for order in orders:
+            if order["order"] in given:  # A paragraph said again, as a dive's repeat, dispatches once.
+                continue
+            given.add(order["order"])
+            try:
+                row = await self.outbox.dispatch(order["order"], wake=order["wake"], conversation=self.session,
+                                                 turn=turn)
+            except Exception as exc:
+                self.log("action_error", error=repr(exc))
+                self.inbox.put_nowait(("action", f"URGENT: Your silent outbox could not take the order "
+                                                 f"\"{order['order']}\" ({type(exc).__name__}), so it never ran."))
+                continue
+            self.show(None, send=[{"id": row["key"], "name": row["description"], "outcome": "pending"}])
+
+    def action_woke(self, row):
+        """An outbox row Rook judges now, as an action turn: urgent for a failed, stuck or blocked action."""
+        self.inbox.put_nowait(("action", ("URGENT: " if row["state"] in actions.WAKE_STATES else "")
+                               + actions.wake_text(row)))
+
+    async def actions_request(self, command, key):
+        """relay.py actions: the outbox's open or latest rows, or a cancel."""
+        if not self.journal:
+            return {"ok": False, "error": "Rook's record is unavailable, so there is no outbox ledger."}
+        if command == "cancel":
+            row = await (self.outbox.cancel(key) if self.outbox else asyncio.to_thread(
+                self.journal.action_transition, key, "cancelled", result="Cancelled before it began."))
+            row = row or await asyncio.to_thread(self.journal.get_action, key)
+            return {"ok": True, "actions": [row]} if row else {"ok": False, "error": f"No action has the key {key}."}
+        if command not in ("list", "all"):
+            return {"ok": False, "error": "Usage: relay.py actions [list|all|cancel KEY]"}
+        return {"ok": True, "actions": await asyncio.to_thread(self.journal.list_actions, open_only=command == "list")}
 
     def answer_permission(self, allowed, answers=None, card=None):
         """Answer the shown card. card is the id of the card the answer was given to, on every client: an answer
@@ -4005,6 +4190,7 @@ class Companion:
         self.stop_voice()
         self.end_listen_after()
         self.turn_timing = None
+        self.turn_orders = ()  # A stopped turn's orders never run.
         if self.staged:  # The owner pressed Stop, so the staged scene never shows.
             self.show(None, render={"reveal": self.staged, "drop": True})
             self.staged = None
@@ -4882,6 +5068,7 @@ class Companion:
                 source["title"] = self.watched_title(source)
                 if asks := watch.decision(text):  # A report that asks the owner to decide says so first.
                     text = f"{watch.DECISION}{asks}\n{text}"
+                    source["blocked"] = True
                     source["item"] = await self.capture_item("decision", asks, source)  # Its run is not known here.
                 await self.inbox.put_kept(("inbox", text, source))
                 if thread:
@@ -4909,6 +5096,8 @@ class Companion:
             return {"ok": True, "threads": self.roster.listing()}
         if verb == "timer":
             return self.timer_request(arg.strip(), body.strip())
+        if verb == "actions":
+            return await self.actions_request(arg.strip(), body.strip())
         if verb == "dark":
             return self.dark_request(arg.strip(), body.strip())
         if verb == "idle":  # relay.py daily-restart restarts Rook only when idle says so.
@@ -5372,17 +5561,19 @@ class Companion:
 
     async def check_updates(self):
         """Once a day, at or after 10:00, look on GitHub for a newer Rook, in a thread off the event loop. A newer one
-        is a routine status turn, told once per version. A failure is silent: the next day looks again."""
+        is a routine status turn, told once per version, and a mailbox reminder that closes once that turn is heard.
+        A failure is silent: the next day looks again."""
         await asyncio.sleep(update_check.FIRST_SECONDS)
         while True:
             try:
-                note = await asyncio.to_thread(lambda: update_check.look(relay.read_settings()[0]))
+                found = await asyncio.to_thread(lambda: update_check.look(relay.read_settings()[0]))
             except Exception as exc:  # The check must never take Rook down.
                 self.log("update_check_error", error=repr(exc))
-                note = None
-            if note:
+                found = None
+            if found:
+                note, item = found
                 self.log("update_found")
-                self.inbox.put_nowait(("status", note))
+                self.inbox.put_nowait(("status", note, *([{"item": item}] if item else [])))
             await asyncio.sleep(update_check.LOOK_SECONDS)
 
     async def run_timers(self):
@@ -7121,27 +7312,28 @@ class Companion:
         async with self.pending_lock:
             await self.mail(record_pending, *seen, title=self.watched_title({"machine": seen[1], "thread": seen[2]}))
 
-    def carry(self, ids, ask=None, release=False, notices=(), told=()):
+    def carry(self, ids, ask=None, release=False, notices=(), told=(), checkin=()):
         """Count the mailbox items the turn just submitted carries as offered. ask is the item of a turn that is that
         one message alone. told holds check-in item ids whose delivered reminders or video-held updates close once the owner
-        hears the whole answer. Once the owner hears the whole answer, ask is marked asked, and a release account closes the
-        finishes the focus held."""
+        hears the whole answer. checkin holds a nudge's item, whose mention counts only once the owner hears it. Once the
+        owner hears the whole answer, ask is marked asked, and a release account closes the finishes the focus held."""
         ids = list(dict.fromkeys(ids))
         told = list(dict.fromkeys(told))
         if ids:
             self.loop.create_task(self.mail(mailbox.offered, ids))
         if notices:
             self.journal_write("offered", list(notices))
-        if told or ask or release or notices:
+        if told or ask or release or notices or checkin:
             if self.stamp and self.stamp["turn"] in self.pending_turns:
                 self.stamp["turn"] = self.latest_turn
                 self.stamp["ask"] = self.stamp.get("ask") or ask
                 self.stamp["release"] = bool(self.stamp.get("release") or release)
                 self.stamp["notices"] = list(dict.fromkeys([*self.stamp.get("notices", ()), *notices]))
                 self.stamp["ids"] = list(dict.fromkeys([*self.stamp.get("ids", ()), *told]))
+                self.stamp["checkin"] = list(dict.fromkeys([*self.stamp.get("checkin", ()), *checkin]))
             else:
                 self.stamp = {"turn": self.latest_turn, "ask": ask, "release": release,
-                              "notices": list(notices), "ids": told}
+                              "notices": list(notices), "ids": told, "checkin": list(checkin)}
 
     def settle_stamp(self, completed, heard):
         """The turn with the stamp ended. heard says whether its answer is speech the owner can hear: not an error, not
@@ -7166,6 +7358,8 @@ class Companion:
                 self.release_shows()
             if stamp.get("ids"):
                 self.loop.create_task(self.mail(mailbox.close_delivered, stamp["ids"]))
+            if stamp.get("checkin"):  # A nudge heard to its end counts one mention, which starts the item's next wait.
+                self.loop.create_task(self.mail(mailbox.checkin_done, stamp["checkin"]))
             if stamp.get("notices"):  # The owner heard the turn that carried them to its end.
                 self.journal_write("clear", stamp["notices"])
 
@@ -7259,6 +7453,50 @@ class Companion:
         later(lambda: self.loop.create_task(self.mail(mailbox.checkin_done, ids, now=now)))
         return "\n".join([*lines, checkin_line(due, more, now)]), ids, False
 
+    async def nudge_loop(self):
+        """Every NUDGE_TICK_SECONDS, maybe queue the one nudge. It never takes Rook down."""
+        while True:
+            await asyncio.sleep(NUDGE_TICK_SECONDS)
+            try:
+                await self.nudge()
+            except Exception as exc:
+                self.log("nudge_error", error=repr(exc))
+
+    async def nudge(self):
+        """Queue one nudge turn for the most pressing open item that waits on the owner, while the owner is there, Rook
+        is idle and quiet, nothing else waits to be told, and no call holds the microphone. Right after a turn closed a
+        flow, once its speech has been over NUDGE_SPEECH_SECONDS, it takes the next item at once. After
+        NUDGE_QUIET_SECONDS with no turn and no speech, it takes an item its own schedule makes due. A thread's wait is
+        read fresh first: one that ended closes quietly, and the next item is taken. Return the item's id, or None."""
+        now = time.time()
+        if (self.dark or self.delivering or not self.inbox.empty() or not self.idle(quiet=True) or self.playing
+                or now - self.call_seen_at < NUDGE_QUIET_SECONDS):
+            return None
+        spoke = now - (self.spoke_at or 0)
+        quiet = min(spoke, now - self.last_matt_wall) >= NUDGE_QUIET_SECONDS
+        closed = now - self.flow_closed_at <= NUDGE_CLOSED_SECONDS and spoke >= NUDGE_SPEECH_SECONDS
+        if not (quiet or closed) or not self.matt_here(await self.screen_locked()):
+            return None
+        state = await self.mail(nudge_items, now)
+        if not state:
+            return None
+        waiting, due = state
+        for item in waiting:
+            if now - max(self.nudged.get(item["id"], 0), item["checkin_from"] or 0, item["asked_at"] or 0) < NUDGE_RECENT_SECONDS:
+                continue  # Just surfaced.
+            if not (closed or item["id"] in due):
+                continue
+            if item["kind"] != "decision" and not await self.watcher.still_blocked(
+                    {"machine": item["machine"], "thread": item["thread"]}):
+                continue  # Its wait ended, and the fresh read closed it.
+            if not self.inbox.empty() or not self.idle(quiet=True):
+                return None
+            self.nudged[item["id"]] = now
+            self.inbox.put_nowait(("nudge", nudge_text(item, len(waiting) - 1), {"item": item["id"]}))
+            self.log("nudge", item=item["id"], kind=item["kind"], why="closed" if closed else "quiet")
+            return item["id"]
+        return None
+
     def startup_mail(self):
         """The startup report's mailbox part: (text, item ids, whether every source was read), or None. None means
         the refresh failed, or is still running: then the report goes as before, and a late refresh follows as its
@@ -7312,8 +7550,9 @@ class Companion:
                 self.delivering = False
             if keep == "held":  # A focus holds a thread's show. Its kept entry stays, and release_shows queues it.
                 continue
-            if keep == "yield":  # An urgent turn arrived while this routine turn waited on video.
+            if keep == "yield":  # An urgent turn or a blocked agent arrived while this routine turn waited.
                 self.inbox.requeue_first([(arrived, item)])
+                self.inbox.promote(ahead)
                 self.inbox.promote(lambda e: media.is_urgent(e[1][0], e[1][1], e[1][2:]))
                 continue
             if keep == "yield_timer":  # A due task timer arrived while a non-timer waited on an unknown mic read.
@@ -7344,6 +7583,7 @@ class Companion:
         held_since, held, was_locked, started, why = None, 0.0, False, time.monotonic(), None
         probed_at, locked = None, None
         urgent = media.is_urgent(event, text, extra)
+        blocked = media.is_blocked_agent(event, text, extra)  # Goes ahead of routine news, and is never buried.
         video_wait_seq, video_held_since, media_checked_at = None, None, 0.0
         expire_backoff, expire_next_at, expire_fail_logged = 0.0, 0.0, False
         hold_surfaced = False
@@ -7397,6 +7637,8 @@ class Companion:
                 if probed_at is None or time.monotonic() - probed_at >= 1:
                     probed_at, locked = time.monotonic(), await self.screen_locked()
                 if not self.matt_here(locked):
+                    if event == "nudge":  # A nudge never waits through an absence; the next quiet moment brings it again.
+                        return False
                     if held_since is None:
                         held_since = time.monotonic()
                         if not self.holding:
@@ -7424,6 +7666,8 @@ class Companion:
                         and await self.plugin_hold()):
                     waiting("plugin")
                     note_hold("plugin")
+                    if not blocked and self.inbox.has_urgent(ahead):
+                        return "yield"
                     await asyncio.sleep(1)
                     continue
                 # Rook speaks unprompted only when no real call holds the microphone.
@@ -7436,6 +7680,8 @@ class Companion:
                         self.call_seen_at = time.time()
                     elif self.inbox.has_urgent(lambda e: e[1][0] == "timer"):
                         return "yield_timer"
+                    elif not blocked and self.inbox.has_urgent(ahead):
+                        return "yield"
                     await asyncio.sleep(1)
                     continue
                 # A routine unprompted turn waits while a video plays, until it pauses/stops, the owner speaks, or the bound expires.
@@ -7452,13 +7698,17 @@ class Companion:
                     media_state = await self.media_attention()
                     media_checked_at = time.monotonic()
                     if media_state["videos"]:
+                        if event == "nudge":  # A nudge never waits on a video: the next quiet moment brings it again.
+                            return False
                         if video_wait_seq is None:
                             video_wait_seq = self.matt_turn_seq
                         if video_held_since is None:
                             video_held_since = time.monotonic()
                         now_mono = time.monotonic()
                         video_waited = now_mono - video_held_since
-                        if video_waited >= self.video_hold_seconds and now_mono >= expire_next_at:
+                        # A blocked agent waits for the video to pause, or the owner to speak, and never expires into
+                        # a held update.
+                        if not blocked and video_waited >= self.video_hold_seconds and now_mono >= expire_next_at:
                             if await self.expire_video_hold(arrived, event, text, extra, video_waited,
                                                             log_failure=not expire_fail_logged):
                                 return False
@@ -7467,7 +7717,8 @@ class Companion:
                             expire_next_at = time.monotonic() + expire_backoff
                         waiting("video", players=[p["name"] for p in media_state["videos"]])
                         note_hold("video")
-                        if self.inbox.has_urgent(lambda e: media.is_urgent(e[1][0], e[1][1], e[1][2:])):
+                        if (self.inbox.has_urgent(lambda e: media.is_urgent(e[1][0], e[1][1], e[1][2:]))
+                                or (not blocked and self.inbox.has_urgent(ahead))):
                             return "yield"
                         sleep_s = (1.0 if video_waited >= self.video_hold_seconds
                                    else min(1.0, max(0.05, self.video_hold_seconds - video_waited)))
@@ -7475,6 +7726,10 @@ class Companion:
                         continue
                     video_held_since = None
                     expire_backoff, expire_next_at, expire_fail_logged = 0.0, 0.0, False
+                if blocked and event == "watch" and not await self.watcher.still_blocked(extra[2]):
+                    self.log("watch_dropped", reason="answered", text=text[:200])
+                    extra[1]()  # The wait ended meanwhile, so its news is dropped unheard. Read outside the turn lock.
+                    return False
                 aborted = False
                 async with self.turn_lock:  # Held from the last checks to the submit, so no other turn slips in.
                     await self.ensure_agent()
@@ -7592,11 +7847,23 @@ class Companion:
         once they are handed over. A failed hand-over keeps them all. Return True when the first must stay queued."""
         rest, items = batch[1:], []
         back = self.dark_ended if any(item[0] == "back" for _, item in batch) else None
+        # A blocked agent's news is read fresh first: a wait that ended meanwhile is dropped, unheard.
+        blocked = [entry for entry in batch if entry[1][0] == "watch" and media.is_blocked_agent(*entry[1][:2], entry[1][2:])]
+        live = await asyncio.gather(*(self.watcher.still_blocked(entry[1][4]) for entry in blocked))
+        if blocked and (not self.idle(quiet=True) or self.speech_gap()):
+            self.inbox.requeue_first(rest)
+            return "yield"
+        ended = {id(entry) for entry, still in zip(blocked, live) if not still}
         # What needs the owner comes first, then the rest, each part oldest first.
-        for arrived, (event, text, *extra) in sorted(batch, key=lambda e: (not watch.needs_owner(e[1][1]), e[0])):
+        for entry in sorted(batch, key=lambda e: (not watch.needs_owner(e[1][1]), e[0])):
+            arrived, (event, text, *extra) = entry
             if event == "back":
                 continue
-            if event == "watch" and time.time() - extra[0] - away > WATCH_STALE_SECONDS:
+            if id(entry) in ended:
+                self.log("watch_dropped", reason="answered", text=text[:200])
+                extra[1]()
+            elif (event == "watch" and time.time() - extra[0] - away > WATCH_STALE_SECONDS
+                  and not media.is_blocked_agent(event, text, extra)):
                 self.log("watch_dropped", reason="stale", text=text[:200])
                 extra[1]()
             else:
@@ -7622,7 +7889,10 @@ class Companion:
             else:
                 lead = (f"{relay.words(count).capitalize()} message{'s' if count != 1 else ''} waited until now, what "
                         f"needs {OWNER} first, then oldest first. Judge each against what happened since it came in, as "
-                        "your instructions say, and answer PASS when none still matters.")
+                        "your instructions say, and " + (
+                            f"tell {OWNER} first about each agent that still waits on {pn('him')}: it still waits, as a "
+                            "fresh read shows." if any(media.is_blocked_agent(event, text, extra) for _, event, text, extra
+                                                       in items) else "answer PASS when none still matters."))
             owed = await self.owed(offered=True) if back else None
             # The owed report rides as a note, outside this turn's row, so a cut of this turn cannot tell it twice.
             told = ("Your report after your last restart was not heard to its end. Give it now, in a few short "
@@ -7690,7 +7960,8 @@ class Companion:
                 await self.mail(close_held_show, show_run(arrived, text), text)
         elif event == "watch":
             queued, delivered = extra[:2]
-            if time.time() - queued - away > WATCH_STALE_SECONDS:
+            # A blocked agent's news is never too old: the agent still waits, as the fresh read before this showed.
+            if time.time() - queued - away > WATCH_STALE_SECONDS and not media.is_blocked_agent(event, text, extra):
                 self.log("watch_dropped", reason="stale", text=text[:200])
                 delivered()
                 return False  # No turn was submitted, so no row may name the owner's last one.
@@ -7730,6 +8001,11 @@ class Companion:
             elif event == "inbox":
                 ids = item_ids([(0, event, text, extra)])
                 self.carry(ids, ids[0] if ids else None)
+            elif event == "nudge":
+                ids = item_ids([(0, event, text, extra)])
+                self.carry(ids, ids[0] if ids else None, checkin=ids)
+            elif event == "status" and (ids := item_ids([(0, event, text, extra)])):
+                self.carry(ids, told=ids)  # The update reminder closes once the owner hears this turn to its end.
         self.log(event, turn=self.latest_turn)
         return False
 
@@ -8093,6 +8369,17 @@ class Companion:
         inbox = await asyncio.start_unix_server(self.receive, INBOX)
         INBOX.chmod(0o600)
         await self.launch_agent()
+        if self.journal:  # Actions an earlier Rook left open end now, and the first delta tells of them.
+            try:
+                self.last_ledger_seq = await asyncio.to_thread(self.journal.recover_actions)
+            except Exception as exc:
+                print(f"rook: the outbox ledger could not be recovered: {type(exc).__name__}", file=sys.stderr)
+            else:
+                if self.action_agent:  # Its session starts at the first order, on the agent Rook runs on.
+                    self.outbox = actions.ActionOutbox(self.journal, self.start_hands, self.action_woke, self.log)
+                    self.ledger_turns = {}
+                    self.keep("outbox", self.outbox.work, optional=True)
+                    self.keep("outbox watch", self.outbox.watch, optional=True)
         if self.journal:  # The phone's server, on loopback, a task of its own: it never holds the start up.
             self.phone_task = self.loop.create_task(self.phone.start())
         mac_helper_path = getattr(self.args, "mac_helper", None) or os.environ.get("ROOK_MAC_HELPER")
@@ -8114,6 +8401,8 @@ class Companion:
             self.keep("game events", self.game.watch, optional=True)
         self.keep("thread watcher", self.watcher.run, optional=True)  # Says when delegated threads finish.
         self.keep("thread roster", lambda: watch.keep_roster(self.roster, self.log, self.roster_busy), optional=True)
+        self.keep("blocked-thread scan", lambda: self.watcher.scan_forever(self.wow_focused), optional=True)
+        self.keep("attention", self.nudge_loop, optional=True)  # The one nudge about what waits on the owner.
         self.keep("timers", self.run_timers, optional=True)
         self.keep("update check", self.check_updates, optional=True)
         want_overlay = self.use_overlay and self.overlay_explicit is not False
@@ -8155,8 +8444,10 @@ class Companion:
             await self.shutdown_media_duck()
             for device in list(devices.values()):
                 drop(device)
+            hands = self.outbox and self.outbox.session and self.outbox.session.process
             await asyncio.gather(*(self.stop_child(process) for process in
-                                   (self.overlay, getattr(self, "mac_helper", None), self.voice, self.agent) if process))
+                                   (self.overlay, getattr(self, "mac_helper", None), self.voice, self.agent, hands)
+                                   if process))
 
     async def stop_child(self, process):
         """End a child at shutdown. Each child exits at the end of its input. Only one that does not is
@@ -8454,8 +8745,9 @@ def check_replay():
             assert await c.submit("Anything.", source="typed") == "replayed"
             task = c.replay_task
             if cut == "button":
-                while not any(m.get("type") == "speak" for m in sent):
-                    await asyncio.sleep(0.005)
+                # During its thinking, as the stop word below: a replay whose last event is its speech ends as soon as
+                # that is queued, so a Stop that waits for the speech can come after the replay already finished.
+                await asyncio.sleep(0.01)
                 c.stop_turn()
             else:
                 await asyncio.sleep(0.01)
@@ -8464,8 +8756,9 @@ def check_replay():
                 await task
             assert c.replay_task is None and not c.replay_armed and agent_bytes[0] == real_bytes, (cut, agent_bytes, real_bytes, c.replay_task, c.replay_armed)
             assert [f for e, f in rows[logged:] if e == "debug_replay"][0]["cut"] is True
-            if cut == "button":
-                assert sent[-1] == {"type": "stop"} and c.overlay_last["state"] == "result", sent
+            if cut == "button":  # Cut before its speech: nothing was said, and the loop rests again.
+                assert not any(m.get("type") == "speak" for m in sent), sent
+                assert c.overlay_last["state"] in ("result", "hidden"), c.overlay_last
             else:
                 assert not any(m.get("type") == "speak" for m in sent) and c.overlay_last["state"] == "hidden"
         voice.feed_eof()
@@ -9305,7 +9598,7 @@ def check_agent():
             prefs_path = Path(folder) / "model-preferences.md"
             MODEL_PREFERENCES = prefs_path
             antigravity_home.HOME = Path(folder) / "agy"
-            antigravity_home.build = lambda wow=False: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
+            antigravity_home.build = lambda wow=False, home=None: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
             antigravity_home.memory = lambda workspace: "machine: oak"
             codex_harness.HOME = Path(folder) / "codex"
             codex_harness.memory = lambda workspace, agents_dir=None: "machine: oak"
@@ -9633,6 +9926,30 @@ def check_agent():
                 procs[0].feed({"type": "result", "user_message_uuids": [c.latest_turn], "result": "PASS",
                                "terminal_reason": "completed"})
                 await until(lambda: not c.pending_turns)
+                # The silent outbox: only a turn that ran to its end dispatches its orders and counts its ledger delta
+                # as seen. agy reports a stopped turn as cancelled with no error, and a stop drops the streamed orders.
+                c, procs, sent, lines, rows = await silent_session()
+                given, row = [], {"updated": time.time(), "actor": "rook-agent", "key": "act-1", "state": "confirmed",
+                                  "description": "Water the plants", "result": None, "ledger_seq": 5}
+                c.outbox, c.ledger_turns = SimpleNamespace(unread=lambda seq: asyncio.sleep(0, ([row], 5))), {}
+                c.dispatch_orders = lambda orders, turn: asyncio.sleep(0, given.append([o["order"] for o in orders]))
+                for reason in ("cancelled", "interrupted", "completed"):
+                    await c.submit("Turn off the lamp.", source="spoken")
+                    assert "act-1 confirmed" in sent[-1][2] and c.last_ledger_seq == 0, (reason, c.last_ledger_seq)
+                    procs[0].feed({"type": "result", "user_message_uuids": [c.latest_turn], "terminal_reason": reason,
+                                   "result": "On it. {do: turn off the lamp}"})
+                    await until(lambda: not c.pending_turns)
+                await asyncio.sleep(0.05)
+                assert given == [["turn off the lamp"]] and c.turn_orders == () and c.last_ledger_seq == 5, given
+                await c.submit("Dim the lights.", source="spoken")
+                stopped_turn = c.latest_turn
+                c.turn_orders = ({"wake": False, "kind": "task", "order": "dim the lights"},)
+                await c.submit("Stop.", source="spoken")
+                await until(lambda: not c.pending_turns)
+                procs[0].feed({"type": "result", "user_message_uuids": [stopped_turn], "terminal_reason": "completed",
+                               "result": "Dimming them. {do: dim the lights}"})
+                await asyncio.sleep(0.05)
+                assert c.turn_orders == () and given == [["turn off the lamp"]], (c.turn_orders, given)
                 # The owner's stop word. Point 1: the rule, as a table: the reviewer's sentences, the owner's own two, and more.
                 # A stop phrase counts only before a pause or a joining word; an opening no only when repeated or
                 # followed by a stop. Filler first is skipped. A stop later in the words or after a negation never counts.
@@ -11997,9 +12314,10 @@ def check_mailbox():
         c.microphone_busy, c.ensure_agent = nothing, nothing
         c.screen_locked = lambda: asyncio.sleep(0, False)
 
-        async def show(entry):
+        async def show(entry, *_):
             return threads[(entry["machine"], entry["thread"])], None
         c.watcher.show = show
+        c.watcher.show_many = lambda machine, entries: asyncio.sleep(0, {})  # Each thread then takes its own read.
         return c
 
     async def settle():  # Let the mailbox calls in worker threads finish.
@@ -12113,16 +12431,19 @@ def check_mailbox():
         await c.watcher.poll()
         thread("t-old", count=1)
         c.watcher.add("t-old", "oak", "t-old", 1, "started")
+        thread("t-oldf", status="completed", words="Done.")
+        c.watcher.add("t-oldf", "oak", "t-oldf", 1, "started")
         tick(-WATCH_STALE_SECONDS - 60)
         await c.watcher.poll()
         tick(WATCH_STALE_SECONDS + 60)
         await until(lambda: len(sent) == 2)
-        assert "t-p1" in sent[-1] and "t-p2" in sent[-1] and "t-old" not in sent[-1], sent[-1]
+        # An old finish is dropped. An agent that still waits is never too old, and its batch never offers PASS.
+        assert "t-p1" in sent[-1] and "t-p2" in sent[-1] and '"t-old"' in sent[-1] and "t-oldf" not in sent[-1], sent[-1]
+        assert "PASS" not in sent[-1], sent[-1]
         await agent(result("PASS"))
         await hear()
-        for tid in ("t-p1", "t-p2"):
+        for tid in ("t-p1", "t-p2", "t-old"):
             assert mine(tid)[0]["offered"] == 1 and mine(tid)[0]["asked_at"] is None
-        assert mine("t-old")[0]["offered"] == 0 and mine("t-old")[0]["asked_at"] is None
         thread("t-c", count=1)
         c.watcher.add("t-c", "oak", "t-c", 1, "started")
         await c.watcher.poll()
@@ -12276,9 +12597,7 @@ def check_mailbox():
         for minute in range(0, 30, 3):
             await sam(f"A tangent at minute {minute}.")
         checkins = [text for text in sent if relay.settings.render(f"Still waiting for {OWNER}") in text]
-        # A mailbox line passes as it is, tokens and all: only Rook's own words around it fill in.
-        assert len(checkins) == 1 and "Use ⟦owner⟧'s blue logo?" in checkins[0], checkins
-        assert mine("t-d")[0]["asked_at"] is None  # A check-in asks nothing, so it marks nothing asked.
+        assert not checkins and not any("blue logo" in text for text in sent), checkins  # Silent on the owner's turns.
         mailbox.focus_set([("oak", "t-main")], topic="the website")
         await sam("Let's stay on the website.")
         assert "focus lock is on: the website" in sent[-1] and "1 other item waits" in sent[-1], sent[-1]
@@ -12329,7 +12648,7 @@ def check_mailbox():
         c = companion()  # A restart: the unchanged backlog is not offered again.
         for minute in range(0, 15, 3):
             await sam(f"After the restart, minute {minute}.")
-        assert len([text for text in sent if relay.settings.render(f"Still waiting for {OWNER}") in text]) == 1
+        assert not [text for text in sent if relay.settings.render(f"Still waiting for {OWNER}") in text]
         # A permission "answered" by a spoken yes: nothing approves it, and the mailbox refuses an answer.
         thread("t-perm", count=1)
         c.watcher.add("t-perm", "oak", "t-perm", 1, "started")
@@ -12456,14 +12775,17 @@ def check_mailbox():
             clock[0] = start + minutes * 60
             await sam(f"A turn at minute {minutes}.")
             return sent[-1]
-        mailbox.observe("decision", "Renew the passport.", machine="oak", thread="t-p1", run="r1")
+        # Things to look at ride on the owner's turns, each on its own schedule. A wait on the owner never does.
+        mailbox.observe("review", "Renew the passport.", machine="oak", thread="t-p1", run="r1")
+        mailbox.observe("decision", "Pick the venue?", machine="oak", thread="t-p3", run="r1")
         assert "Still waiting" not in await turn_at(14)
         line = await turn_at(15)
         assert "Renew the passport." in line and "a reminder" not in line and "more wait" not in line, line
+        assert "Pick the venue?" not in line, line
         clock[0] = start + 18 * 60
-        mailbox.observe("decision", "Book the dentist.", machine="oak", thread="t-p2", run="r1")
-        assert "Still waiting" not in await turn_at(40)  # The dentist is due, but the gap holds it.
-        line = await turn_at(46)
+        mailbox.observe("review", "Book the dentist.", machine="oak", thread="t-p2", run="r1")
+        assert "Still waiting" not in await turn_at(32)
+        line = await turn_at(33)  # No gap after the passport's mention holds the dentist back.
         assert "Book the dentist." in line and "Renew the passport." not in line and "1 more waits" in line, line
         c = companion()  # A restart in the middle of the ladder.
         assert "Still waiting" not in await turn_at(74)
@@ -12477,7 +12799,7 @@ def check_mailbox():
         assert "Renew the passport." not in await turn_at(76 + 180)  # Snoozed: no schedule.
         # Under a focus, the focus line and a check-in of a related item share a turn; others are not counted.
         clock[0] = start + 300 * 60
-        mailbox.observe("decision", "Merge the docs?", machine="oak", thread="t-x", run="r1")
+        mailbox.observe("review", "Merge the docs?", machine="oak", thread="t-x", run="r1")
         mailbox.focus_set([("oak", "t-x")], topic="the docs")
         line = await turn_at(340)
         assert "focus lock is on: the docs" in line and "Merge the docs?" in line, line
@@ -12513,7 +12835,8 @@ def check_mailbox():
         delivery = asyncio.create_task(c.deliver(), name="deliver")
         await until(lambda: len(c.shows_held) == 2)
         assert presented == ["/x/docs.png"]
-        assert len([item for item in mailbox.items(("open",)) if item["kind"] == "review"]) == 2  # No duplicate.
+        assert len([item for item in mailbox.items(("open",)) if item["kind"] == "review"
+                    and "shows a picture or a video" in item["summary"]]) == 2  # No duplicate.
         with contextlib.redirect_stdout(io.StringIO()):
             relay.mailbox_command(["focus", "clear"])
         line = await turn_at(400)  # The one account names what there is to see. The shows follow it, in order.
@@ -12941,20 +13264,55 @@ def check_mailbox():
         assert "Check staging deploy." in again_line and "a reminder: it has waited" not in again_line, again_line
         assert mailbox.get(rem_snz["id"])["state"] == "done" and mailbox.get(rem_snz["id"])["resolution"] == relay.settings.render(f"told {mailbox.OWNER}")
 
-        # 17e. Non-reminder needs stay open after being spoken to their end in a check-in.
+        # 17e. A wait on the owner never rides on the owner's own turns: the one nudge brings it once the owner is quiet,
+        # and a mention counts only once heard. A flow that just closed moves on to the next item at once. A wait that a
+        # fresh read finds over closes, unheard.
         clock[0] = start + 2600 * 60
         needs_item = mailbox.observe("needs", "Deploy has an approval waiting in T3 Code.",
                                      machine="oak", thread="t-need-keep", pending_count=1)
+        thread("t-need-keep", count=1)
         needs_line = await say_at(2660, "What is up?")
-        assert "Deploy has an approval waiting in T3 Code." in needs_line, needs_line
-        assert "closes once spoken" not in needs_line, needs_line
+        assert "Deploy has an approval waiting in T3 Code." not in needs_line, needs_line
+        assert await c.nudge() is None  # The owner just spoke.
+        clock[0] += NUDGE_QUIET_SECONDS
+        assert await c.nudge() == needs_item["id"] and await c.nudge() is None  # One nudge at a time.
+        arrived, item = c.inbox.get_nowait()
+        assert item[0] == "nudge" and "Deploy has an approval waiting in T3 Code." in item[1], item
+        assert f"mailbox snooze {needs_item['id']} --until 2h" in item[1] and "PASS" not in item[1], item
+        await c.hand_over(item[0], item[1], list(item[2:]), arrived=arrived)
+        assert mailbox.get(needs_item["id"])["checkin_count"] == 0  # Not heard yet.
+        await agent(result("The deploy waits for your approval in T3 Code.\n\nDetails."))
+        await hear()
         kept_needs = mailbox.get(needs_item["id"])
-        assert kept_needs["state"] == "open" and kept_needs["resolution"] is None, kept_needs
-        repeat_needs = await say_at(2730, "Still checking.")
-        assert "Deploy has an approval waiting in T3 Code." in repeat_needs
-        assert "a reminder: it has waited" in repeat_needs, repeat_needs
-        assert mailbox.get(needs_item["id"])["state"] == "open"
+        assert kept_needs["state"] == "open" and kept_needs["checkin_count"] == 1, kept_needs
+        assert await c.nudge() is None  # Just surfaced, and the speech just ended.
+        clock[0] += 20 * 60  # Its next wait, 20 minutes. A cut nudge counts nothing.
+        assert await c.nudge() == needs_item["id"]
+        arrived, item = c.inbox.get_nowait()
+        await c.hand_over(item[0], item[1], list(item[2:]), arrived=arrived)
+        await agent(result("The deploy still waits.\n\nDetails."))
+        await hear(cut=True)
+        assert mailbox.get(needs_item["id"])["checkin_count"] == 1
         mailbox.done(needs_item["id"])
+        # A closed flow: the next item comes once the speech has been over a little while, though it is not due yet.
+        venue = mailbox.observe("decision", "Pick the venue?", machine="oak", thread="t-venue", run="r1")
+        await agent(tool("cl0", "Bash", {"command": "/x/desktop/relay.py mailbox list"}, "Nothing."),
+                    tool("cl1", "Bash", {"command": "/x/desktop/relay.py mailbox snooze mb-x --until 2h"}, "Failed.", True))
+        assert c.flow_closed_at < clock[0]  # A read or a failed call closes nothing.
+        await agent(tool("cl2", "Bash", {"command": "/x/desktop/relay.py mailbox snooze mb-x --until 2h"}, "Snoozed."))
+        assert c.flow_closed_at == clock[0] and not c.closing_calls
+        c.spoke_at = clock[0] - NUDGE_SPEECH_SECONDS + 5
+        assert await c.nudge() is None
+        c.spoke_at = clock[0] - NUDGE_SPEECH_SECONDS
+        assert await c.nudge() == venue["id"]
+        c.inbox.get_nowait()
+        mailbox.done(venue["id"])
+        # A wait the fresh read finds over closes unheard, and no nudge goes.
+        ended = mailbox.observe("needs", "Build asks a question.", machine="oak", thread="t-need-gone", pending_count=1)
+        thread("t-need-gone", count=0)
+        clock[0] += 60 * 60
+        assert await c.nudge() is None and c.inbox.empty()
+        assert not [item for item in mailbox.items(("open",)) if item["id"] == ended["id"]]
 
         # 17f. Spoken stop mid-answer ("only speech") keeps a reminder open while notices/ask still count as heard.
         clock[0] = start + 2800 * 60
@@ -13013,6 +13371,21 @@ def check_mailbox():
                       "terminal_reason": "completed"}])
         await hear()
         assert mailbox.get(rem_steer["id"])["state"] == "done" and mailbox.get(rem_steer["id"])["resolution"] == relay.settings.render(f"told {mailbox.OWNER}")
+
+        # 17j. The update check's status turn closes its reminder once heard to its end; a stop leaves it open.
+        clock[0] = start + 3400 * 60
+        rem_up = mailbox.observe("reminder", "A newer Rook is ready: bbbbbbb, and this one is aaaaaaa.", run="update:a:b")
+        await c.hand_over("status", "A newer Rook is on GitHub.", [{"item": rem_up["id"]}])
+        assert "A newer Rook is on GitHub." in sent[-1]
+        await agent(result("A newer Rook is ready. Shall I install it?\n\nDetails."))
+        assert c.stamp and rem_up["id"] in c.stamp.get("ids", ())
+        assert await c.submit("Stop.", source="spoken") == "stopped"
+        await settle()
+        assert mailbox.get(rem_up["id"])["state"] == "open"
+        await c.hand_over("status", "A newer Rook is on GitHub.", [{"item": rem_up["id"]}])
+        await agent(result("A newer Rook is ready. Shall I install it?\n\nDetails."))
+        await hear()
+        assert mailbox.get(rem_up["id"])["state"] == "done", mailbox.get(rem_up["id"])
     c = None
     # The check's threads live on "oak": with no machines.json, this host is "oak" whatever its real name is.
     real_host, socket.gethostname = socket.gethostname, lambda: "oak"
@@ -19534,7 +19907,7 @@ def check_desktop():
                 MODEL_PREFERENCES = base / "no-prefs.md"
                 t3_server = lambda: None
                 antigravity_home.HOME = base / "agy-prompt"
-                antigravity_home.build = lambda wow=False: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
+                antigravity_home.build = lambda wow=False, home=None: (antigravity_home.HOME / "config").mkdir(parents=True, exist_ok=True) or antigravity_home.HOME
                 antigravity_home.memory = lambda workspace: ""
                 antigravity_home.AGENTS = base / "no-agents"
                 antigravity_home.GEMINI_SKILLS = base / "no-gemini-skills"

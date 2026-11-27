@@ -190,15 +190,17 @@ class Pi(Harness):
         return None if shutil.which("pi") else "pi is not installed. Install Pi, or ask Rook to use Claude Code."
 
     def command(self, prompt, servers, session, plugin, denied):
-        folders = skill_dirs(desk.runtime_dir() / "rook-pi/skills", wow="wow" in servers)
-        home = agent_home(desk.runtime_dir() / "rook-pi/agent")
+        folders = skill_dirs(desk.runtime_dir() / f"rook-pi{self.runtime_tag}/skills", wow="wow" in servers)
+        home = agent_home(desk.runtime_dir() / f"rook-pi{self.runtime_tag}/agent")
         own = person_settings()
         model = self.chosen or (f"{own['defaultProvider']}/{own['defaultModel']}"
                                 if own.get("defaultProvider") and own.get("defaultModel") else "")
         if model and model_unknown(model):
             print(f"pi: the model {model} may come from one of the person's Pi extensions, which Rook's Pi session "
                   "does not load. If Pi cannot find it, Rook falls back to another agent.", file=sys.stderr)
-        prompt = codex_harness.edit(prompt, PROMPT, "Rook's system prompt") + TOOLS_LINE  # Rendered already in rook.py.
+        # Rendered already in rook.py. A plain prompt, such as Hands', is not Rook's, so the table never meets it.
+        prompt = (prompt if self.plain_prompt
+                  else codex_harness.edit(prompt, PROMPT, "Rook's system prompt")) + TOOLS_LINE
         tools = core(servers, denied)
         # mcp__* keeps every server tool callable and keeps Pi's resource tools out. Naming single MCP tools would
         # drop all the others. The extension declares the core ones itself.

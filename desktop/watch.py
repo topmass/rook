@@ -2,10 +2,11 @@
 
 Rook notices a delegation in Claude's stream: a T3 tool call that sends to or launches a thread, or a
 `t3 thread send` or `t3 thread start` command. It then polls each watched thread with
-`t3 thread show <id> --json` about once a minute, locally or over SSH, as
-machines.json says, and announces each change once through Rook's inbox. It also watches the Herdr agents that
-relay.py herdr sends to, with one herdr agent get each and a screen read while one is ready, and says when one is
-blocked or done. Standard library only, so relay.py can use it too.
+`t3 thread show <id> --json` about once a minute, every 15 seconds while a watch is fresh or a thread waits on the
+owner, locally or over SSH, as machines.json says, one command per machine, and announces each change once through
+Rook's inbox. Build threads, and every thread a global scan finds waiting on the owner, are watched for that wait only.
+It also watches the Herdr agents that relay.py herdr sends to, with one herdr agent get each and a screen read while one
+is ready, and says when one is blocked or done. Standard library only, so relay.py can use it too.
 """
 
 import asyncio
@@ -39,6 +40,13 @@ def pn(phrase, they=None):
 MACHINES = Path(__file__).with_name("machines.json")
 LIMIT = 40  # Threads in the list at most. The oldest go first.
 POLL_SECONDS = 60
+# While a watch is fresh, or a watched thread waits on the owner, the watcher polls this often instead.
+FAST_POLL_SECONDS = 15
+FRESH_SECONDS = 180
+# The global scan for blocked threads: every machine this often, this machine less often while the game has focus.
+GLOBAL_SCAN_SECONDS = 60
+GAME_SCAN_SECONDS = 90
+RECHECK_SECONDS = 3  # The fresh count read before a blocked agent's news is handed over.
 SHOW_SECONDS = 25  # One t3 thread show, local or over SSH, may take this long before it counts as failed.
 KEEP_SECONDS = 30 * 60  # A thread that finished with nothing pending is watched this much longer.
 QUIET_SECONDS = 40 * 60  # A busy thread with no new item this long gets a silent "quiet since" mark.
@@ -361,7 +369,8 @@ def save(entries, path=None):
     """Write the list atomically, private to the owner, keeping the newest LIMIT threads."""
     path = watchlist() if path is None else path
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    keep = sorted(entries.values(), key=lambda e: e.get("watched_at", 0))[-LIMIT:]
+    # A needs-only entry comes back from the settings or the next scan, so it is never saved.
+    keep = sorted((e for e in entries.values() if not e.get("needs_only")), key=lambda e: e.get("watched_at", 0))[-LIMIT:]
     temp = path.with_suffix(".tmp")
     with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as out:
         os.fchmod(out.fileno(), 0o600)
@@ -383,6 +392,10 @@ def add(entries, thread, machine=None, title=None, since=None, delivery=None):
     elif since is not None:
         entry["runs"] = sorted(set(entry.get("runs", [])) | {since})[-10:]
     entry.pop("asked", None)  # A send is the owner's answer to a question the thread asked, carried by Rook.
+    # T3 queues a send behind an open question, so the question may still wait: it is news again until it ends.
+    entry["announced"] = [mark for mark in entry.get("announced", []) if not mark.endswith(":needs")]
+    for flag in ("needs_only", "scanned", "settled"):
+        entry.pop(flag, None)
     known = [run for run in (entry.get("since"), since) if run is not None]
     entry.update(watched_at=time.time(), since=min(known) if known else None, finished_at=None, failed_since=None,
                  sends=entry.get("sends", 0) + (0 if steered else 1))
@@ -419,6 +432,8 @@ class Watcher:
         self.work_error = None  # The last error from the work list, logged once.
         self.machines_error_logged = None  # The last machines.json warning logged once.
         self.milestones = False  # The thread_milestones setting, read from the file at each poll.
+        self.roster = None  # Rook sets this: the global scan reads projects the roster knows by id too.
+        self.scan_errors = {}  # machine: the last scan error, logged once.
 
     def _check_machines_error(self):
         err = machines_error()
@@ -450,6 +465,43 @@ class Watcher:
                  delivery=delivery)
         self.wake.set()
 
+    def watch_needs(self, machine, thread, title=None, scanned=True, since=0):
+        """Watch a thread or Herdr agent only for a wait on the owner: its finishes are never news. A scanned one goes once
+        its wait ends. A build thread's stays while the settings name it."""
+        if (machine, thread) not in self.entries:
+            self.entries[(machine, thread)] = {"thread": thread, "machine": machine, "title": title, "announced": [],
+                                               "sends": 0, "since": since, "watched_at": time.time(), "needs_only": True,
+                                               "scanned": scanned}
+            self.wake.set()
+
+    def sync_build_threads(self):
+        """Keep a needs-only watch on every build thread the settings name. A build thread reports its finishes by a tell,
+        but a question it asks is told only by this watch."""
+        wanted = set()
+        for name, value in settings.build_thread_details().items():
+            thread = value.get("thread") if isinstance(value, dict) else value
+            if isinstance(thread, str) and thread:
+                machine = (value.get("machine") if isinstance(value, dict) else None) or local_machine()
+                wanted.add((machine, thread))
+                self.watch_needs(machine, thread, f"The {name.capitalize()} build thread", scanned=False)
+        for key, entry in list(self.entries.items()):
+            if entry.get("needs_only") and not entry.get("scanned") and key not in wanted:
+                del self.entries[key]
+
+    def note_settled(self, machine, thread):
+        """Rook settled the thread: its routine finishes are no longer news. A wait on the owner still is."""
+        if entry := self.entries.get((machine, thread)):
+            entry["settled"] = True
+            self.save()
+
+    def poll_seconds(self):
+        """FAST_POLL_SECONDS while a watch is fresh or a watched thread waits on the owner, else POLL_SECONDS."""
+        now = time.time()
+        fast = any(entry.get("asked") or entry.get("pending")
+                   or not entry.get("needs_only") and now - entry.get("watched_at", 0) < FRESH_SECONDS
+                   for entry in self.entries.values())
+        return FAST_POLL_SECONDS if fast else POLL_SECONDS
+
     def save(self):
         try:
             save(self.entries, self.path)
@@ -461,9 +513,9 @@ class Watcher:
                                                  "sends", "quiet_since")}
                 for entry in sorted(self.entries.values(), key=lambda e: e.get("watched_at", 0))]
 
-    async def show(self, entry):
+    async def show(self, entry, messages="6", seconds=SHOW_SECONDS):
         """Return (the thread's JSON, None) or (None, an error). A dead link never hangs, thanks to the timeout."""
-        command = t3_on(entry["machine"], "thread", "show", entry["thread"], "--messages", "6", "--json")
+        command = t3_on(entry["machine"], "thread", "show", entry["thread"], "--messages", messages, "--json")
         self._check_machines_error()
         if not command:
             err = machines_error()
@@ -475,7 +527,7 @@ class Watcher:
         except OSError as exc:
             return None, str(exc)
         try:
-            output, error = await asyncio.wait_for(process.communicate(), SHOW_SECONDS)
+            output, error = await asyncio.wait_for(process.communicate(), seconds)
         except TimeoutError:
             process.kill()
             await process.wait()
@@ -486,6 +538,50 @@ class Watcher:
             return json.loads(output), None
         except ValueError:
             return None, "unreadable answer"
+
+    async def show_many(self, machine, entries):
+        """{thread: (its JSON, None)} for one machine's threads, read with one command, so a machine over SSH pays one
+        connection. A thread whose read failed is left out, for its own read to name the error. A command that failed
+        whole gives each thread its error."""
+        entry = machines().get(machine)
+        if not entry:
+            return {}
+        script = "; ".join(f"{shlex.quote(entry['t3'])} thread show {shlex.quote(e['thread'])} --messages 6 --json "
+                           "2>/dev/null; printf '\\n##%s\\n' $?" for e in entries)
+        output, error = await output_of(on_quietly(machine, "sh", "-c", script), SHOW_SECONDS + 5 * len(entries))
+        sections = split_sections(output or "")
+        if error and not sections:  # A command that never started leaves each thread to its own read.
+            return {} if output is None and error != "timed out" else {e["thread"]: (None, error) for e in entries}
+        shown = {}
+        for e, (ok, text) in zip(entries, sections):
+            try:
+                detail = json.loads(text[text.find("{"):]) if ok else None
+            except ValueError:
+                detail = None
+            if isinstance(detail, dict):
+                shown[e["thread"]] = (detail, None)
+        return shown
+
+    async def still_blocked(self, source):
+        """Whether the thread a blocked agent's news names still waits on the owner, read fresh just before the news is
+        handed over. A wait that ended closes its mailbox wait. A read that fails counts as still blocked."""
+        machine, thread = source.get("machine"), source.get("thread")
+        if not thread or not machine or thread.startswith(HERDR):
+            return True
+        if time.time() - source.get("rechecked_at", 0) < 10:
+            return True
+        at = time.time()
+        detail, error = await self.show({"machine": machine, "thread": thread}, "0", RECHECK_SECONDS)
+        count = ((detail or {}).get("thread") or {}).get("pendingRequestCount")
+        if error or not isinstance(count, int) or count > 0:
+            source["rechecked_at"] = at
+            return True
+        if entry := self.entries.get((machine, thread)):
+            entry["pending"] = 0
+            entry["announced"] = [mark for mark in entry["announced"] if not mark.endswith(":needs")]
+        if self.capture:
+            await self.capture(None, None, {"machine": machine, "thread": thread, "observed_at": at})
+        return False
 
     async def note_tell(self, thread, asks=None):
         """A thread reported through relay.py tell. The next outcome of the run it reported from is quiet,
@@ -505,7 +601,8 @@ class Watcher:
         entry = self.entries.get(key)
         if not entry:
             return
-        entry["announced"] = (entry["announced"] + [mark])[-10:]
+        if state != "needs" or entry.get("pending"):  # A wait that ended meanwhile is news again when it comes back.
+            entry["announced"] = (entry["announced"] + [mark])[-10:]
         if state != "needs":
             self.finished(key, entry, run)
         self.save()
@@ -604,6 +701,10 @@ class Watcher:
             said, _ = await self.herdr_screen(machine, agent)
             if herdr.dialog(said):
                 state, finished = "blocked", False
+        if entry.get("needs_only") and state != "blocked":  # Only a block is news. A scanned one ends with it.
+            if entry.get("scanned"):
+                self.entries.pop(key, None)
+            return
         mark = f"herdr:{'finished' if finished else state}:{seq}"
         if (state != "blocked" and not finished or mark in entry["announced"] or (*key, mark) in self.queued
                 or finished and entry.get("finish_told") == entry.get("watched_at")):  # One finish for each send.
@@ -625,22 +726,25 @@ class Watcher:
                         f"Tell {OWNER} which agent needs {pn('him')}, and that {pn('he answers', 'they answer')} it in "
                         f"Herdr. Never send it keys or answer it for {pn('him')}."))
         source = {"machine": entry["machine"], "thread": entry["thread"], "title": entry.get("title") or agent,
-                  "outcome": "finished its turn" if finished else "is blocked", "report": said}
+                  "outcome": "finished its turn" if finished else "is blocked", "report": said, "blocked": not finished}
         self.queued.add((*key, mark))
         watched_at = entry.get("watched_at")
         self.held.append((text, lambda: self.herdr_delivered(key, mark, finished, watched_at), source))
         self.log("watch_announced", thread=entry["thread"], machine=entry["machine"], state=state, run=mark)
 
-    async def poll_one(self, key, entry, now):
+    async def poll_one(self, key, entry, now, shown=None):
+        """Read one watched thread, or use shown, its read from the machine's batch, and announce what changed. now is
+        when the poll began, so a wait closed after that is never undone by this read."""
         if entry["thread"].startswith(HERDR):
             return await self.poll_herdr(key, entry, now)
-        detail, error = await self.show(entry)
+        detail, error = shown or await self.show(entry)
         if error:
             gone = any(word in error.lower() for word in GONE)
             if not entry.get("failed_since"):
                 self.log("watch_unreachable", thread=entry["thread"], machine=entry["machine"], error=error)
             entry["failed_since"] = entry.get("failed_since") or now
-            if gone or now - entry["failed_since"] > UNREACHABLE_SECONDS:
+            # A needs-only watch outlives a dead link: it watches for a wait that must never be missed.
+            if gone or not entry.get("needs_only") and now - entry["failed_since"] > UNREACHABLE_SECONDS:
                 self.log("watch_dropped", thread=entry["thread"], machine=entry["machine"], error=error)
                 self.entries.pop(key, None)
             return
@@ -650,8 +754,17 @@ class Watcher:
         # A delegated child's news goes to its parent's work entry, and its report names the parent.
         parent = parent_of(thread, entry["machine"])
         state, run = classify(thread), thread.get("latestRunId")
-        if self.capture and thread.get("pendingRequestCount") == 0:
-            await self.capture(None, None, {"machine": entry["machine"], "thread": entry["thread"]})
+        entry["pending"] = thread.get("pendingRequestCount") or 0
+        if thread.get("pendingRequestCount") == 0:
+            # The wait ended, so a later question in the same run is news again.
+            entry["announced"] = [mark for mark in entry["announced"] if not mark.endswith(":needs")]
+            if self.capture:
+                await self.capture(None, None, {"machine": entry["machine"], "thread": entry["thread"], "observed_at": now})
+        if entry.get("needs_only") and state != "needs":  # Only a wait is news. A scanned watch ends with it.
+            entry.pop("asked", None)
+            if entry.get("scanned"):
+                self.entries.pop(key, None)
+            return
         if state == "needs":
             # Until the thread runs again, Rook sends to it, or a user message follows, the question is open.
             entry["asked"] = {"user": last_user(detail.get("messages"))}
@@ -685,7 +798,7 @@ class Watcher:
         # What the mailbox needs to make a self-contained item: the thread's title, what happened, and its report.
         source = {"machine": entry["machine"], "thread": entry["thread"], "parent_thread": parent and parent[1],
                   "run": run, "title": entry["title"], "outcome": OUTCOMES.get(state, state),
-                  "report": last_words(messages)}
+                  "report": last_words(messages), "observed_at": now, "blocked": state == "needs"}
         if self.capture and state == "needs":
             source["item"] = await self.capture("needs", None,
                                                 {**source, "pending_count": thread.get("pendingRequestCount")})
@@ -719,8 +832,10 @@ class Watcher:
                                else "news", f"A child thread {OUTCOMES[state]}: {said}", asks or OUTCOMES[state])
             else:
                 self.keep_work(work.thread_news, *key, "decision" if asks else state, said, asks or OUTCOMES[state])
-            if told and (updated(thread) or now) - reported["at"] <= TELL_COVERS_SECONDS:
-                # The thread's own tell already said this. Hide this one outcome, and only this one.
+            settled = state != "needs" and (thread.get("settled") or entry.get("settled"))
+            if settled or told and (updated(thread) or now) - reported["at"] <= TELL_COVERS_SECONDS:
+                # The thread's own tell already said this, or the thread is settled. Hide this one outcome, and only
+                # this one. A wait on the owner is never hidden: another thread may wake a settled one and block it.
                 entry["announced"] = (entry["announced"] + [mark])[-10:]
                 if state != "needs":
                     self.finished(key, entry, run)
@@ -781,42 +896,125 @@ class Watcher:
         machine that does not answer never delays another; threads on one machine are read in turn."""
         now = time.time()
         self.milestones = settings.thread_milestones_in_force(settings.read_settings()[0])[0] == "on"
+        self.sync_build_threads()
         by_machine = {}
         for key, entry in list(self.entries.items()):
             by_machine.setdefault(entry["machine"], []).append((key, entry))
 
-        async def one_machine(pairs):
-            for key, entry in pairs:
-                if key in self.entries:
-                    await self.poll_one(key, entry, now)
+        async def one_machine(machine, pairs):
+            try:
+                threads = [entry for _, entry in pairs if not entry["thread"].startswith(HERDR)]
+                shown = await self.show_many(machine, threads) if len(threads) > 1 else {}
+                for key, entry in pairs:
+                    if key in self.entries:
+                        await self.poll_one(key, entry, now, shown.get(entry["thread"]))
+            finally:
+                self.release(machine)  # A slow machine never holds back another's news.
 
         try:
-            await asyncio.gather(*(one_machine(pairs) for pairs in by_machine.values()))
+            await asyncio.gather(*(one_machine(machine, pairs) for machine, pairs in by_machine.items()))
         finally:
-            # One poll's news reaches the inbox at one moment, so news of threads that ended together is one turn.
-            held, self.held = self.held, []
-            for text, delivered, source in held:
-                self.announce(text, delivered, source)
+            self.release()
         self.save()
 
+    def release(self, machine=None):
+        """Announce the held news of one machine's poll, or all of it, at one moment, so news of threads that ended
+        together is one turn."""
+        held = [item for item in self.held if machine is None or item[2].get("machine") == machine]
+        self.held = [item for item in self.held if not any(item is mine for mine in held)]
+        for text, delivered, source in held:
+            self.announce(text, delivered, source)
+
     async def run(self):
-        """Poll about once a minute while anything is watched. A new watch wakes it at once, even one added
-        while a poll runs."""
+        """Poll about once a minute, faster while it matters. A new watch wakes it at once, even one added while a poll
+        runs."""
         try:
             self.stale_sends()
         except Exception as exc:  # The watcher must never take Rook down.
             self.log("watch_error", error=str(exc))
         while True:
             self.wake.clear()
-            if self.entries:
-                try:
-                    await self.poll()
-                except Exception as exc:  # The watcher must never take Rook down.
-                    self.log("watch_error", error=str(exc))
             try:
-                await asyncio.wait_for(self.wake.wait(), POLL_SECONDS if self.entries else None)
+                self.sync_build_threads()
+                if self.entries:
+                    await self.poll()
+            except Exception as exc:  # The watcher must never take Rook down.
+                self.log("watch_error", error=str(exc))
+            try:
+                await asyncio.wait_for(self.wake.wait(), self.poll_seconds())  # Idle, it still reads the settings.
             except TimeoutError:
                 pass
+
+    async def scan(self, machine, scopes):
+        """One command on a machine lists its projects and reads every unsettled thread that runs or waits, and every
+        child its background tasks name. A thread that waits on the owner gets a needs-only watch, so the poll, the one
+        mailbox writer, tells it. A scan that fails changes nothing."""
+        entry = machines().get(machine)
+        if not entry or not scopes:
+            return
+        py = sys.executable if machine == local_machine() else "python3"
+        output, error = await output_of(on_quietly(machine, py, "-c", SCAN_SCRIPT, entry["t3"], *scopes),
+                                        LIST_SECONDS)
+        try:
+            found = json.loads((output or "").strip().splitlines()[-1])["threads"]
+        except (ValueError, IndexError, KeyError, TypeError):
+            if error != self.scan_errors.get(machine):
+                self.log("scan_unreachable", machine=machine, error=error or "unreadable answer")
+            self.scan_errors[machine] = error
+            return
+        self.scan_errors.pop(machine, None)
+        for thread_id, thread in found.items():
+            if isinstance(thread, dict) and (thread.get("pendingRequestCount") or 0) > 0:
+                self.watch_needs(machine, thread_id, thread.get("title"))
+
+    async def scan_herdr(self, label):
+        """Give each blocked Herdr agent on one Herdr machine a needs-only watch. No Herdr there changes nothing."""
+        try:
+            agents = (await asyncio.to_thread(herdr.call, label, "agent", "list", timeout=SHOW_SECONDS))["agents"]
+        except (herdr.Failed, KeyError, TypeError):
+            return
+        for agent in agents or ():
+            if isinstance(agent, dict) and agent.get("agent_status") == "blocked":
+                seq = agent.get("state_change_seq") or 0
+                self.watch_needs(local_machine(), herdr_thread(label, herdr.target(agent)), herdr.target(agent),
+                                 since=seq - 1)
+
+    async def scan_forever(self, playing=None, projects=None):
+        """Scan every machine for blocked threads every GLOBAL_SCAN_SECONDS, and Herdr's agents with it, for as long as
+        Rook runs. Each machine scans in its own loop, so a slow one never overlaps itself or delays another. await
+        playing() says the game has focus: this machine then scans every GAME_SCAN_SECONDS. The scan never waits on a
+        turn: it only reads."""
+        await asyncio.sleep(ROSTER_FIRST_SECONDS)
+        here = local_machine()
+
+        async def one(machine):
+            while True:
+                try:
+                    table = projects
+                    if table is None:
+                        import agent_inbox  # Here: the owner's projects table, read at each scan.
+                        table = agent_inbox.projects_by_machine()
+                    scopes = {path for _, path in table.get(machine, ())}
+                    if self.roster:  # A project known only by id, such as one a launch named, is scanned too.
+                        scopes |= {row["scope"] for key, row in self.roster.rows.items()
+                                   if key[:2] == ("t3", machine) and row["scope"]}
+                    await self.scan(machine, sorted(scopes))
+                    slow = machine == here and playing and await playing()
+                except Exception as exc:  # The scan must never take Rook down.
+                    self.log("scan_error", machine=machine, error=str(exc))
+                    slow = False
+                await asyncio.sleep(GAME_SCAN_SECONDS if slow else GLOBAL_SCAN_SECONDS)
+
+        async def herdr_loop():
+            while True:
+                try:
+                    for label in (None, *await asyncio.to_thread(herdr.machines)):
+                        await self.scan_herdr(label)
+                except Exception as exc:
+                    self.log("scan_error", machine="herdr", error=str(exc))
+                await asyncio.sleep(GLOBAL_SCAN_SECONDS)
+
+        await asyncio.gather(*(one(machine) for machine in machines()), herdr_loop())
 
 
 # The roster: the open, unsettled and recently active threads and agents of T3 Code on every machine and of Herdr. Rook
@@ -1002,6 +1200,57 @@ def t3_roster_row(machine, project, scope, thread):
             "snoozed": bool(thread.get("snoozed")), "updated_at": updated(thread) or 0.0, "scope": scope}
 
 
+def split_sections(output):
+    """[(whether it exited 0, its text)] for each command of a batch that ends each one with printf '\\n##%s\\n' $?."""
+    sections, body = [], []
+    for line in output.splitlines():
+        if re.fullmatch(r"##\d+", line):
+            sections.append((line == "##0", "\n".join(body)))
+            body = []
+        else:
+            body.append(line)
+    return sections
+
+
+def on_quietly(machine, *args):
+    """The argv that runs args on a machine, at the lowest CPU and disk priority on this one, so a game keeps its
+    frames."""
+    command = on(machine, *args)
+    if command == list(args):
+        command[0] = shutil.which(command[0]) or command[0]
+        if nice := shutil.which("nice"):
+            command = [nice, "-n", "19", *(["ionice", "-c3"] if shutil.which("ionice") else []), *command]
+    return command
+
+
+# The global scan's one command on a machine: list each project, then read each unsettled thread that runs or waits, and
+# each child of its background tasks. It prints one JSON line. ponytail: needs python3 there; a machine without it logs.
+SCAN_SCRIPT = r"""
+import json, subprocess, sys
+t3, scopes = sys.argv[1], sys.argv[2:]
+def read(*args):
+    try:
+        done = subprocess.run([t3, *args, "--json"], capture_output=True, text=True, timeout=20)
+        return json.loads(done.stdout) if done.returncode == 0 else None
+    except Exception:
+        return None
+ids = []
+for scope in scopes:
+    for row in read("thread", "list", "--project", scope) or ():
+        if not isinstance(row, dict) or row.get("settled") or row.get("archived"):
+            continue
+        if row.get("status") in ("running", "waiting"):
+            ids.append(row.get("threadId"))
+        ids += [task.get("childThreadId") for task in row.get("pendingBackgroundTasks") or () if isinstance(task, dict)]
+found = {}
+for thread in dict.fromkeys(i for i in ids if isinstance(i, str) and i):
+    detail = read("thread", "show", thread, "--messages", "0")
+    if isinstance(detail, dict) and isinstance(detail.get("thread"), dict):
+        found[thread] = detail["thread"]
+print(json.dumps({"threads": found}))
+"""
+
+
 async def output_of(command, seconds):
     """(stdout, None) of a command, or (None, an error). It never hangs past seconds."""
     try:
@@ -1041,20 +1290,11 @@ async def refresh_roster(roster, log, projects=None, local=True):
         # One command for all of a machine's projects: one SSH connection, not one per project.
         script = "; ".join(f"{shlex.quote(entry['t3'])} thread list --project {shlex.quote(scope)} --json 2>/dev/null; "
                            "printf '\\n##%s\\n' $?" for scope in scopes)
-        command = on(machine, "sh", "-c", script)
-        if command == ["sh", "-c", script]:  # This machine: the lowest CPU and disk priority, so a game keeps its frames.
-            command = ["nice", "-n", "19", *(["ionice", "-c3"] if shutil.which("ionice") else []), *command]
-        output, error = await output_of(command, LIST_SECONDS)
+        output, error = await output_of(on_quietly(machine, "sh", "-c", script), LIST_SECONDS)
         if error:
             log("roster_unreachable", machine=machine, error=error)
             return
-        sections, body = [], []
-        for line in output.splitlines():
-            if re.fullmatch(r"##\d+", line):
-                sections.append((line == "##0", "\n".join(body)))
-                body = []
-            else:
-                body.append(line)
+        sections = split_sections(output)
         fresh, done = {}, set()
         for (scope, name), (ok, text) in zip(scopes.items(), sections):
             try:
@@ -1167,6 +1407,7 @@ def _check():
             "print(json.dumps(reply['data']))\n"
         )
         fake_t3.chmod(0o755)
+        fake_t3_text = fake_t3.read_text()
 
         fake_remote = bin_dir / "fake-remote"
         fake_remote.write_text(
@@ -1319,6 +1560,156 @@ def _check():
             assert len(announced) == 1 and announced[0][2]["machine"] == "host-a", announced
             assert ("host-b", tid_b) in watcher.entries and watcher.entries[("host-b", tid_b)]["failed_since"] is not None
             await milestone_check()
+            await attention_check()
+
+        async def attention_check():
+            """Blocked threads: build threads and scanned ones are watched for a wait only, a wait is news again after
+            it ends or after a send, a settled thread's finish is quiet but its wait is not, and the scan reads one
+            command per machine."""
+            announced, captured = [], []
+            settings_file = cfg / "rook/settings.json"
+            wpath = state / "rook/attention.json"
+            watcher = Watcher(wpath, lambda text, done, source=None: announced.append((text, done, source)),
+                              lambda event, **fields: None)
+
+            async def capture(kind, summary, source):
+                captured.append((kind, dict(source)))
+                return "mb-test" if kind else None
+            watcher.capture = capture
+            build, other = "mcp:dddddddd-dddd-dddd-dddd-dddddddddddd", "mcp:eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+            run = f"run:thread:{build}:ordinal:4"
+
+            def thread(tid, status="completed", pending=0, latest=4, **fields):
+                return {"rc": 0, "data": {"thread": {"id": tid, "title": "Builder", "status": status, "pendingRequestCount":
+                                                     pending, "latestRunId": f"run:thread:{tid}:ordinal:{latest}", **fields},
+                                          "messages": [{"role": "assistant", "runId": f"run:thread:{tid}:ordinal:{latest}",
+                                                        "text": "For Rook: Done."}]}}
+
+            async def news(replies):
+                set_replies(replies)
+                announced.clear()
+                await watcher.poll()
+                return list(announced)
+
+            # A build thread is watched for a wait only: its finish is quiet, its question is told, and it is never saved.
+            settings_file.write_text(json.dumps({"build_threads": {"builder": {"thread": build, "machine": "host-a"}}}))
+            watcher.sync_build_threads()
+            assert watcher.entries[("host-a", build)]["needs_only"] and watcher.poll_seconds() == POLL_SECONDS
+            assert await news({build: thread(build)}) == [] and ("host-a", build) in watcher.entries
+            assert (("host-a", build)) not in load(wpath)
+            told = await news({build: thread(build, "running", 1)})
+            assert len(told) == 1 and needs_owner(told[0][0]) and told[0][2]["blocked"], told
+            assert watcher.poll_seconds() == FAST_POLL_SECONDS  # A wait on the owner polls fast.
+            told[0][1]()
+            assert await news({build: thread(build, "running", 1)}) == []  # Told once.
+            # The answer ends the wait, and a second question in the same run is told again.
+            assert await news({build: thread(build, "running", 0)}) == [] and captured[-1][0] is None
+            assert captured[-1][1]["observed_at"] <= time.time()
+            told = await news({build: thread(build, "running", 1)})
+            assert len(told) == 1 and needs_owner(told[0][0]), told
+            # News that reaches the owner after the wait ended marks nothing, so the next wait is told.
+            await news({build: thread(build, "running", 0)})
+            told[0][1]()
+            assert len(await news({build: thread(build, "running", 1)})) == 1
+            # A needs-only watch outlives a dead link, and a build thread the settings drop is no longer watched.
+            watcher.queued.clear()
+            set_replies({build: {"rc": 1, "stderr": "connection refused"}})
+            watcher.entries[("host-a", build)]["failed_since"] = time.time() - UNREACHABLE_SECONDS - 5
+            before = len(captured)
+            await watcher.poll()
+            assert ("host-a", build) in watcher.entries and len(captured) == before  # A dead link closes no wait.
+            settings_file.write_text("{}")
+            watcher.sync_build_threads()
+            assert ("host-a", build) not in watcher.entries
+
+            # A send into a thread that waits does not answer it: the wait is told again.
+            watcher.add(other, machine="host-a", title="Other", since=4, delivery="queued")
+            told = await news({other: thread(other, "running", 1)})
+            assert len(told) == 1, told
+            told[0][1]()
+            assert await news({other: thread(other, "running", 1)}) == []
+            watcher.add(other, machine="host-a", title="Other", delivery="queued")
+            assert len(await news({other: thread(other, "running", 1)})) == 1
+            # A settled thread's finish is quiet. Its wait on the owner is not.
+            watcher.entries.clear()
+            watcher.queued.clear()
+            watcher.add(other, machine="host-a", title="Other", since=4, delivery="started")
+            assert await news({other: thread(other, settled=True)}) == [] and ("host-a", other) not in watcher.entries
+            watcher.add(other, machine="host-a", title="Other", since=5, delivery="started")
+            assert len(await news({other: thread(other, "running", 1, 5, settled=True)})) == 1
+            watcher.entries.clear()
+            watcher.queued.clear()
+            watcher.add(other, machine="host-a", title="Other", since=6, delivery="started")
+            watcher.note_settled("host-a", other)
+            assert await news({other: thread(other, latest=6)}) == []
+
+            # One machine's threads are read with one command; a failed read falls back to its own, which names the error.
+            os.environ["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+            watcher.entries.clear()
+            watcher.add(build, machine="host-a", since=4, delivery="started")
+            watcher.add(other, machine="host-a", since=4, delivery="started")
+            set_replies({build: thread(build)})
+            shown = await watcher.show_many("host-a", list(watcher.entries.values()))
+            assert set(shown) == {build} and shown[build][0]["thread"]["id"] == build, shown
+            told = await news({build: thread(build), other: {"rc": 1, "stderr": "thread not found"}})
+            assert len(told) == 1 and ("host-a", other) not in watcher.entries, told
+            # Each machine's news goes out as soon as that machine is read.
+            watcher.held = [("a", None, {"machine": "host-a"}), ("b", None, {"machine": "host-b"})]
+            announced.clear()
+            watcher.release("host-a")
+            assert [text for text, _, _ in announced] == ["a"] and len(watcher.held) == 1
+            watcher.release()
+            assert [text for text, _, _ in announced] == ["a", "b"] and not watcher.held
+
+            # A fresh read just before the hand-over: a wait that ended closes its mailbox wait, a failed read keeps it.
+            set_replies({other: thread(other, "running", 0)})
+            assert not await watcher.still_blocked({"machine": "host-a", "thread": other}) and captured[-1][0] is None
+            set_replies({other: thread(other, "running", 1)})
+            assert await watcher.still_blocked({"machine": "host-a", "thread": other})
+            set_replies({})
+            assert await watcher.still_blocked({"machine": "host-a", "thread": other})
+
+            # The global scan: one command lists each project and reads each unsettled thread that runs or waits, and
+            # each background child. Only a thread that waits on the owner gets a watch, and it ends with the wait.
+            scan_table = base / "t3-scan.json"
+            (bin_dir / "t3").write_text(
+                f"#!{sys.executable}\nimport json, pathlib, sys\n"
+                f"table = json.loads(pathlib.Path({str(scan_table)!r}).read_text())\n"
+                "args = sys.argv[1:]\n"
+                "key = args[args.index('--project') + 1] if 'list' in args else args[2]\n"
+                "print(json.dumps(table[key])) if key in table else sys.exit(1)\n")
+            blocked, child, quiet, done = "mcp:b1", "mcp:c1", "mcp:q1", "mcp:s1"
+            scan_table.write_text(json.dumps({
+                "/c/a": [{"threadId": blocked, "status": "running"}, {"threadId": done, "status": "running", "settled": True},
+                         {"threadId": "mcp:w1", "status": "waiting", "pendingBackgroundTasks": [{"childThreadId": child}]},
+                         {"threadId": quiet, "status": "completed"}],
+                blocked: {"thread": {"title": "Blocked", "pendingRequestCount": 1}},
+                child: {"thread": {"title": "Child", "pendingRequestCount": 2}},
+                "mcp:w1": {"thread": {"title": "Waiting", "pendingRequestCount": 0}},
+                done: {"thread": {"title": "Settled", "pendingRequestCount": 1}}}))
+            watcher.entries.clear()
+            await watcher.scan("host-a", ["/c/a", "/c/missing"])
+            assert {k for k, e in watcher.entries.items() if e.get("scanned")} == {("host-a", blocked), ("host-a", child)}
+            assert not load(wpath).get(("host-a", blocked))
+            set_replies({blocked: thread(blocked, "running", 1), child: thread(child, "running", 0)})
+            (bin_dir / "t3").write_text(fake_t3_text)
+            announced.clear()
+            await watcher.poll()
+            assert [source["thread"] for _, _, source in announced] == [blocked], announced
+            assert ("host-a", child) not in watcher.entries  # Its wait ended, so its scanned watch ends.
+            # A scan that cannot reach the machine changes nothing.
+            await watcher.scan("host-b", ["/c/a"])
+            assert ("host-a", blocked) in watcher.entries
+            # A blocked Herdr agent gets the same watch.
+            (bin_dir / "herdr").write_text(
+                f"#!{sys.executable}\nimport json\nprint(json.dumps({{'result': {{'agents': [{{'name': 'site', "
+                "'agent_status': 'blocked', 'state_change_seq': 7}, {'name': 'idle', 'agent_status': 'idle'}]}}))\n")
+            (bin_dir / "herdr").chmod(0o755)
+            await watcher.scan_herdr(None)
+            assert watcher.entries[("host-a", herdr_thread(None, "site"))]["since"] == 6
+            assert ("host-a", herdr_thread(None, "idle")) not in watcher.entries
+            (bin_dir / "herdr").unlink()
+            os.environ["PATH"] = str(bin_dir)
 
         async def milestone_check():
             """thread_milestones: a waiting thread's new "For Rook:" message is told once when on, at most once per

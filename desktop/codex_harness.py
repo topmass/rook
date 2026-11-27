@@ -651,7 +651,8 @@ class Codex(Harness):
         self.mode = permission_mode()
         if self.home is not None:
             clear(self.home)
-        self.home = build_home(self.servers, denied=self.denied, mode=self.mode)
+        self.home = build_home(self.servers, denied=self.denied, mode=self.mode,
+                               home=desk.runtime_dir() / f"rook-codex{self.runtime_tag}" if self.runtime_tag else None)
         return ["env", f"CODEX_HOME={self.home}", f"BROWSER={desk.false_exe()}",
                 "codex", "app-server", "--listen", "stdio://"]
 
@@ -941,7 +942,7 @@ class Codex(Harness):
             self._start_turn(next_uuid, next_items)
 
     def developer_instructions(self):
-        return adapt_prompt(self.prompt, self.cwd)
+        return self.prompt if self.plain_prompt else adapt_prompt(self.prompt, self.cwd)
 
     async def prepare(self, message):
         """Run blocking hook lookup off the event loop before starting the Codex thread."""

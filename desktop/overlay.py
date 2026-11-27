@@ -402,7 +402,7 @@ FORM_FOR_STATE = {"listening": "ear", "transcribing": "rows", "thinking": "latti
 ACTIVITY_FORMS = {"find_npc": "figure2_a", "find_quest": "exclaim2_a", "find_item": "chest2_a",
                   "find_upgrades": "sword3_a", "find_price": ("coins2_a", "coins2_c"), "find_object": "pickaxe3_e",
                   "WebSearch": ("globe3_a", "globe3_c"), "WebFetch": ("globe3_a", "globe3_c"), "Grep": "magnifier", "Glob": "magnifier", "Read": "scan",
-                  "Edit": "quill", "Write": "quill", "NotebookEdit": "quill", "Bash": ("prompt3_b", "prompt2_c"), "Skill": "cog2_a",
+                  "Edit": "writing2_b", "Write": "writing2_a", "NotebookEdit": "writing2_b", "Bash": ("prompt3_b", "prompt2_c"), "Skill": "cog2_a",
                   "recall": "book2_a", "note": "book2_a", "forget": "book2_a",
                   "t3_thread_send": "send_turbine", "t3_thread_launch": "send_turbine", "handoff": "send_turbine",
                   "t3_pending_request": "send_turbine",  # rook.py names only an answer so; a list or read reads.
@@ -1252,7 +1252,7 @@ SHAPES = {"figure": _shape_figure, "exclaim": _shape_exclaim, "chest": _shape_ch
           "tiles2_a": _shape_tiles, "tiles2_c": _shape_tiles, "power2_a": _shape_power,
           "pickaxe3_e": _shape_pickaxe, "coins2_a": _shape_coins, "coins2_c": _shape_coins,
           "pickaxe2_a": _shape_pickaxe,
-          "quill": _shape_quill, "prompt": _shape_prompt, "cog": _shape_cog, "book": _shape_book,
+          "quill": _shape_quill, "writing2_a": _shape_quill, "writing2_b": _shape_quill, "prompt": _shape_prompt, "cog": _shape_cog, "book": _shape_book,
           "message": _shape_message, "overlook": _shape_overlook, "eye": _shape_eye,
           "film": _shape_film, "branch": _shape_branch, "tiles": _shape_tiles, "power": _shape_power,
           "hourglass": _shape_hourglass}
@@ -14978,11 +14978,10 @@ def _check_render():
     flip = pack_player.FlipbookPresence({"icons": {}, "states": {"thinking": {"rook": "rook"}}})
     flip.set_state("find", 0.0)
     assert flip.state == "thinking"
-    # Writing shows the Devs pen, and its ink line is written and drawn.
-    for tool in ("Edit", "Write", "NotebookEdit"):
+    # Writing a file shows the Nib, and editing one the Strike (the owner's picks, 2026-11-27).
+    for tool, name in (("Edit", "writing2_b"), ("Write", "writing2_a"), ("NotebookEdit", "writing2_b")):
         pen = _simulate(_thinking_on(tool), 3.0, lift=0)[0]
-        assert pen.form == "quill" and devs_pack.BUILDERS["quill"] is devs_pack.build_quill_3d, tool
-        assert devs_pack.eval_targets("quill", _form("quill"), pen, 3.0) is not None, tool
+        assert pen.form == name and devs_pack.eval_targets(name, _form(name), pen, 3.0) is not None, tool
     # Reading a file shows the Devs scan ring.
     reader = _simulate(_thinking_on("Read"), 3.0, lift=0)[0]
     assert reader.form == "scan" and devs_pack.eval_targets("scan", _form("scan"), reader, 3.0) is not None

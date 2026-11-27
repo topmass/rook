@@ -1373,3 +1373,4 @@ import icons_system2; icons_system2.register(globals())  # noqa: E402,E702  The 
 import icons_system3; icons_system3.register(globals())  # noqa: E402,E702  Their third round (desktop/icons_system3.py).
 import icons_tools2; BUILDERS.update(icons_tools2.BUILDERS); eval_targets = icons_tools2.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round two.
 import icons_tools3; BUILDERS.update(icons_tools3.BUILDERS); eval_targets = icons_tools3.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round three.
+import icons_writing; icons_writing.register()  # noqa: E402,E702  Writing icon concepts, round two (desktop/icons_writing.py).
