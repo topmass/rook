@@ -56,9 +56,9 @@ Rook answers in short spoken sentences. It shows longer answers as text on the s
 
 ### Obsidian dictation
 
-Set `ROOK_OBSIDIAN_VAULT` to the absolute path of your vault in the Rook service's environment. The vault needs an existing `daily/` directory. On macOS, see [LaunchAgent setup](macos/README.md#obsidian-dictation).
+Set `ROOK_OBSIDIAN_VAULT` to the absolute path of your vault in the Rook service's environment. To change the default `rook` folder, set `ROOK_OBSIDIAN_FOLDER` to a single folder name at the vault root. On macOS, see [LaunchAgent setup](macos/README.md#obsidian-dictation).
 
-Rook appends your words as a Markdown entry in `daily/YYYY-MM-DD.md` using the service's local date and creates the file if needed. Say “Save this to Obsidian” followed by the note, or run `python3 desktop/relay.py obsidian-note "Your note"` while Rook is running. The service writes the entry through Rook's local relay, so the agent needs no vault filesystem grant.
+Rook appends your words as a Markdown entry in `rook/YYYY-MM-DD.md` by default, using the service's local date. It creates the folder and file as needed and reserves `daily/` for your own notes. Say “Save this to Obsidian” followed by the note, or run `python3 desktop/relay.py obsidian-note "Your note"` while Rook is running. The service writes the entry through Rook's local relay.
 
 ## What is yours and what ships
 

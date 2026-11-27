@@ -118,16 +118,17 @@ EOF
 )
 fi
 
-if [ "$daily" -eq 0 ] && [ -n "${HERDR_SOCKET_PATH:-}${HERDR_CONFIG_PATH:-}${ROOK_ALLOW_HERDR_SOCKET:-}${ROOK_OBSIDIAN_VAULT:-}" ]; then
+if [ "$daily" -eq 0 ] && [ -n "${HERDR_SOCKET_PATH:-}${HERDR_CONFIG_PATH:-}${ROOK_ALLOW_HERDR_SOCKET:-}${ROOK_OBSIDIAN_VAULT:-}${ROOK_OBSIDIAN_FOLDER:-}" ]; then
 	plist=$(printf '%s\n' "$plist" | python3 -c '
 import plistlib
 import sys
 
 job = plistlib.loads(sys.stdin.buffer.read())
-names = ("HERDR_SOCKET_PATH", "HERDR_CONFIG_PATH", "ROOK_ALLOW_HERDR_SOCKET", "ROOK_OBSIDIAN_VAULT")
+names = ("HERDR_SOCKET_PATH", "HERDR_CONFIG_PATH", "ROOK_ALLOW_HERDR_SOCKET", "ROOK_OBSIDIAN_VAULT", "ROOK_OBSIDIAN_FOLDER")
 job["EnvironmentVariables"].update({name: value for name, value in zip(names, sys.argv[1:]) if value})
 plistlib.dump(job, sys.stdout.buffer)
-' "${HERDR_SOCKET_PATH:-}" "${HERDR_CONFIG_PATH:-}" "${ROOK_ALLOW_HERDR_SOCKET:-}" "${ROOK_OBSIDIAN_VAULT:-}")
+' "${HERDR_SOCKET_PATH:-}" "${HERDR_CONFIG_PATH:-}" "${ROOK_ALLOW_HERDR_SOCKET:-}" \
+  "${ROOK_OBSIDIAN_VAULT:-}" "${ROOK_OBSIDIAN_FOLDER:-}")
 fi
 
 if [ "$print_only" -eq 1 ]; then

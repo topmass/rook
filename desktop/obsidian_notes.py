@@ -9,9 +9,10 @@ import stat
 
 
 MAX_BYTES = 16 * 1024
+DEFAULT_FOLDER = "rook"
 
 
-def append_daily_note(vault, text):
+def append_daily_note(vault, text, folder=DEFAULT_FOLDER):
     if len(text.encode()) > MAX_BYTES:
         raise ValueError("An Obsidian note can be at most 16 KiB.")
     if not text.strip() or "\0" in text:
@@ -21,18 +22,32 @@ def append_daily_note(vault, text):
         raise ValueError("Set ROOK_OBSIDIAN_VAULT in the running Rook service's environment first.")
     vault = Path(vault)
     if not vault.is_absolute():
-        raise ValueError("ROOK_OBSIDIAN_VAULT must be an absolute path to a vault with a daily folder.")
+        raise ValueError("ROOK_OBSIDIAN_VAULT must be an absolute path to a vault.")
+    if (not folder or folder.startswith(".") or folder.casefold() == "daily"
+            or folder != folder.strip() or any(char in "/\\" or ord(char) < 32 for char in folder)):
+        raise ValueError("ROOK_OBSIDIAN_FOLDER must name a single visible vault folder other than daily.")
 
     filename = f"{date.today().isoformat()}.md"
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    # Open below directory descriptors so a symlink at daily/ or at the note cannot redirect the write.
+    # Open below directory descriptors so a symlink at the folder or note cannot redirect the write.
     with ExitStack() as opened:
         root = os.open(vault, directory_flags)
         opened.callback(os.close, root)
-        daily = os.open("daily", directory_flags, dir_fd=root)
-        opened.callback(os.close, daily)
+        try:
+            os.mkdir(folder, 0o700, dir_fd=root)
+        except FileExistsError:
+            pass
+        destination = os.open(folder, directory_flags, dir_fd=root)
+        opened.callback(os.close, destination)
+        try:
+            daily = os.stat("daily", dir_fd=root, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if os.path.samestat(os.fstat(destination), daily):
+                raise ValueError("Rook's Obsidian folder cannot be the vault's daily folder.")
         note = os.open(filename, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                       0o600, dir_fd=daily)
+                       0o600, dir_fd=destination)
         opened.callback(os.close, note)
         info = os.fstat(note)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -46,4 +61,4 @@ def append_daily_note(vault, text):
             if not written:
                 raise OSError("The daily note write made no progress.")
             remaining = remaining[written:]
-    return f"daily/{filename}"
+    return f"{folder}/{filename}"

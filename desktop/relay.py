@@ -19,7 +19,7 @@ relay.py media [status|pause|play|toggle] [PLAYER]
                             Show active desktop media players in one line each, or pause, play, or toggle one.
 relay.py note [TEXT|-]      Leave the reason for a restart, which the next Rook start reports.
 relay.py obsidian-note [TEXT|-]
-                            Append Markdown to today's daily note in the running Rook's configured Obsidian vault.
+                            Append Markdown to today's note in the configured Obsidian folder for Rook.
 relay.py get [KEY]          Print Rook's settings and where each value comes from.
 relay.py voices             List the voices Rook can speak with.
 relay.py fonts              List the fonts Rook can show its text in.

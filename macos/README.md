@@ -16,7 +16,7 @@ Rook's Claude session allows its own local relay socket. To connect Rook to an e
 
 Export `ROOK_OBSIDIAN_VAULT="$HOME/obsidian"` (or your own absolute vault path) before generating the companion LaunchAgent. For an existing install, run `launchd/install.sh` from the updated Rook source using the same `--app`, `--python`, and `--workspace` paths as your current job. Reload the launch job after updating its plist. A manually started Rook uses the same variable in its launch environment.
 
-Use your talk key and say “Save this to Obsidian” followed by the note. The vault needs an existing `daily/` folder. Rook creates or appends to today's Markdown file there.
+Use your talk key and say “Save this to Obsidian” followed by the note. By default, Rook creates or appends to `rook/YYYY-MM-DD.md` inside the vault. Export `ROOK_OBSIDIAN_FOLDER` before generating the LaunchAgent to choose a different top-level folder name. The `daily` folder name is reserved.
 
 ## Helper build and dev signing
 
