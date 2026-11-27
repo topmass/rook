@@ -3,6 +3,8 @@ Rook's own grains build, light and carry home (see filament.py).
 
 The model writes {diagram TITLE | GRAPH} at the start of its answer, for example
     {diagram How a web page loads | browser > dns:globe > server* > data:database > page:file}
+and may add a third section that draws a node's own shape as SVG path data on the icon grid (filament.shape):
+    {diagram Launch | pad > rocket* | rocket: M0-10C4-6 4 2 3 6H-3C-4 2-4-6 0-10ZM-4 1-7 7H-3M4 1 7 7H3}
 parse() reads the line and never refuses. layout() places the nodes as a star, a ring, a chain or layers, with threads
 whose ends keep an even gap from each glyph and names that keep off every thread. build() gives a fixed budget of grain
 records, and Constellation turns them into the presence path's targets each frame. Pure Python, with no GTK: the
@@ -22,6 +24,7 @@ BUDGET = 1600  # Grains while a constellation shows, whatever its size.
 # gather on the lit node. Once a line has drawn on, its grains go dark: the line itself is the filament layer.
 GLYPH_SHARE, THREAD_SHARE = 0.88, 0.07
 NODES_MAX, LINKS_MAX, LABEL_MAX, TITLE_MAX = 8, 12, 16, 60
+SHAPES_MAX = 4  # Drawn shapes a diagram may give its nodes: a few keep the mark short and the first speech soon.
 GAP = 13.0  # px from a glyph's circle to its thread's end, the same at every end.
 MIN_THREAD = 56.0  # px: the shortest thread.
 WIDTH_MAX = 700.0  # px: the widest layout, names included.
@@ -73,16 +76,23 @@ def guess_icon(label):
     return None
 
 
-def parse(line):
+def _clean(label):
+    return " ".join(label.split()).strip(" '\"`.<>()[]")
+
+
+def parse(line, shapes=None):
     """Return (title, nodes, links, repairs) for a mark's inside or a whole mark. nodes are dicts with label, icon and
-    lead, in the order the line first names them. links are (a, b, arrow) index triples. It never refuses: what it
-    cannot read is dropped or guessed, and each repair is a sentence for the builders' log, never for the model."""
+    lead, in the order the line first names them. links are (a, b, arrow) index triples. A third section after a
+    second "|", "name: PATH; name: PATH", and shapes, a {name: PATH} dict, give nodes shapes drawn as SVG path data
+    (filament.shape), at most SHAPES_MAX. It never refuses: what it cannot read is dropped or guessed, and each repair
+    is a sentence for the builders' log, never for the model."""
     repairs = []
     text = (line or "")[:2000].strip()  # The arrow pattern backtracks on long runs of spaces: keep it short.
     whole = MARK.fullmatch(text)
     if whole:
         text = whole[1]
     title, graph = text.split("|", 1) if "|" in text else ("", text)
+    graph, drawn = graph.split("|", 1) if "|" in graph else (graph, "")
     title = " ".join(title.split())
     if len(title) > TITLE_MAX:
         title = title[:TITLE_MAX].rstrip()
@@ -92,7 +102,7 @@ def parse(line):
     def node(token):
         lead = "*" in token
         label, _, icon = token.replace("*", "").partition(":")
-        label = " ".join(label.split()).strip(" '\"`.<>()[]")
+        label = _clean(label)
         if not label:
             if token.strip():
                 repairs.append(f"dropped {token.strip()!r}")
@@ -138,6 +148,21 @@ def parse(line):
         if nodes or graph.strip():
             repairs.append("fewer than two nodes: nothing drawn")
         return title, [], [], repairs[:20]
+    wanted = [entry.partition(":")[::2] for entry in drawn.split(";") if entry.strip()]
+    if isinstance(shapes, dict):
+        wanted += [(str(k), str(v)) for _, (k, v) in zip(range(NODES_MAX), shapes.items())]
+    given = 0
+    for name, path in wanted:
+        k = index.get(_clean(name.replace("*", ""))[:LABEL_MAX].rstrip().casefold())
+        if k is None:
+            repairs.append(f"a shape for no node {name.strip()[:LABEL_MAX]!r}")
+        elif given >= SHAPES_MAX:
+            repairs.append(f"dropped a shape past {SHAPES_MAX}")
+        else:
+            icon, notes = filament.shape(path)
+            repairs += [f"shape {nodes[k]['label']!r}: {note}" for note in notes]
+            if icon:  # A path that draws nothing leaves the node its icon or ring.
+                nodes[k]["icon"], given = icon, given + 1
     return title, nodes, links, repairs[:20]
 
 
@@ -630,9 +655,9 @@ class Constellation:
         return tx, ty, tb, tz
 
 
-def make(line, measure=_estimate, budget=BUDGET, measure_title=None):
+def make(line, measure=_estimate, budget=BUDGET, measure_title=None, shapes=None):
     """parse, layout, finish and build in one: (title, nodes, Constellation or None, repairs)."""
-    title, nodes, links, repairs = parse(line)
+    title, nodes, links, repairs = parse(line, shapes)
     if not nodes:
         return title, nodes, None, repairs
     plan = finish(layout(nodes, links, measure), title, measure_title or measure)
@@ -666,6 +691,23 @@ def _check():
     started = time.perf_counter()  # Long runs of spaces stay fast, and the repairs stay few.
     t, n, links, rep = parse("a" + " " * 200_000 + "b > c")
     assert time.perf_counter() - started < 0.5 and len(parse(", ".join(f"x{k}:bad" for k in range(99)))[3]) <= 20
+    # Drawn shapes: the third section binds each path to its node by name, and the graph parses as before.
+    heart = "M0 9C-6 4-10 0-10-4A5 5 0 0 1 0-6A5 5 0 0 1 10-4C10 0 6 4 0 9Z"
+    plain = parse("Love | you > Heart* > page:file")
+    t, n, links, rep = parse(f"Love | you > Heart* > page:file | heart: {heart}; PAGE: M-5-8H5V8H-5Z; ghost: M0 0L1 1")
+    assert (t, [x["label"] for x in n], links) == (plain[0], [x["label"] for x in plain[1]], plain[2])
+    assert n[0]["icon"] == "user" and n[1]["lead"]
+    assert n[1]["icon"] == filament.shape(heart)[0] and n[2]["icon"].startswith("~") and len(rep) == 1, rep
+    assert parse(f"{{diagram x | a > b | b: {heart}}}")[1][1]["icon"].startswith("~")  # A whole mark too.
+    assert parse("x | a > b", {"a": heart, "b": "M0 0L4 4"})[1][0]["icon"] == filament.shape(heart)[0]
+    t, n, _, rep = parse("x | a > b | a: nonsense; b: M5 5")  # A path that draws nothing keeps the icon or ring.
+    assert [x["icon"] for x in n] == [None, None] and rep
+    many = "; ".join(f"n{k}: M0 0L{k} 6" for k in range(6))
+    t, n, _, rep = parse("x | " + " > ".join(f"n{k}" for k in range(6)) + " | " + many)
+    assert sum(x["icon"].startswith("~") for x in n if x["icon"]) == SHAPES_MAX and any("past" in r for r in rep)
+    assert parse("x | a > b | ")[1] == parse("x | a > b")[1]
+    con = make(f"x | a > b | a: {heart}")[2]
+    assert con.icons[0].startswith("~") and len(glyph_points(con.nodes[0]["icon"], 50)) == 50
 
     def check(line, kind):
         title, nodes, con, _ = make(line)

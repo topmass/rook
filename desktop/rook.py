@@ -398,11 +398,12 @@ SPOKEN_SENTENCES = 12
 # A step mark in the answer: "{step 2}" lights step 2 of the scene when the sentence that carries it starts to play.
 # Braces never occur in spoken prose, so a mark cannot be mistaken for text. Marks never reach speech, panel or log.
 STEP_MARK = re.compile(r"\{\s*step\s*(\d+)\s*\}[ \t]*", re.IGNORECASE)
-# A diagram mark at the start of the answer: "{diagram TITLE | GRAPH}" (desktop/constellation.py). Rook takes it from
-# the stream and stages it, and it never reaches speech, panel or log. A mark ends at "}", a newline or the text's end;
-# while it is still open at the end of the streamed text, the speech waits. A mark longer than DIAGRAM_HOLD
-# characters is not one: only its "{diagram" goes, and its words are spoken.
-DIAGRAM_HOLD = 600
+# A diagram mark at the start of the answer: "{diagram TITLE | GRAPH}", or "{diagram TITLE | GRAPH | name: PATH}" with
+# drawn shapes (desktop/constellation.py). Rook takes it from the stream and stages it, and it never reaches speech,
+# panel or log. A mark ends at "}", a newline or the text's end; while it is still open at the end of the streamed
+# text, the speech waits. A mark longer than DIAGRAM_HOLD characters is not one: only its "{diagram" goes, and its
+# words are spoken. The hold leaves room for a graph and a few short shapes.
+DIAGRAM_HOLD = 1200
 DIAGRAM_MARK = re.compile(r"\{\s*diagram\b([^{}\n]{0,%d})(?:\}|\n|\Z)\s*" % DIAGRAM_HOLD, re.IGNORECASE)
 DIAGRAM_OPENER = re.compile(r"\{\s*diagram\b\s*", re.IGNORECASE)
 # With no marks, a scene's steps take turns while Rook speaks: each holds the speech's length shared by the steps,
@@ -3035,7 +3036,14 @@ class Companion:
                   "{diagram How a page loads | browser > dns:globe > server* > page:file}. Use two to eight short "
                   "names. name:icon picks an icon, * marks the main node, > is an arrow, - a plain line, a comma "
                   "fans out, and ; starts another chain. The mark is never spoken, and each node lights as your "
-                  "voice names it.\n"))
+                  "voice names it. The icons are mic, chip, rook, speaker, terminal, clock, mail, phone, file, browser, "
+                  "cloud, code, database, folder, gear, globe, key, lock, queue, robot, server, user, bolt, bulb, "
+                  "coins, drop, flame, house, laptop, magnifier, message and wifi. When no icon fits a node, draw it "
+                  "in a third section of SVG paths, with ; between them: {diagram Launch | pad > rocket* | rocket: "
+                  "M0-10C4-6 4 2 3 6H-3C-4 2-4-6 0-10ZM-4 1-7 7H-3M4 1 7 7H3}. The grid is viewBox -12 -12 24 24, "
+                  "centred on 0, y down. Draw one clear outline in a few strokes, with no fills or text. Keep details "
+                  "2 units apart and points within 10.5 of the centre. Keep each path under 120 characters, and draw "
+                  "at most three.\n"))
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
@@ -8466,10 +8474,17 @@ def check_steps():
         c.stream_text = "{diagram a > b} {diagram c > d}Hi there."  # Two marks in one chunk: both go, the last shows.
         c.take_diagram()
         assert c.stream_text == "Hi there." and c.diagram_names == ["c", "d"] and c.staged == "4", c.stream_text
-        long = "{diagram " + "word " * 130 + "end. More."  # Past DIAGRAM_HOLD it is no mark: its words are spoken.
+        shaped = "{diagram Launch | pad > rocket* | rocket: " + "M0-10C4-6 4 2 2 6H-2C-4 2-4-6 0-10Z " * 20
+        c.stream_text = shaped  # A long mark with drawn shapes, still open: the speech waits for its end.
+        c.take_diagram()
+        assert c.stream_text == shaped and len(shaped) > 700
+        c.stream_text += "}Off it goes."
+        c.take_diagram()
+        assert c.stream_text == "Off it goes." and c.diagram_names == ["pad", "rocket"] and c.staged == "5"
+        long = "{diagram " + "word " * 250 + "end. More."  # Past DIAGRAM_HOLD it is no mark: its words are spoken.
         c.stream_text = long
         c.take_diagram()
-        assert c.stream_text == long[len("{diagram "):] and c.staged == "4", c.stream_text[:40]
+        assert c.stream_text == long[len("{diagram "):] and c.staged == "5", c.stream_text[:40]
         c.stream_text, c.latest_turn = "{diagram a > b} Hi.", "old"  # Another turn's text never stages.
         c.take_diagram()
         assert c.stream_text == "{diagram a > b} Hi." and unmarked(c.stream_text) == "Hi."

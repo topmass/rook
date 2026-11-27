@@ -5273,11 +5273,12 @@ class Scene:
         return {"ok": False, "error": SCENE_GONE}
 
     def diagram_form(self, doc):
-        """A constellation's scene and form from {"graph", "title"} or a mark's inside, its names measured in their
-        own lettering. Both are None when the graph has fewer than two nodes. Repairs go to stderr for the builders,
-        never back to the model."""
+        """A constellation's scene and form from {"graph", "title", "shapes"} or a mark's inside, its names measured in
+        their own lettering. Both are None when the graph has fewer than two nodes. Repairs go to stderr for the
+        builders, never back to the model."""
         doc = doc if isinstance(doc, dict) else {"graph": str(doc)}
         title, graph = str(doc.get("title") or "").strip(), str(doc.get("graph") or "")
+        shapes = doc.get("shapes") if isinstance(doc.get("shapes"), dict) else None
         probe = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
 
         def measure(text, grow=1.0):
@@ -5285,7 +5286,8 @@ class Scene:
             return sprite.get_width() - 28, sprite.get_height() - 28  # Less the sprite's 14 px pad each side.
 
         title, nodes, con, repairs = constellation.make(f"{title} | {graph}" if title else graph, measure,
-                                                        measure_title=lambda text: measure(text, TITLE_GROW))
+                                                        measure_title=lambda text: measure(text, TITLE_GROW),
+                                                        shapes=shapes)
         if repairs:
             print(f"diagram repairs: {'; '.join(repairs)} in {graph[:200]!r}", file=sys.stderr, flush=True)
         if con is None:
@@ -14269,6 +14271,7 @@ def _check_render():
     # A constellation: it grows the swarm to its fixed budget, its names fade in, a step lights a node, a list lights
     # two, the voice's end leaves all known, and the swarm shrinks back once it ends. Too few nodes shows nothing.
     assert not scene.render_command({"diagram": {"graph": "solo"}}, clock[0])["ok"] and scene.render is None
+    assert scene.diagram_form({"graph": "a > b", "shapes": {"B": "M-5 0H5"}})[1]["con"].icons[1].startswith("~")
     said = scene.render_command({"diagram": {"title": "Web", "graph": "browser > dns:globe > server* > page"}},
                                 clock[0])["said"]
     assert said == "Showing 4 nodes.", said

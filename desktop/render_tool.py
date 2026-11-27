@@ -46,11 +46,14 @@ def _call(request):
 
 
 @mcp.tool(structured_output=False)
-def show_diagram(graph: str, title: str = "") -> str:
+def show_diagram(graph: str, title: str = "", shapes: dict[str, str] | None = None) -> str:
     """Show a diagram of how things connect, when you cannot start your answer with the {diagram} mark: outside
     speech, or after a tool call. graph is the mark's graph, such as "browser > dns:globe > server* > page:file". Its
-    nodes light as your voice names them."""
-    return call({"diagram": {"graph": graph, "title": title}})
+    nodes light as your voice names them. shapes, as the mark's third section, draws a node that no icon fits:
+    {node name: SVG path}, such as {"rocket": "M0-10C4-6 4 2 3 6H-3C-4 2-4-6 0-10ZM-4 1-7 7H-3M4 1 7 7H3"}, on
+    viewBox -12 -12 24 24, centred on 0, y down. Draw one clear outline in a few strokes, with no fills or text, details
+    2 units apart and points within 10.5 of the centre. Keep each path under 120 characters, and draw at most three."""
+    return call({"diagram": {"graph": graph, "title": title, **({"shapes": shapes} if shapes else {})}})
 
 
 @mcp.tool(structured_output=False)

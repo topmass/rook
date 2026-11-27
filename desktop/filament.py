@@ -9,6 +9,9 @@ joined to the point before, ("E", cx, cy, rx, ry, a0, a1) an ellipse arc, ("R", 
 rounded box, and ("Z",) to close. Angles are radians, y down, so they run clockwise. Flattening is pure Python; only
 art() and draw() need Cairo, which they import when called.
 
+A diagram may also draw its own shapes: shape() reads SVG path data on the same grid (viewBox -12 -12 24 24) into
+these ops and keeps them in SHAPES under a name that every function here takes as it takes an icon's.
+
 The overlay draws one texture per diagram and scale (art): R the core's coverage, G the ink edge's, B how far along
 its stroke each pixel lies (for the draw-on and the light run), A the element (node or thread) plus one. Per frame
 only the elements' light state changes: Constellation.lines() gives 12 floats per element, which the GL path sends as
@@ -18,6 +21,7 @@ Self-check: /usr/bin/python desktop/filament.py
 """
 
 import math
+import re
 
 GRID = 0.075  # One icon grid unit as a share of the node's glyph radius.
 CORE_W, THREAD_W, INK_W = 1.45, 1.2, 2.6  # px: an icon's core, a thread's, and how much wider the ink edge is.
@@ -195,7 +199,7 @@ def polylines(name):
     stroke's pieces draw on together. Cached."""
     if name not in _POLY:
         out = []
-        for stroke in ICONS[name]:
+        for stroke in ICONS.get(name) or SHAPES.get(name) or ICONS["dot"]:
             pieces = _flatten(stroke)
             total = sum(math.dist(a, b) for p in pieces for a, b in zip(p, p[1:])) or 1.0
             run = 0.0
@@ -248,7 +252,190 @@ def point_at(name, s):
 
 
 def icon_name(icon):
-    return icon if icon in ICONS else "dot"
+    return icon if icon in ICONS or icon in SHAPES else "dot"
+
+
+# ---- shapes a diagram draws itself, as SVG path data ----
+
+# Caps, so a huge or hostile path cannot stall a frame: the text read, the commands, and the points they flatten to.
+SHAPE_TEXT, SHAPE_COMMANDS, SHAPE_POINTS = 1000, 64, 400
+SHAPE_FIT = 10.5  # A shape that leaves the grid is centred and shrunk to this half size.
+SHAPES = {}  # A drawn shape's name ("~" and its path) to its strokes, as in ICONS. Only the newest SHAPES_KEPT.
+SHAPES_KEPT = 16
+_TOKEN = re.compile(r"([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|[\s,]+|(.)")
+_ARGS = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7}
+_COST = {"M": 1, "L": 1, "C": 16, "Z": 1}  # The points each op flattens to (_flatten).
+
+
+def _arc(p0, rx, ry, turn, large, sweep, p1):
+    """An SVG endpoint arc as cubics of at most a quarter turn each (the centre conversion of the SVG spec, F.6.5)."""
+    (x1, y1), (x2, y2) = p0, p1
+    if (x1, y1) == (x2, y2):
+        return []
+    rx, ry = abs(rx), abs(ry)
+    if not rx or not ry:
+        return [("L", x2, y2)]
+    phi = math.radians(turn % 360)
+    cp, sp = math.cos(phi), math.sin(phi)
+    dx, dy = (x1 - x2) / 2, (y1 - y2) / 2
+    xp, yp = cp * dx + sp * dy, -sp * dx + cp * dy
+    grow = (xp / rx) ** 2 + (yp / ry) ** 2
+    if grow > 1:  # Radii too small to reach the end: scale them up just enough.
+        rx, ry = rx * math.sqrt(grow), ry * math.sqrt(grow)
+    num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp
+    co = math.sqrt(max(0.0, num / (rx * rx * yp * yp + ry * ry * xp * xp))) * (-1 if large == sweep else 1)
+    cxp, cyp = co * rx * yp / ry, -co * ry * xp / rx
+    cx, cy = cp * cxp - sp * cyp + (x1 + x2) / 2, sp * cxp + cp * cyp + (y1 + y2) / 2
+    ux, uy, vx, vy = (xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry
+    t0 = math.atan2(uy, ux)
+    dt = math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+    if sweep and dt < 0:
+        dt += 2 * PI
+    elif not sweep and dt > 0:
+        dt -= 2 * PI
+    n = max(1, math.ceil(abs(dt) / (PI / 2) - 1e-9))
+    d = dt / n
+    k = 4 / 3 * math.tan(d / 4)
+
+    def at(t):  # The point at angle t, and the tangent there.
+        ex, ey, tx, ty = rx * math.cos(t), ry * math.sin(t), -rx * math.sin(t), ry * math.cos(t)
+        return cx + cp * ex - sp * ey, cy + sp * ex + cp * ey, cp * tx - sp * ty, sp * tx + cp * ty
+
+    out = []
+    for j in range(n):
+        (ax, ay, tax, tay), (bx, by, tbx, tby) = at(t0 + j * d), at(t0 + (j + 1) * d)
+        out.append(("C", ax + k * tax, ay + k * tay, bx - k * tbx, by - k * tby, bx, by))
+    out[-1] = out[-1][:5] + (x2, y2)
+    return out
+
+
+def path_strokes(d):
+    """SVG path data on the grid as (strokes, repairs): one stroke per subpath, of M, L, C and Z ops; Q, T and arcs
+    become cubics. It keeps at most SHAPE_COMMANDS commands and SHAPE_POINTS flattened points, and a shape that
+    leaves the grid is centred and shrunk to fit. strokes is None when nothing in it draws. Repairs are for the
+    builders' log."""
+    text, repairs = str(d or ""), []
+    if len(text) > SHAPE_TEXT:
+        text = text[:SHAPE_TEXT]
+        repairs.append(f"path cut at {SHAPE_TEXT} characters")
+    items, odd = [], False
+    for m in _TOKEN.finditer(text):
+        if m[1] or m[2]:
+            items.append(m[1] or m[2])
+        odd = odd or m[3] is not None
+    if odd:
+        repairs.append("odd characters skipped")
+    strokes, ops = [], None
+    x = y = sx = sy = 0.0
+    cmd, prev, ctrl = None, "", (0.0, 0.0)  # The command, the last segment's kind, and its last control point.
+    commands = points = i = 0
+
+    def put(op):
+        nonlocal points
+        if points + _COST[op[0]] > SHAPE_POINTS:
+            return False
+        points += _COST[op[0]]
+        ops.append(op)
+        return True
+
+    while i < len(items):
+        tok = items[i]
+        if tok.isalpha():
+            cmd, i = tok, i + 1
+            if cmd in "Zz":
+                if ops is not None:
+                    if not put(("Z",)):
+                        repairs.append(f"shape cut at {SHAPE_POINTS} points")
+                        break
+                    x, y, ops, prev = sx, sy, None, "Z"
+                cmd = None
+            continue
+        if cmd is None:
+            repairs.append("numbers with no command skipped")
+            i += 1
+            continue
+        kind, rel = cmd.upper(), cmd.islower()
+        args, j = [], i
+        while len(args) < _ARGS[kind] and j < len(items) and not items[j].isalpha():
+            tok = items[j]
+            if kind == "A" and len(args) in (3, 4) and len(tok) > 1 and tok[0] in "01":  # Packed flags, as "011".
+                items[j], tok = tok[1:], tok[0]
+            else:
+                j += 1
+            args.append(float(tok))
+        i = j
+        if len(args) < _ARGS[kind]:
+            repairs.append(f"short {cmd} dropped")
+            continue
+        if not all(abs(v) <= 1e4 for v in args):  # Also inf and nan.
+            repairs.append("a number too large: path cut")
+            break
+        if commands >= SHAPE_COMMANDS:
+            repairs.append(f"shape cut at {SHAPE_COMMANDS} commands")
+            break
+        commands += 1
+        ox, oy = (x, y) if rel else (0.0, 0.0)
+        if kind == "M":
+            x, y = sx, sy = ox + args[0], oy + args[1]
+            ops = [("M", x, y)]
+            strokes.append(ops)
+            points += 1
+            cmd, prev = "l" if rel else "L", "M"  # More pairs after a move are lines.
+            continue
+        if ops is None:  # A line on after Z starts again where the closed piece began.
+            ops = [("M", x, y)]
+            strokes.append(ops)
+            points += 1
+        if kind in "LHV":
+            x, y = (ox + args[0] if kind != "V" else x), (oy + args[-1] if kind != "H" else y)
+            new = [("L", x, y)]
+        elif kind in "CS":
+            c1 = (ox + args[0], oy + args[1]) if kind == "C" else \
+                (2 * x - ctrl[0], 2 * y - ctrl[1]) if prev in "CS" else (x, y)
+            c2, end = (ox + args[-4], oy + args[-3]), (ox + args[-2], oy + args[-1])
+            new, ctrl = [("C", *c1, *c2, *end)], c2
+        elif kind in "QT":
+            q = (ox + args[0], oy + args[1]) if kind == "Q" else \
+                (2 * x - ctrl[0], 2 * y - ctrl[1]) if prev in "QT" else (x, y)
+            end = (ox + args[-2], oy + args[-1])
+            new, ctrl = [("C", x + 2 / 3 * (q[0] - x), y + 2 / 3 * (q[1] - y), end[0] + 2 / 3 * (q[0] - end[0]),
+                          end[1] + 2 / 3 * (q[1] - end[1]), *end)], q
+        else:
+            new = _arc((x, y), args[0], args[1], args[2], args[3] != 0, args[4] != 0, (ox + args[5], oy + args[6]))
+        if not all(put(op) for op in new):
+            repairs.append(f"shape cut at {SHAPE_POINTS} points")
+            break
+        x, y = new[-1][-2:] if new else (x, y)
+        prev = kind
+    strokes = [s for s in strokes if any(op[0] in "LC" for op in s)]
+    if not strokes:
+        return None, repairs + ["path drew nothing"]
+    xs = [v for s in strokes for op in s for v in op[1::2]]
+    ys = [v for s in strokes for op in s for v in op[2::2]]
+    if max(map(abs, xs + ys)) > 12:
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        k = min(1.0, SHAPE_FIT / (max(max(xs) - min(xs), max(ys) - min(ys)) / 2 or 1.0))
+        strokes = [[(op[0], *((v - (cy if j % 2 else cx)) * k for j, v in enumerate(op[1:]))) for op in s]
+                   for s in strokes]
+        repairs.append("shape fitted to the grid")
+    return strokes, repairs
+
+
+def shape(d):
+    """Keep a drawn shape: (its name for the functions here, repairs). The name is None when the path draws nothing,
+    so the node keeps its icon or ring."""
+    strokes, repairs = path_strokes(d)
+    if strokes is None:
+        return None, repairs
+    name = "~" + " ".join(str(d).split())[:SHAPE_TEXT]
+    if name not in SHAPES:
+        while len(SHAPES) >= SHAPES_KEPT:  # The oldest goes; a constellation keeps the strokes it already made.
+            old = next(iter(SHAPES))
+            del SHAPES[old]
+            _POLY.pop(old, None)
+            _WALK.pop(old, None)
+        SHAPES[name] = strokes
+    return name, repairs
 
 
 def _qpt(c, u):
@@ -387,8 +574,43 @@ def _check():
         assert len(pts) == 240 and all(abs(x) <= 12.01 and abs(y) <= 12.01 for x, y in pts), name
         for line, shares in polylines(name):
             assert len(line) == len(shares) >= 2 and shares == sorted(shares) and shares[-1] <= 1.0 + 1e-9, name
+    # Drawn shapes: each SVG command family, relative ones, packed numbers, arcs, the fit, the caps, broken paths.
+    flat = lambda d: [p for s in path_strokes(d)[0] for piece in _flatten(s) for p in piece]  # noqa: E731
+    assert path_strokes("M-6-2L6-2")[0] == [[("M", -6.0, -2.0), ("L", 6.0, -2.0)]]
+    assert path_strokes("M0 0h5v5H0z")[0] == [[("M", 0, 0), ("L", 5, 0), ("L", 5, 5), ("L", 0, 5), ("Z",)]]
+    assert path_strokes("m1 1 2 0 0 2")[0] == [[("M", 1, 1), ("L", 3, 1), ("L", 3, 3)]]  # More pairs are lines.
+    assert path_strokes("M0 0C0-4 4-4 4 0S8 4 8 0")[0][0][2][1:3] == (4.0, 4.0)  # S mirrors the last control.
+    assert path_strokes("M0 0c0-4 4-4 4 0s4 4 4 0")[0] == path_strokes("M0 0C0-4 4-4 4 0S8 4 8 0")[0]
+    q = flat("M-8 0Q-4-8 0 0T8 0")
+    assert math.dist(q[8], (-4, -4)) < 1e-9 and math.dist(q[24], (4, 4)) < 1e-9, q  # Q's middle, and T mirrored.
+    assert path_strokes("M-8 0q4-8 8 0t8 0")[0] == path_strokes("M-8 0Q-4-8 0 0T8 0")[0]
+    arc = flat("M-5 0A5 5 0 0 1 5 0")  # Sweep 1 runs clockwise: over the top, y down.
+    assert all(abs(math.hypot(*p) - 5) < 0.01 for p in arc) and abs(min(y for _, y in arc) + 5) < 0.01
+    assert abs(max(y for _, y in flat("M-5 0a5 5 0 1010 0")) - 5) < 0.01  # Packed flags, under the bottom.
+    assert abs(max(x for x, _ in flat("M0-8A8 4 90 0 1 0 8")) - 4) < 0.01  # A turned ellipse.
+    assert len(path_strokes("M-9 0A1 1 0 0 1 9 0")[0][0]) == 3  # Radii too small grow to reach: a half turn.
+    strokes, rep = path_strokes("M0 0L24 24")  # Off the grid: centred and shrunk to fit.
+    assert strokes == [[("M", -SHAPE_FIT, -SHAPE_FIT), ("L", SHAPE_FIT, SHAPE_FIT)]] and "fitted" in rep[0]
+    strokes, rep = path_strokes("M0 0" + " L1 1" * 99)
+    assert len(strokes[0]) == SHAPE_COMMANDS and any("commands" in r for r in rep)
+    strokes, rep = path_strokes("M0 0" + " C1 1 2 2 3 3" * 40)
+    assert len(strokes[0]) == 1 + (SHAPE_POINTS - 1) // 16 and any("points" in r for r in rep)
+    assert path_strokes("M0 0 L1 1 M5 5 Z M2 2 L3 3")[0] == [[("M", 0, 0), ("L", 1, 1)], [("M", 2, 2), ("L", 3, 3)]]
+    for broken in ("", "hello", "M5 5", "12 4 L", "M0 0L1e9 0", "L", "Z Z", "M 1e999 0 L 1 1"):
+        assert path_strokes(broken)[0] is None and shape(broken) == (None, path_strokes(broken)[1]), broken
+    import time
+    started = time.perf_counter()
+    assert len(path_strokes("M0 0" + " L1 1" * 500_000)[1]) == 2 and time.perf_counter() - started < 0.1
+    heart, rep = shape("M0 9C-6 4-10 0-10-4A5 5 0 0 1 0-6A5 5 0 0 1 10-4C10 0 6 4 0 9Z")
+    assert heart in SHAPES and icon_name(heart) == heart and not rep
+    assert all(abs(x) <= 12 and abs(y) <= 12 for x, y in sample(heart, 240)) and point_at(heart, 0.0) == (0, 9)
+    for k in range(SHAPES_KEPT + 4):  # Only the newest shapes stay.
+        shape(f"M0 0L{k} 5")
+    assert len(SHAPES) == SHAPES_KEPT and heart not in SHAPES and icon_name(heart) == "dot"
+    heart = shape("M0 9C-6 4-10 0-10-4A5 5 0 0 1 0-6A5 5 0 0 1 10-4C10 0 6 4 0 9Z")[0]
     plan = {"pos": [(-60.0, 0.0), (60.0, 0.0)], "r": [44.0, 44.0], "curves": [((-43.0, 0.0), (0.0, 4.0), (43.0, 0.0))],
             "links": [(0, 1, True)]}
+    assert len(elements(plan, [{"icon": heart}, {"icon": "dot"}])[0][0][0]) > 40
     els = elements(plan, [{"icon": "mic"}, {"icon": "nosuch"}])
     assert len(els) == 3 and len(els[2]) == 3 and els[2][1][1] == [1.0, 1.0]
     data, w, h = art(els, (200, 120), 1.0)
