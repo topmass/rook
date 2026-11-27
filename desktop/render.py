@@ -1,5 +1,7 @@
-"""Rook's render tool, layer one: a scene format that a model writes in one reply, a checker for it, and a sampler
-that turns a scene into grain targets for the swarm. Nothing here draws on screen. Pure Python, and Cairo for measuring.
+"""A dust scene format, a checker for it, and a sampler that turns a scene into grain homes. The forge makes dust icons
+from it (themes/forge/forge.py), and the overlay reads its label type and timings. The old show_scene tool that drew
+these scenes on screen is gone (2026-11-27); diagrams are constellations now (constellation.py, filament.py). Nothing
+here draws on screen. Pure Python, and Cairo for measuring.
 
 The format (a JSON object; every key not listed is an error):
     scene  {"name"?, "title"?, "size"?, "view"?: [w, h] = [100, 100], "parts": [part or group, ...],
@@ -71,8 +73,8 @@ the overlay, so the swarm keeps its sides when it arrives from any other form.
 
 The motion contract. A form (see sample) has, per grain: x, y (its home, in form pixels around the form's centre), part
 (an index into form["parts"]), move (None for a grain that rests, or the tuple below), and bright (1, or the step's
-light). Each entry of form["parts"] carries what its motion needs, in form pixels. targets(form, d) is the reference:
-it returns every grain's place and brightness d seconds after the form began.
+light). Each entry of form["parts"] carries what its motion needs, in form pixels. Nothing plays these motions now:
+the overlay that ran them for the old scene tool is gone, and the forge reads only each grain's home.
     still  Rests; the engine's own drift and loose grains keep it alive.
     flow   part["paths"]: [{"points": even polyline, "length", "closed"}], part["speed"] in px per second.
            move = (path, phase, side, tail). A grain sits phase of the way along its path, advancing speed / length per
@@ -103,10 +105,9 @@ it returns every grain's place and brightness d seconds after the form began.
            part and the pull toward the band.
 
 Run python desktop/render.py --check [folder of sample scenes] for the self-check, and python desktop/render.py
---author < scene.json to check a scene as the author would: it prints the summary and the path of a preview PNG.
+--author < scene.json to check a scene as the author would: it prints the summary.
 """
 
-import hashlib
 import json
 import math
 import os
@@ -119,7 +120,7 @@ import time
 import stencils
 try:
     import cairo
-except ImportError:  # The tool server only needs the format's words, the checker and the schema.
+except ImportError:  # The checker and the schema work without Cairo.
     cairo = None
 
 MOTIONS = ("still", "flow", "turn", "fizz", "glare", "fall")
@@ -178,16 +179,13 @@ OUTLINE_LOOK = "clear"
 LABEL_TYPE = {"icon": (10, 2.4, 9.6), "diagram": (13, 2.4, 12.0)}
 LIT, UNLIT = 1.25, 0.55  # Brightness of the lit and the other parts in a step.
 # Material dust draws a diagram's fine layer from per-part baked textures instead of simulating thousands of grains.
-# A diagram starts quiet with nothing lit. A step lights the parts it names over GLOW_SECONDS.
+# A diagram starts quiet with nothing lit. A step lights the parts it names.
 MATERIAL = True
 FINE = 0  # Kept at 0 so callers checking render.FINE see no simulated fine grains.
-MAT_GLOW, LIFE_GLOW, GLOW_SECONDS = {False: 0.82, True: 2.75}, {False: 0.30, True: 1.65}, 0.35
+LIFE_GLOW = {False: 0.30, True: 1.65}
 # Diagram living grains split into permanent ambient grains and one travelling highlight swarm.
 SWARM_SHARE = 0.62
 SWARM_CAP = 3.0  # Max multiple of a part's whole-scene swarm share when lit, so small parts stay crisp.
-SWARM_SPREAD = 0.24  # Stagger window in seconds across which the highlight swarm lifts off.
-SWARM_LIGHT_START, SWARM_LIGHT_END = 0.22, 0.62  # Material and ambient wake window as the swarm arrives.
-SWARM_DIM_START, SWARM_DIM_END = 0.04, 0.36  # Material and ambient dim window as the swarm departs.
 # Living dance presets for diagrams: material drift, twinkle, and GPU spring wander, wisps, and sparks.
 # Material drift stays within the 2x2 cell search margin so micro-dots never clip on cell midlines.
 DIAGRAM_DANCES = ("subtle", "medium", "lively")
@@ -204,15 +202,11 @@ DANCE_PRESETS = {
 DANCE = "medium"
 
 
-def dance_preset(name=None):
-    """Return active diagram dance tuning parameters for name or the default preset."""
-    return DANCE_PRESETS.get(name or DANCE, DANCE_PRESETS["medium"])
 # Diagram entrance: "draw" traces each line behind living sparks; "fly" flies the living grains in first.
 DIAGRAM_ENTRANCES = ("draw", "fly")
 DIAGRAM_ENTRANCE = "draw"
-DRAW_SECONDS, DRAW_START, LABELS_AFTER = 1.1, 0.35, 1.0
+LABELS_AFTER = 1.0  # The overlay holds a diagram's label layer this long after it shows, while its names fade in.
 STEP_GATHER, STEP_THIN = 1.5, 0.8  # How a step shifts grains toward its lit parts, as weights.
-PREVIEW_KEEP, PREVIEW_AGE = 20, 900  # Author previews kept, and their age in seconds before they are removed.
 
 # The key tables. Both the checker and SCHEMA read them. A kind is one of: id, name, text, bool, number, integer,
 # numbers (named), pair, points, path, enum, repeat, parts, steps, ids.
@@ -236,7 +230,6 @@ REPEAT_KEYS = {"count": ("integer", (2, LIMITS["repeat"])), "about": ("pair", No
 STEP_KEYS = {"light": ("ids", None), "move": ("moves", None), "caption": ("text", LIMITS["caption"])}
 MOVE_KEYS = {"to": ("pair", None), "rotate": ("number", (-360, 360)), "about": ("pair", None),
              "scale": ("number", (0.05, 20))}
-FLIGHT = 1.0  # Seconds a moved part takes to fly to its step's pose.
 SCENE_KEYS = {"name": ("name", None), "title": ("text", LIMITS["title"]), "size": ("enum", SIZES),
               "view": ("pair", None), "parts": ("parts", None), "steps": ("steps", None),
               "layout": ("enum", LAYOUTS), "nodes": ("parts", None), "links": ("links", None)}
@@ -3163,7 +3156,7 @@ def sample(scene, budget=None, seed=0, box=None, step=None, previous=None, entra
             if used < 0.6:
                 notes.append(f"The drawing fills {used:.0%} of the view at most; make the view smaller around it to "
                              "draw it larger.")
-    # A crank, a rod and a piston in one group move as an engine does while they fly (see flights): their pins, in
+    # A crank, a rod and a piston in one group move as an engine does while they fly: their pins, in
     # form pixels, and the line the piston slides on, from the crank's journal toward the piston as drawn.
     def px(ps, k, at):
         x, y = _apply(fit, *_apply(ps[k]["copies"][0], *at))
@@ -3921,58 +3914,6 @@ def _grain_arrivals(form, mat):
     return out
 
 
-def _part_point_at(baked_part, u):
-    """Return a point (x, y) at fraction u along a baked part's polylines."""
-    paths = baked_part["paths"]
-    if not paths:
-        x0, y0, bw, bh = baked_part["box"]
-        return x0 + bw * 0.5, y0 + bh * 0.5
-    at = min(1.0, max(0.0, u)) * baked_part["total_len"]
-    for path in paths:
-        if at <= path["length"] or path is paths[-1]:
-            x, y, _, _ = _along(path["points"], at / (path["length"] or 1.0))
-            return x, y
-        at -= path["length"]
-    return paths[-1]["points"][-1]
-
-
-def material_state(form, d):
-    """Per-part transforms, lighting, reveal progress and entrance fade at d seconds."""
-    parts = form["parts"]
-    fly = flights(form, d)
-    mats = []
-    for k, part in enumerate(parts):
-        m = _pose_matrix(part.get("pose"))
-        if k in fly:
-            m = _then(m, fly[k])
-        if part["motion"] == "turn" and "centre" in part:
-            m = _then(m, _matrix(1.0, math.degrees(part["spin"] * d), (0.0, 0.0), part["centre"]))
-        mats.append(m)
-    elapsed = d - form.get("start", 0.0)
-    lits, glows = [], []
-    for part in parts:
-        lit_now = 1.0 if part.get("lit", False) else 0.0
-        was_lit = float(part.get("was_lit", 0.0))
-        if lit_now > was_lit:
-            # Ease from the saved lit level as the highlight swarm arrives.
-            lit_v = was_lit + (lit_now - was_lit) * _ease(elapsed, SWARM_LIGHT_START, SWARM_LIGHT_END)
-        elif lit_now < was_lit:
-            # Ease down from the saved lit level as the highlight swarm departs.
-            lit_v = was_lit + (lit_now - was_lit) * _ease(elapsed, SWARM_DIM_START, SWARM_DIM_END)
-        else:
-            lit_v = lit_now
-        lits.append(lit_v)
-        glows.append(MAT_GLOW[False] + (MAT_GLOW[True] - MAT_GLOW[False]) * lit_v)
-    if form.get("entrance", DIAGRAM_ENTRANCE) == "draw":
-        reach = max(0.0, (d - DRAW_START) / DRAW_SECONDS)
-        fade = 1.0 if d >= DRAW_START else 0.0
-    else:
-        reach = 2.0
-        # Delay material fade-in during fly-in so nothing shows before living grains arrive.
-        fade = _ease(d, 0.35, 0.95)
-    return mats, glows, lits, reach, fade
-
-
 def _mess_notes(parts, masks, sets, info, fit, w, scale, notes):
     """Notes for what makes a drawing messy: a line or an arrow that crosses a part or another line, an arrow that runs
     into the part it starts or ends on, and shapes that overlap without one sitting inside the other."""
@@ -4111,41 +4052,6 @@ def _outlined(scene, part):
             and part["shape"] != "arrow" and part["motion"] != "turn")
 
 
-def draw_outline(cr, form, cx, cy, colour, alpha=1.0, d=None):
-    """The OUTLINE_LOOK line under each outlined part's dust, from the same geometry as its grains, round the form's
-    centre (cx, cy). It dims with its part in a step, as the dust does. d, the time since the scene began, flies the
-    line of a moved part with its dust (see flights)."""
-    scene, w, h = form["scene"], *form["size"]
-    if not OUTLINE_LOOK or scene["size"] != "diagram":
-        return
-    width, strength, _ = OUTLINES[OUTLINE_LOOK]
-    fit = cairo.Matrix(*_fit(scene["view"], form["box"])[3])
-    fly = flights(form, d) if d is not None else {}
-    light = scene["steps"][form["step"]]["light"] if form["step"] is not None else None
-    cr.save()
-    cr.set_line_width(width)
-    cr.set_line_join(cairo.LINE_JOIN_ROUND)
-    cr.set_line_cap(cairo.LINE_CAP_ROUND)
-    for k, part in enumerate(form["drawn"]):
-        if not _outlined(scene, part):
-            continue
-        cr.new_path()
-        for m in part["copies"]:
-            cr.save()
-            cr.translate(cx, cy)
-            if k in fly:
-                cr.transform(cairo.Matrix(*fly[k]))
-            cr.translate(-w / 2, -h / 2)
-            cr.transform(fit)
-            cr.transform(cairo.Matrix(*m))
-            _trace(cr, part)
-            cr.restore()  # The path keeps its place; the line's width is in pixels.
-        dim = (1.0 if light is None or _lit(part, light) else 0.4) * STRESS.get(part["stress"], (1, 1))[1]
-        cr.set_source_rgba(*colour, alpha * strength * min(1.0, dim))
-        cr.stroke()
-    cr.restore()
-
-
 def _pose_matrix(pose):
     """A part's pose in form pixels as a matrix; None is the pose it was drawn in."""
     if pose is None:
@@ -4160,295 +4066,9 @@ def _invert(m):
     return (yy / det, -yx / det, -xy / det, xx / det, (xy * y0 - yy * x0) / det, (yx * x0 - xx * y0) / det)
 
 
-def flights(form, d):
-    """Each moved part's matrix d seconds after the form began, while it flies from its last pose to the form's:
-    {part index: matrix from its place in the form to its place now}. Empty once every part has landed."""
-    u = (d - form.get("start", 0.0)) / FLIGHT
-    if u >= 1 or not any("flight" in part for part in form["parts"]):
-        return {}
-    e = _ease(u, 0.0, 1.0)
-    out = {}
-    for pi, part in enumerate(form["parts"]):
-        if "flight" in part:
-            a, b = part["flight"]
-            a = a or (0.0, 0.0, 0.0, *b[3:5], 1.0)
-            b = b or (0.0, 0.0, 0.0, *a[3:5], 1.0)
-            turn = 180 - (a[2] - b[2] + 180) % 360  # The short way; a half turn goes clockwise.
-            now = tuple(p + (q - p) * e for p, q in zip(a, b))
-            now = (*now[:2], a[2] + turn * e, *now[3:])
-            out[pi] = _then(_invert(_pose_matrix(part["pose"] if "pose" in part else None)), _pose_matrix(now))
-    for pi, part in enumerate(form["parts"]):
-        if "engine" in part and pi in out:
-            # The crank turns; the rod holds its pin, and the piston slides on its line, as in a real engine.
-            piston, rod, journal, pin, top, end, (ax, ay), length = part["engine"]
-            c, q1 = _apply(out[pi], *journal), _apply(out[pi], *pin)
-            rx, ry = q1[0] - c[0], q1[1] - c[1]
-            along = rx * ax + ry * ay + math.sqrt(max(0.0, length ** 2 - (rx * ay - ry * ax) ** 2))
-            q0 = (c[0] + ax * along, c[1] + ay * along)
-            if piston in out:
-                out[piston] = _matrix(translate=(q0[0] - top[0], q0[1] - top[1]))
-            if rod in out:
-                turn = math.atan2(q1[1] - q0[1], q1[0] - q0[0]) - math.atan2(end[1] - top[1], end[0] - top[0])
-                out[rod] = _matrix(1.0, math.degrees(turn), (q0[0] - top[0], q0[1] - top[1]), top)
-    return out
-
-
-# Motion, as the engine would run it. This is the reference for the contract at the top, and what the previews use.
-
-def _ease(u, a, b):
-    p = min(1.0, max(0.0, (u - a) / (b - a)))
-    return p * p * (3 - 2 * p)
-
-
-_MOVING = {}  # id(form): (form, the grains targets() moves), for the last few forms.
-
-
-def _moving(form):
-    """The grains whose place or brightness a part's motion changes, and the grains of parts that fly to a new pose:
-    targets() leaves every other grain where the form put it, so it need not visit them each frame."""
-    hit = _MOVING.get(id(form))
-    if hit is None or hit[0] is not form:
-        parts = form["parts"]
-        moving = [i for i, (pi, move) in enumerate(zip(form["part"], form["move"]))
-                  if parts[pi]["motion"] in ("turn", "glare")
-                  or (move is not None and parts[pi]["motion"] in ("flow", "fall", "fizz"))]
-        flying = [i for i, pi in enumerate(form["part"]) if "flight" in parts[pi]]
-        if len(_MOVING) > 7:
-            _MOVING.clear()
-        hit = _MOVING[id(form)] = (form, moving, flying)
-    return hit[1:]
-
-
-def targets(form, d, lead=None):
-    """Every grain's place and brightness d seconds after the form began: lists tx, ty, tb. lead, a time per grain,
-    turns each turning grain that much further on, so a spring that trails its target lands on the place itself. A
-    moved part flies on its mean lead, so its grains keep their places within it."""
-    tx, ty, tb = list(form["x"]), list(form["y"]), list(form["bright"])
-    parts = form["parts"]
-    cos, sin = math.cos, math.sin
-    part_of, moves = form["part"], form["move"]
-    moving, flying = _moving(form)
-    for i in moving:
-        pi, move = part_of[i], moves[i]
-        part = parts[pi]
-        motion = part["motion"]
-        if motion == "turn":
-            cx, cy = part["centre"]
-            a = part["spin"] * (d + lead[i] if lead else d)
-            x, y = tx[i] - cx, ty[i] - cy
-            tx[i], ty[i] = cx + x * cos(a) - y * sin(a), cy + x * sin(a) + y * cos(a)
-        elif motion == "glare":
-            band = part["band"]
-            dx, dy = band["dir"]
-            c = (d % band["period"]) / band["period"] / band["pass"]
-            at = band["low"] - band["width"] * 2 + (band["high"] - band["low"] + band["width"] * 4) * c
-            pull = math.exp(-(((tx[i] * dx + ty[i] * dy) - at) / band["width"]) ** 2) if c <= 1 else 0.0
-            if move is not None and pull > 0.01:
-                lane, home, off = move
-                x0, y0, x1, y1 = part["lanes"][lane]
-                length = math.hypot(x1 - x0, y1 - y0)
-                start = x0 * dx + y0 * dy
-                u = home + ((at + off * band["width"] - start) / length - home) * 0.85 * pull
-                u = min(1.0, max(0.0, u))
-                tx[i], ty[i] = x0 + (x1 - x0) * u, y0 + (y1 - y0) * u
-            tb[i] *= 1 + (2.2 if move is not None else 1.2) * pull
-        elif move is None:
-            continue
-        elif motion == "flow":
-            k, phase, side, tail = move
-            path = part["paths"][k]
-            step = d * part["speed"] / path["length"] * (-1 if part["reverse"] else 1)
-            look = 1.35 - 0.85 * tail
-            if path["closed"]:
-                u = (phase + step) % 1
-            else:
-                c, hidden = (phase + step) % 1, part.get("hidden", HIDDEN_SHARE)
-                if c < hidden:
-                    x, y, _, _ = _along(path["points"], 1.0 if part["reverse"] else 0.0)
-                    tx[i], ty[i], tb[i] = x - form["size"][0] / 2, y - form["size"][1] / 2, 0.0
-                    continue
-                u = (c - hidden) / (1 - hidden)
-                look *= _ease(u, 0.0, 0.1) * (1 - _ease(u, 0.86, 1.0))
-                u = 1 - u if part["reverse"] else u
-            x, y, nx, ny = _along(path["points"], u)
-            s = side * part["spread"]
-            tx[i], ty[i] = x - form["size"][0] / 2 + s * nx, y - form["size"][1] / 2 + s * ny
-            tb[i] *= look
-        elif motion == "fall":
-            k, phase, side = move
-            x0, y0, x1, y1 = part["lanes"][k]
-            period = math.sqrt(2 * max(1.0, y1 - y0) / part["accel"]) / (1 - 0.25)
-            c = (phase + d / period) % 1
-            if c < 0.25:
-                tx[i], ty[i], tb[i] = x0 + 1.5 * side, y0, 0.0
-                continue
-            u = (c - 0.25) / 0.75
-            tx[i], ty[i] = x0 + side * (0.4 + 0.8 * u), y0 + (y1 - y0) * u * u
-            tb[i] *= _ease(u, 0.0, 0.15) * (1 - _ease(u, 0.8, 1.0)) * 1.2
-        elif motion == "fizz":
-            k, phase, sway = move
-            x0, y0, x1, y1 = part["lanes"][k]
-            length = math.hypot(x1 - x0, y1 - y0) or 1.0
-            period = length / part["rise"] / (1 - HIDDEN_SHARE)
-            c = (phase + d / period) % 1
-            if c < HIDDEN_SHARE:
-                tx[i], ty[i], tb[i] = x0, y0, 0.0
-                continue
-            u = (c - HIDDEN_SHARE) / (1 - HIDDEN_SHARE)
-            tx[i] = x0 + (x1 - x0) * u + 1.6 * sin(sway + 9 * u)
-            ty[i] = y0 + (y1 - y0) * u
-            tb[i] *= 1.5 * _ease(u, 0.0, 0.08) * (1 - _ease(u, 0.75, 1.0))
-    ahead = sum(lead) / len(lead) if lead and flying else 0.0
-    fly = flights(form, d + ahead) if flying else None
-    if fly:
-        # Each grain leads by its own time: the pose a moment later gives the velocity for the difference.
-        later = flights(form, d + ahead + 0.02) if lead else {}
-        for i in flying:
-            xx, yx, xy, yy, x0, y0 = fly[part_of[i]]
-            x, y = tx[i], ty[i]
-            tx[i], ty[i] = xx * x + xy * y + x0, yx * x + yy * y + y0
-            if part_of[i] in later:
-                xx, yx, xy, yy, x0, y0 = later[part_of[i]]
-                k = (lead[i] - ahead) / 0.02
-                tx[i] += (xx * x + xy * y + x0 - tx[i]) * k
-                ty[i] += (yx * x + yy * y + y0 - ty[i]) * k
-    # Synchronize living grains with the draw-on entrance so sparks ride the front and nothing appears ahead.
-    mat = form.get("material")
-    if mat and form.get("entrance", DIAGRAM_ENTRANCE) == "draw" and d < DRAW_START + DRAW_SECONDS + 0.35:
-        reach = (d - DRAW_START) / DRAW_SECONDS
-        grain_u = form["grain_u"]
-        bparts = mat["parts"]
-        settle = _ease(d, DRAW_START + DRAW_SECONDS, DRAW_START + DRAW_SECONDS + 0.25)
-        # Aim front-riders ahead by one spring trail so sparks sit directly on the glowing curve tip.
-        lead_u = 0.11 / DRAW_SECONDS
-        tip_u = max(0.0, min(1.0, reach + lead_u)) if reach > 0.0 else 0.0
-        tips = [_part_point_at(b, tip_u) for b in bparts]
-        for i in range(len(tx)):
-            pi = part_of[i]
-            if i % 6 == 0 and reach < 1.0 + 0.25 / DRAW_SECONDS:
-                px, py = tips[pi]
-                if reach <= 0.0:
-                    tx[i], ty[i] = px, py
-                    tb[i] *= _ease(d, 0.05, DRAW_START) * 0.85
-                elif reach < 1.0:
-                    tx[i], ty[i] = px, py
-                    tb[i] *= 1.65
-                else:
-                    tx[i] = px + (tx[i] - px) * settle
-                    ty[i] = py + (ty[i] - py) * settle
-                    tb[i] *= 1.65 - 0.65 * settle
-            else:
-                ahead_u = reach - grain_u[i]
-                if ahead_u <= 0.0:
-                    tb[i] = 0.0
-                else:
-                    seen = _ease(ahead_u, 0.0, 0.06)
-                    tip = math.exp(-((ahead_u / 0.035) ** 2))
-                    tb[i] *= seen * (1.0 + 1.2 * tip)
-    elif mat and form.get("step_switch"):
-        # Wake or dim stationary grains from each part's saved lit level; keep transiting swarm bright.
-        elapsed = d - form.get("start", 0.0)
-        if 0.0 <= elapsed < SWARM_LIGHT_END:
-            transit = form.get("transit") or ()
-            e_on = _ease(elapsed, SWARM_LIGHT_START, SWARM_LIGHT_END)
-            e_off = _ease(elapsed, SWARM_DIM_START, SWARM_DIM_END)
-            scale_by_part = {}
-            for pi, p in enumerate(parts):
-                lit_now = 1.0 if p.get("lit", False) else 0.0
-                was_lit = float(p.get("was_lit", 0.0))
-                if abs(lit_now - was_lit) > 1e-6:
-                    cur_v = was_lit + (lit_now - was_lit) * (e_on if lit_now > was_lit else e_off)
-                    cur_g = LIFE_GLOW[False] + (LIFE_GLOW[True] - LIFE_GLOW[False]) * cur_v
-                    scale_by_part[pi] = cur_g / LIFE_GLOW[bool(p.get("lit", False))]
-            if scale_by_part:
-                for i in range(len(tb)):
-                    if i not in transit:
-                        mul = scale_by_part.get(part_of[i])
-                        if mul is not None:
-                            tb[i] *= mul
-    return tx, ty, tb
-
-
-# The author's preview: a quick picture of the form as dust, in the dark theme's grain model, written to memory.
-
-def _preview_dir():
-    root = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/rook-render-{os.getuid()}"
-    folder = os.path.join(root, "rook-render")
-    os.makedirs(folder, mode=0o700, exist_ok=True)
-    os.chmod(folder, 0o700)
-    # Old previews go: anything older than PREVIEW_AGE seconds, and all but the newest PREVIEW_KEEP.
-    files = sorted((os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".png")),
-                   key=os.path.getmtime, reverse=True)
-    now = time.time()
-    for k, path in enumerate(files):
-        if k >= PREVIEW_KEEP or now - os.path.getmtime(path) > PREVIEW_AGE:
-            os.remove(path)
-    return folder
-
-
-def preview_png(form, d=1.5, zoom=2.0, path=None):
-    """Write the form as dust, d seconds into its motion, at zoom, and return the file's path."""
-    tx, ty, tb = targets(form, d)
-    w, h = form["size"]
-    pad = 56
-    width, height = int((w + 2 * pad) * zoom), int((h + 2 * pad) * zoom)
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    cr = cairo.Context(surface)
-    cr.set_source_rgb(0.075, 0.075, 0.09)
-    cr.paint()
-    cr.translate(width / 2, height / 2)
-    cr.scale(zoom, zoom)
-    rng = random.Random(3)
-    tones = [(0.95, 0.70, 0.28), (0.975, 0.81, 0.49), (1.0, 0.92, 0.70), (0.40, 0.76, 1.0)]
-    buckets = {}
-    for i in range(len(tx)):
-        base = (rng.uniform(0.85, 1.0) if rng.random() < 0.04 else rng.uniform(0.5, 0.8) if rng.random() < 0.1
-                else rng.uniform(0.18, 0.5))
-        colour = 3 if rng.random() < 0.09 else rng.randrange(3)
-        level = min(7, int(base * tb[i] * 0.9 * 7))
-        if level > 0:
-            buckets.setdefault((colour, level), []).append((tx[i], ty[i], 1.0 + 0.8 * base))
-    cr.set_operator(cairo.OPERATOR_ADD)
-    for (colour, level), grains in buckets.items():
-        for x, y, s in grains:
-            cr.rectangle(x - s / 2, y - s / 2, s, s)
-        cr.set_source_rgba(*tones[colour], level / 7)
-        cr.fill()
-    cr.set_operator(cairo.OPERATOR_OVER)
-    try:
-        import gi
-        gi.require_version("Pango", "1.0")
-        gi.require_version("PangoCairo", "1.0")
-        from gi.repository import Pango, PangoCairo
-    except (ImportError, ValueError):
-        PangoCairo = None
-    for label in form["labels"] if PangoCairo else ():
-        layout = PangoCairo.create_layout(cr)
-        px, spacing, _ = LABEL_TYPE[form["kind"]]
-        layout.set_font_description(Pango.FontDescription.from_string(f"Noto Serif Heavy {px * 0.75}"))
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_letter_spacing_new(int(spacing * Pango.SCALE)))
-        layout.set_attributes(attrs)
-        layout.set_text(label["text"].upper(), -1)
-        lw, lh = layout.get_pixel_size()
-        x = label["x"] - (lw / 2 if label["align"] == 0 else lw if label["align"] < 0 else 0)
-        cr.move_to(x, label["y"] - lh / 2)
-        PangoCairo.layout_path(cr, layout)
-        cr.set_source_rgba(0.035, 0.047, 0.10, 0.92)
-        cr.set_line_width(2.8 / zoom * 2)
-        cr.stroke_preserve()
-        cr.set_source_rgba(0.975, 0.81, 0.49, 0.9)
-        cr.fill()
-    if path is None:
-        key = hashlib.sha1(repr((form["name"], form["x"][:50], form["step"], form["budget"])).encode()).hexdigest()
-        path = os.path.join(_preview_dir(), f"{form['name']}-{key[:10]}.png")
-    surface.write_to_png(path)
-    return path
-
-
-def check(doc, budget=None, step=None, preview=True):
-    """What the author calls: validate, sample, and look. Returns {"ok": False, "errors": [...]} or {"ok": True,
-    "grains": {...}, "notes": [...], "preview": path, "ms": {...}}. budget None takes the scene's size."""
+def check(doc, budget=None, step=None):
+    """What the author calls: validate and sample. Returns {"ok": False, "errors": [...]} or {"ok": True,
+    "grains": {...}, "notes": [...], "ms": {...}}. budget None takes the scene's size."""
     started = time.perf_counter()
     scene, errors = validate(doc)
     lo, hi = LIMITS["budget"]
@@ -4462,10 +4082,6 @@ def check(doc, budget=None, step=None, preview=True):
     form = sample(scene, budget, step=step)
     out = {"ok": True, "grains": form["grains"], "notes": form["notes"],
            "ms": {"validate": round((checked - started) * 1000, 1), "sample": form["ms"]}}
-    if preview:
-        drawn = time.perf_counter()
-        out["preview"] = preview_png(form)
-        out["ms"]["preview"] = round((time.perf_counter() - drawn) * 1000, 1)
     return out
 
 
@@ -5119,19 +4735,9 @@ def _self_check(folder=None):
     led = sample(validate({"layout": "row", "nodes": [{**nodes[0], "lead": True}] + nodes[1:]})[0])
     light = lambda form: max(b for b, o in zip(form["bright"], form["owner"]) if o == "a")  # noqa: E731
     assert led["grains"]["a"] > plain["grains"]["a"] and light(led) > light(plain)
-    global OUTLINE_LOOK, MATERIAL
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 800, 400)
-    dense, MATERIAL = MATERIAL, False  # The drawn outline belongs to the look without material dust.
-    for look in (None, *OUTLINES):
-        OUTLINE_LOOK = look
-        draw_outline(cairo.Context(surface), sample(row), 400, 200, (1.0, 0.8, 0.5))
-        assert any(surface.get_data()) == bool(look), look
-    OUTLINE_LOOK = "clear"
-    # The turn's lead turns a grain further on, and nothing else.
-    gear = sample(validate({"parts": [{"id": "g", "rect": [30, 30, 40, 10], "motion": "turn"}]})[0])
-    plain, ahead = targets(gear, 1.0), targets(gear, 0.5, [0.5] * gear["budget"])
-    assert max(abs(a - b) for a, b in zip(plain[0], ahead[0])) < 1e-9
-    # A step moves a part: it flies there whole, its link follows, and the whole scene shows it as drawn again.
+    global MATERIAL
+    dense, MATERIAL = MATERIAL, False  # The steps below sample the look without material dust.
+    # A step moves a part: it keeps its grains, its link follows, and the whole scene shows it as drawn again.
     assert set(SCHEMA["$defs"]["step"]["properties"]) == set(STEP_KEYS) and SCHEMA["$defs"]["move"]
     three = [{"id": "a", "circle": [20, 50, 12]}, {"id": "b", "rect": [66, 38, 28, 24]},
              {"id": "c", "circle": [140, 50, 12]}]
@@ -5149,17 +4755,9 @@ def _self_check(folder=None):
     k = moving["parts"].index(next(p for p in moving["parts"] if p["id"] == "a"))
     assert moving["steps"][1]["parts"][k]["pose"] == moving["steps"][0]["parts"][k]["pose"]  # The move holds.
     assert moving["steps"][0]["parts"][-1]["args"] != moving["parts"][-1]["args"]  # The link is routed again.
-    start = targets(down, 0.0)
-    # It starts where it was: each grain within its line's width of its old place, and none drifts on average.
-    assert max(abs(start[1][i] - whole["y"][i]) for i in mine) < 6
-    assert abs(sum(start[1][i] - whole["y"][i] for i in mine) / len(mine)) < 0.5
-    assert not flights(down, FLIGHT) and targets(down, FLIGHT)[1] == down["y"]  # It lands, and then costs nothing.
-    turned = sample(moving, step=2, previous=sample(moving, step=1, previous=down))
-    now = _then(_pose_matrix(turned["parts"][index]["pose"]), flights(turned, FLIGHT / 2)[index])
-    assert abs(now[1] - 1.0) < 1e-9  # Half way through a half turn it has turned a quarter, clockwise.
     back = sample(moving, previous=down)
     assert back["parts"][index]["flight"] == (down["parts"][index]["pose"], None) and "pose" not in back["parts"][index]
-    # An engine moves by named strokes, and its rod holds the crank pin all the way through each flight.
+    # An engine moves by named strokes.
     strokes = [{"light": ["e.piston"], "move": {"e": pose}} for pose in stencils.POSES["engine"]]
     engine, errors = validate({"parts": [{"id": "e", "stencil": "engine", "at": [50, 50], "size": 90, "lead": True}],
                                "steps": strokes})
@@ -5167,12 +4765,6 @@ def _self_check(folder=None):
     form = sample(engine)
     for k, pose in enumerate(stencils.POSES["engine"]):
         form = sample(engine, step=k, previous=form)
-        ids = [p["id"] for p in form["parts"]]
-        crank, rod = ids.index("e.crank"), ids.index("e.rod")
-        _, _, _, pin, _, end, _, _ = form["parts"][crank]["engine"]
-        for u in (0.25, 0.5, 0.75):
-            fly = flights(form, u * FLIGHT)
-            assert math.dist(_apply(fly[crank], *pin), _apply(fly[rod], *end)) < 0.5, (pose, u)
         assert not form["notes"], form["notes"]  # A compound's own labels sit on its own parts on purpose.
     down = [p for p in engine["steps"][0]["parts"] if p["id"] == "e.piston"][0]["pose"]
     assert down[0][1] > 0 and [p for p in engine["steps"][1]["parts"] if p["id"] == "e.piston"][0]["pose"][0][1] == 0
@@ -5203,8 +4795,6 @@ def _self_check(folder=None):
         mat = quiet["material"]
         assert len(mat["parts"]) == len(linked["parts"])
         assert sample(linked, step=None, previous=quiet)["material"] is mat
-        _, glow, lits, _, _ = material_state(quiet, 5.0)
-        assert glow == [MAT_GLOW[False]] * len(linked["parts"]) and lits == [0.0] * len(linked["parts"])
         stepped, _ = validate({"view": [160, 100], "size": "diagram", "parts": three,
                                "steps": [{"light": ["a"]}, {"light": ["b", "c"], "move": {"b": {"to": [0, 20]}}}]})
         base_step = sample(stepped)
@@ -5226,10 +4816,6 @@ def _self_check(folder=None):
         assert {"b", "c"} == {lit2["owner"][i] for i, is_sw in enumerate(sw) if is_sw}
         # Returning to the whole scene spreads the swarm across all parts again.
         assert {"a", "b", "c"} == {whole_again["owner"][i] for i, is_sw in enumerate(sw) if is_sw}
-        _, g0, l0, _, _ = material_state(lit2, 0.0)
-        _, g1, l1, _, _ = material_state(lit2, 5.0)
-        assert l0 == [1.0, 0.0, 0.0] and g0[1] == MAT_GLOW[False]
-        assert l1 == [0.0, 1.0, 1.0] and g1[1] == MAT_GLOW[True]
         # Small lit part stays capped instead of swallowing the whole highlight swarm.
         tiny_doc, _ = validate({"view": [160, 100], "size": "diagram", "parts": [
             {"id": "tiny", "rect": [10, 10, 14, 14]},
@@ -5240,10 +4826,6 @@ def _self_check(folder=None):
         base_sw_tiny = sum(1 for i, is_sw in enumerate(t_base["swarm"]) if is_sw and t_base["owner"][i] == "tiny")
         lit_sw_tiny = sum(1 for i, is_sw in enumerate(t_lit["swarm"]) if is_sw and t_lit["owner"][i] == "tiny")
         assert lit_sw_tiny <= max(24, round(base_sw_tiny * SWARM_CAP)) and lit_sw_tiny < sum(t_base["swarm"]) // 2
-        # Mid-ramp was_lit preserves current lit level without flashing to 1.0 or 0.0.
-        lit2["parts"][0]["was_lit"] = 0.4
-        _, _, l_mid, _, _ = material_state(lit2, 0.0)
-        assert abs(l_mid[0] - 0.4) < 1e-6
         # Figure eight self-crossing: earlier arrival wins at the crossing point.
         fig8, errs = validate({"size": "diagram", "parts": [{
             "id": "eight", "path": "M 50 50 C 20 10 80 10 50 50 C 20 90 80 90 50 50 Z"}]})
@@ -5278,8 +4860,7 @@ def _self_check(folder=None):
             form = sample(scene, budget, box=BOX)
             assert len(form["x"]) == budget and sum(form["grains"].values()) == budget, name
             times.append(form["ms"])
-            tx, _, tb = targets(form, 2.3)
-            assert len(tx) == budget and all(math.isfinite(v) for v in tx + tb)
+            assert all(math.isfinite(v) for v in form["x"] + form["y"] + form["bright"])
         assert sample(scene, 640)["x"] == sample(scene, 640)["x"], name  # The same scene gives the same dust.
         if scene["steps"]:
             first = sample(scene, 640)
