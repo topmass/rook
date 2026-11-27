@@ -1740,6 +1740,16 @@ def _check():
     assert router.handle({"type": "talk_key", "action": "up", "key": "RightOption", "held": 0.2, "ts": 4.2}) == "ignored"
     assert log == ["start", "stop", "start", "stop", "start", "cancel"], log
 
+    # Mouse events carry timestamps, and an Option chord does not cancel a mouse hold.
+    for key in ("Mouse4", "Mouse5"):
+        event = {"type": "talk_key", "key": key}
+        assert router.handle({**event, "action": "down", "ts": 5.0}) == "started"
+        assert router.handle({**event, "action": "chord_cancel", "key": "RightOption", "ts": 5.2}) == "ignored"
+        assert router.handle({**event, "action": "up", "ts": 5.8}) == "stopped"
+        assert router.handle({**event, "action": "down", "ts": 6.0}) == "started"
+        assert router.handle({**event, "action": "up", "ts": 6.1}) == "toggled"
+        assert router.handle({**event, "action": "down", "ts": 7.0}) == "stopped"
+
     # find_session: live sockets only, newest first, and a variable that is set never changes.
     import socket
     import tempfile

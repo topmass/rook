@@ -60,6 +60,7 @@ ASSISTANT = "Rook"
 # listens, and another key pressed meanwhile means typing, so it does not listen.
 TALK_KEY_NAMES = ("RightAlt", "RightCtrl", "RightShift", "RightMeta", "CapsLock", "ScrollLock", "Pause", "Insert",
                   *(f"F{n}" for n in range(13, 25)))
+MAC_TALK_KEY_NAMES = ("RightAlt", "Mouse4", "Mouse5")
 CHORD_KEYS = ("RightAlt",)
 HOLD_KEYS = "RightAlt" if desk.IS_MAC else "RightCtrl,F15,F14"  # rook.py's --hold-key default: Right Option on a Mac.
 # Where Rook hands coding work: T3 Code (the default), Herdr, Pi, or none yet.
@@ -180,7 +181,8 @@ def valid(data):
             found[key] = value
         elif key in ("owner_name", "assistant_name") and isinstance(value, str) and re.fullmatch(OWNER_NAME_RULE, value.strip()):
             found[key] = value.strip()
-        elif key == "talk_keys" and isinstance(value, list) and all(name in TALK_KEY_NAMES for name in value):
+        elif key == "talk_keys" and isinstance(value, list) and all(
+                name in TALK_KEY_NAMES or desk.IS_MAC and name in MAC_TALK_KEY_NAMES for name in value):
             found[key] = list(dict.fromkeys(value))
         elif (key == "orchestrator" and value in ORCHESTRATORS or key == "screenshots" and value in SCREENSHOTS
               or key == "recogniser_model" and value in RECOGNISER_MODELS):
@@ -711,8 +713,13 @@ def render(text, owner=None, pronouns=None):
 def talk_keys_in_force(saved, flag):
     """Return (talk key names, source): the saved list while valid, else the --hold-key flag's comma list."""
     if "talk_keys" in valid({"talk_keys": saved.get("talk_keys")}):
-        return list(saved["talk_keys"]), "settings file"
-    return [name.strip() for name in (flag or "").split(",") if name.strip()], "--hold-key"
+        names, source = list(saved["talk_keys"]), "settings file"
+    else:
+        names = [name.strip() for name in (flag or "").split(",") if name.strip()]
+        source = "--hold-key"
+    if desk.IS_MAC and names:
+        names = [name for name in names if name in MAC_TALK_KEY_NAMES] or ["RightAlt"]
+    return names, source
 
 
 def fold(text):

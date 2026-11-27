@@ -685,10 +685,11 @@ def settings_command(argv):
         if not from_previous:  # A comma list of key names, or none for no talk key. +Key adds keys, -Key drops them.
             change, value = (value[0], value[1:]) if value[:1] in ("+", "-") else ("", value)
             names = [] if value.lower() == "none" else [name.strip() for name in value.split(",") if name.strip()]
-            fit = [next((k for k in settings.TALK_KEY_NAMES if fold(k) == fold(name)), None) for name in names]
+            available = settings.MAC_TALK_KEY_NAMES if desk.IS_MAC else settings.TALK_KEY_NAMES
+            fit = [next((k for k in available if fold(k) == fold(name)), None) for name in names]
             if None in fit:
                 leave(f"{names[fit.index(None)]} is not a talk key Rook knows. Choose from "
-                         f"{', '.join(settings.TALK_KEY_NAMES)}, or none.")
+                         f"{', '.join(available)}, or none.")
             if change:
                 held = settings.talk_keys_in_force(saved, settings.HOLD_KEYS)[0]
                 fit = held + fit if change == "+" else [k for k in held if k not in fit]
