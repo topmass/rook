@@ -109,12 +109,6 @@ static void emitJSON(NSDictionary *payload) {
 
 @end
 
-static NSDictionary *mouseTalkEvent(int64_t button, BOOL down, double ts) {
-    // Quartz numbers buttons from zero: left, right, middle, then the two side buttons.
-    NSString *key = button == 3 ? @"Mouse4" : button == 4 ? @"Mouse5" : nil;
-    return key ? @{@"type": @"talk_key", @"action": down ? @"down" : @"up", @"key": key, @"ts": @(ts)} : nil;
-}
-
 // Stand-in event source mode: tests TalkKeyMachine from stdin JSON lines with zero CoreGraphics or AppKit calls.
 static int runKeyTestMode(void) {
     TalkKeyMachine *machine = [[TalkKeyMachine alloc] initWithKeyCode:61];
@@ -143,12 +137,6 @@ static int runKeyTestMode(void) {
             out = [machine handleKeyDown:keyCode ts:ts];
         } else if ([event isEqualToString:@"tick"]) {
             out = [machine tick:ts];
-        } else if ([event isEqualToString:@"mouseDown"] || [event isEqualToString:@"mouseUp"]) {
-            id button = dict[@"button"];
-            if ([button respondsToSelector:@selector(longLongValue)]) {
-                NSDictionary *mouse = mouseTalkEvent([button longLongValue], [event isEqualToString:@"mouseDown"], ts);
-                if (mouse) emitJSON(mouse);
-            }
         }
         for (NSDictionary *item in out) {
             emitJSON(item);
@@ -166,15 +154,8 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
     (void)proxy;
     if (!userInfo) return event;
     EventTapHost *host = (__bridge EventTapHost *)userInfo;
-    double ts = [[NSProcessInfo processInfo] systemUptime];
-    if (type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp) {
-        NSDictionary *mouse = mouseTalkEvent(CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber),
-                                             type == kCGEventOtherMouseDown, ts);
-        if (mouse) emitJSON(mouse);
-        return event;
-    }
-    if (type != kCGEventFlagsChanged && type != kCGEventKeyDown) return event;
     int64_t keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    double ts = [[NSProcessInfo processInfo] systemUptime];
     NSArray<NSDictionary *> *emitted = @[];
     if (type == kCGEventFlagsChanged) {
         CGEventFlags flags = CGEventGetFlags(event);
@@ -218,8 +199,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
                    @"reason": @"Input Monitoring permission is not granted for Rook.app."});
         return NO;
     }
-    CGEventMask mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
-                     | CGEventMaskBit(kCGEventOtherMouseDown) | CGEventMaskBit(kCGEventOtherMouseUp);
+    CGEventMask mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown);
     _tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
                             mask, eventTapCallback, (__bridge void *)self);
     if (!_tap) {

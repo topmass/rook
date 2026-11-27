@@ -5287,8 +5287,9 @@ class Companion:
         """Fill the talk key sets in place from the talk_keys setting, else --hold-key, so the key reader uses them at
         once. Return the names. An unknown name raises ValueError."""
         names = relay.settings.talk_keys_in_force(saved, getattr(self.args, "hold_key", None))[0]
-        codes = ({name: getattr(ecodes, "KEY_" + name.upper(), None) for name in names}
-                 if not _desk.IS_MAC and ecodes is not None else {})
+        if _desk.IS_MAC:  # RookHelper hears Right Option only, whatever key was saved.
+            names = ["RightAlt"]
+        codes = {name: getattr(ecodes, "KEY_" + name.upper(), None) for name in names} if ecodes is not None else {}
         if bad := next((name for name, code in codes.items() if not isinstance(code, int)), None):
             raise ValueError(f"Unknown hold key {bad!r}. Use keys like RightCtrl,F15, or an empty value for none.")
         self.talk_keys.clear()
@@ -7478,11 +7479,6 @@ class Companion:
             except ValueError:
                 continue
             if isinstance(event, dict) and event.get("type") == "talk_key":
-                key = event.get("key") or "RightOption"
-                binding = "RightAlt" if key == "RightOption" else key
-                # Let a recording already in progress receive its release even if the binding changed.
-                if binding not in self.talk_key_names and (event.get("action") == "down" or key != router.key):
-                    continue
                 self.last_key = time.monotonic()
                 self.save_presence()
                 router.handle(event)
@@ -7490,7 +7486,7 @@ class Companion:
     async def run(self):
         # Restore any music left ducked by an earlier crash first, before voice, socket, or agent launch.
         await self.recover_media_duck()
-        use_keys = not _desk.IS_MAC and self.use_keys and ecodes is not None
+        use_keys = self.use_keys and ecodes is not None
         key = chord = None
         supers = modifiers = set()
         talk_keys, chord_keys = self.talk_keys, self.chord_keys  # Filled in place, so a setting change applies at once.
@@ -7516,11 +7512,12 @@ class Companion:
                 hint = f"Hold {names} to talk, or tap it to start and tap it again to send. "
             hint += f"Super+{letter.upper()}" + (f" or {self.args.key.upper()}" if key else "")
             hint += " starts a recording, and a second press sends it. Press and say nothing to silence Rook."
-        elif _desk.IS_MAC and self.use_keys:
-            hold_names = self.arm_talk_keys(relay.read_settings()[0])
-            names = " or ".join("Right Option" if name == "RightAlt" else name for name in hold_names)
-            hint = (f"Hold {names} to talk, or tap twice to start and send." if names
-                    else "Send requests through relay.py ask or the phone app.")
+        elif _desk.IS_MAC and self.use_keys:  # RookHelper reads the key; the names are what talk_keys reports.
+            saved = relay.read_settings()[0]
+            self.arm_talk_keys(saved)
+            hint = "Hold Right Option to talk, or tap it to start and tap it again to send."
+            if (wanted := relay.settings.talk_keys_in_force(saved, self.args.hold_key)[0]) != ["RightAlt"]:
+                hint += f" The saved talk key {', '.join(wanted) or 'none'} does not work on a Mac."
         else:
             hint = "Send requests through relay.py ask or the phone app."
         self._ready_hint = hint

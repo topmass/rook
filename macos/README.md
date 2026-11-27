@@ -18,10 +18,6 @@ Export `ROOK_OBSIDIAN_VAULT="$HOME/obsidian"` (or your own absolute vault path) 
 
 Use your talk key and say “Save this to Obsidian” followed by the note. By default, Rook creates or appends to `rook/YYYY-MM-DD.md` inside the vault. Export `ROOK_OBSIDIAN_FOLDER` before generating the LaunchAgent to choose a different top-level folder name. The `daily` folder name is reserved.
 
-## Mouse talk buttons
-
-With an updated Mac helper and Input Monitoring enabled, run `relay.py set talk_keys Mouse4` or `relay.py set talk_keys Mouse5` to use a mouse side button. To keep Right Option as a second binding, use `relay.py set talk_keys RightAlt,Mouse4`. Hold the button to talk, or tap once to start and again to send. The click still reaches the foreground app, so you can clear its WoW binding if you want the button dedicated to Rook.
-
 ## Helper build and dev signing
 
 Run `macos/RookHelper/build.sh` to compile and sign `~/Applications/Rook.app`. On first run, it creates a dedicated keychain at `~/Library/Keychains/rook-dev.keychain-db` (password stored with mode `0600` at `~/.config/rook/dev-keychain.pass`) and a self-signed `"Rook Dev"` code-signing certificate, without touching `login.keychain-db` or trust settings. Because the designated requirement binds to `com.rook.helper` and the certificate rather than a binary code hash, macOS keeps each grant across rebuilds.

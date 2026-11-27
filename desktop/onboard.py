@@ -515,6 +515,10 @@ def onboard_scan(as_tool=None):
     agent = saved.get("agent", "claude")
     print(f"System: {platform.system()}. Rook's agent: {AGENT_NAMES.get(agent, agent)}.")
     keys = settings.talk_keys_in_force(saved, settings.HOLD_KEYS)[0]
+    if desk.IS_MAC and keys != ["RightAlt"]:  # RookHelper hears Right Option only.
+        print(f"Talk keys saved: {', '.join(keys) or 'none'}, which do not work on a Mac. Say once: \"The talk key you "
+              "saved doesn't work on a Mac, so I listen for Right Option.\" The apply sets RightAlt.")
+        keys = ["RightAlt"]
     print(f"Talk keys now: {', '.join(keys) or 'none'}.")
     name, shown = None, False
     if keys:  # The overlay shows the key until Rook listens. No overlay: nothing.
@@ -698,12 +702,15 @@ def onboard_command(argv):
         sys.exit(f"{pronouns} are not pronouns Rook knows. Choose {', '.join(settings.OWNER_PRONOUNS)}.")
     # Left out, the talk keys and the permission mode keep what is saved (rook included), else the defaults.
     keys = settings.talk_keys_in_force(saved, settings.HOLD_KEYS)[0] if choices["key"] is None else None  # "Keep it".
-    available = settings.MAC_TALK_KEY_NAMES if desk.IS_MAC else TALK_KEYS
-    wanted = [available[0]] if choices["key"] is None else [k.strip() for k in choices["key"].split(",") if k.strip()]
-    key = [next((k for k in available if fold(k) == fold(name)), None) for name in wanted]  # Several keys: a comma list.
+    if desk.IS_MAC and keys is not None:
+        keys = ["RightAlt"]  # On a Mac, "keep it" keeps the only key RookHelper hears.
+    wanted = [TALK_KEYS[0]] if choices["key"] is None else [k.strip() for k in choices["key"].split(",") if k.strip()]
+    key = [next((k for k in TALK_KEYS if fold(k) == fold(name)), None) for name in wanted]  # Several keys: a comma list.
     if not key or None in key:
-        sys.exit(f"{choices['key']} is not a talk key Rook offers. Choose {', '.join(available)}.")
+        sys.exit(f"{choices['key']} is not a talk key Rook offers. Choose {', '.join(TALK_KEYS)}.")
     key = list(dict.fromkeys(key))
+    if desk.IS_MAC and choices["key"] is not None and key != ["RightAlt"]:  # RookHelper hears Right Option only.
+        sys.exit("On a Mac, Rook hears only Right Option for now, so give --key RightAlt or leave --key out.")
     mode = (saved.get("permission_mode", settings.PERMISSION_MODE) if choices["permissions"] is None
             else choices["permissions"].lower())
     if mode not in PERMISSION_MODES and not (choices["permissions"] is None and mode in settings.PERMISSION_MODES):
