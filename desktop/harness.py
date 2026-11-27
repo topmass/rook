@@ -241,6 +241,15 @@ def _write_wow_plugin(plugin, runtime_dir=None, wow=True):
     return target
 
 
+def bare_skill_names(text):
+    """Rook's own text naming its skills by bare name, such as delegate for rook:delegate: how Antigravity, Codex and Pi
+    list them. Only Claude Code lists plugin skills as rook:<name>. Only the name of a skill Rook ships changes, so
+    a path or a word such as rook:latest stays. Never pass it a person's words, a file or a tool's output."""
+    names = sorted({md.parent.name for folder in skill_sources(wow=True) for md in Path(folder).glob("*/SKILL.md")},
+                   key=len, reverse=True)
+    return re.sub(r"\brook:(" + "|".join(map(re.escape, names)) + r")(?![\w-])", r"\1", text) if names else text
+
+
 class Harness(ABC):
     """Base interface for Rook's main agent harnesses.
 
@@ -259,6 +268,7 @@ class Harness(ABC):
     narrate_thoughts = False  # Opt-in: emit {"type": "thought", "text": ...} from live thought chunks.
     narrate_beats = False  # Opt-in: prompt allows brief spoken beats between later tool calls.
     heard = 0  # Monotonic timestamp of the last message received from the agent.
+    rook_prefix = False  # True when the agent lists Rook's skills as rook:<name>. Otherwise they go by bare name.
 
     def __init__(self, model=None, effort=None):
         self.model, self.effort = model or self.model, effort or self.effort
@@ -305,6 +315,7 @@ class Harness(ABC):
 
 class Claude(Harness):
     name = "Claude Code"  # In "Claude Code closed" and other errors.
+    rook_prefix = True  # Its plugin skills list as rook:<name>.
     short = "Claude"  # In the permission card: "Claude requests Bash."
     # Its stream names a tool before the tool can run, so a request with no tool mark ran no tool.
     marks_tools_first = True

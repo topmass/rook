@@ -1,7 +1,6 @@
 ---
 name: onboarding
-description: Rook's first-run setup by voice, applied in one step, with a rehearsal mode that changes nothing. Use when the person asks to run, rehearse or test onboarding or setup.
-when_to_use: Trigger phrases include "run onboarding", "set yourself up", "walk me through setup", "do a dry run of setup", "rehearse onboarding as if I used Herdr".
+description: "Rook's first-run setup by voice, applied in one step, with a rehearsal mode that changes nothing. Use when the person asks to run, rehearse or test onboarding or setup, such as \"run onboarding\", \"set yourself up\", \"walk me through setup\", \"do a dry run of setup\" or \"rehearse onboarding as if I used Herdr\"."
 allowed-tools: Bash(⟦python⟧ ${CLAUDE_SKILL_DIR}/../../desktop/relay.py audition*), Bash(⟦python⟧ ${CLAUDE_SKILL_DIR}/../../desktop/relay.py onboard *), Bash(⟦python⟧ ${CLAUDE_SKILL_DIR}/../../desktop/relay.py herdr install*), Bash(⟦python⟧ ${CLAUDE_SKILL_DIR}/../../desktop/relay.py mac-access*), mcp__t3__t3_project_list, mcp__t3__orchestrator_capabilities
 ---
 

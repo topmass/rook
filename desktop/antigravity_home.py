@@ -4,7 +4,7 @@ Rook starts agy with --gemini-dir set to HOME. Antigravity then reads its person
 HOME/config, and the owner's own ~/.gemini stays untouched. Nothing private is copied here: the owner's files are linked
 or named by path.
 
-  config/plugins/rook/  skills/, rendered for Antigravity. The skills keep their names, such as rook:delegate.
+  config/plugins/rook/  skills/, rendered for Antigravity. They go by bare name, such as delegate, as agy lists them.
   config/AGENTS.md      a copy of the owner's global instructions, ~/.agents/AGENTS.md. A copy, so agy cannot change them.
   config/skills.json    Rook's own skills in ~/.config/rook/skills, and the active plugins' allowed host skills.
   config/hooks.json     `guard` below: Rook's denied tools and commands, then DCG on every run_command call.
@@ -576,7 +576,7 @@ def skills(target, wow=False):
                     .replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT / "plugin")))
             if rel.name == "SKILL.md":  # Claude Code's permission syntax. It means nothing to Antigravity.
                 text = re.sub(r"(?m)^allowed-tools:.*\n", "", text, count=1)
-            text = owned(edit(text, edits.pop(str(rel), []), f"{source.relative_to(ROOT)}/{rel}"))
+            text = harness.bare_skill_names(owned(edit(text, edits.pop(str(rel), []), f"{source.relative_to(ROOT)}/{rel}")))
             if left := [name for name in CLAUDE_ONLY if name in text]:
                 raise ValueError(f"{source.relative_to(ROOT)}/{rel} still names {left}. Add an entry to SKILLS in {__file__}.")
             out.write_text(text)
@@ -808,12 +808,15 @@ def check():
     with tempfile.TemporaryDirectory() as scratch:
         plain = Path(scratch) / "plain"
         skills(plain, wow=False)
-        for name in ("dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show"):
+        for name in ("about", "dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show"):
             assert (plain / name / "SKILL.md").read_text().startswith(f"---\nname: {name}\n")
+        # agy lists Rook's skills by bare name, so the rendered skills name each other that way too.
+        left = [str(f) for f in plain.rglob("*.md") if re.search(r"\brook:[a-z]", f.read_text())]
+        assert not left and "the delegate skill" in (plain / "settings/SKILL.md").read_text(), left
         assert not (plain / "wow").exists()
         with_wow = Path(scratch) / "wow"
         skills(with_wow, wow=True)
-        expected = ("dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show") + (("wow",) if has_wow_skill else ())
+        expected = ("about", "dark", "delegate", "extend", "forge", "media", "onboarding", "settings", "show") + (("wow",) if has_wow_skill else ())
         for name in expected:
             assert (with_wow / name / "SKILL.md").read_text().startswith(f"---\nname: {name}\n")
         if not has_wow_skill:

@@ -2156,16 +2156,8 @@ def _build_threads_prompt_section():
     count_word = {1: "one build thread", 2: "two build threads", 3: "three build threads"}.get(
         len(names), f"{len(names)} build threads"
     )
-    others = items[1:]
-    if others:
-        other_names = _join_names([k.capitalize() for k, _ in others], "or")
-        other_flags = _join_names([f"--to {k}" for k, _ in others], "or")
-        to_sentence = f"For {other_names}, put {other_flags} right after handoff. "
-    else:
-        to_sentence = ""
-    targets = "threadId " + _join_names([f"{tid} for {k.capitalize()}" for k, tid in items], "or")
-    local_env = watch.machines().get(watch.local_machine(), {}).get("environmentId")
-    env_part = f"environmentId {local_env}, " if local_env else ""
+    flags = _join_names([f"--to {k}" for k, _ in items], "or")
+    to_sentence = f"Always put the thread's name right after handoff: {flags}. "
     return (
         f"When {OWNER} asks you to improve, fix, or change how you work, look, or sound, or says to have {names_or} "
         f"work on something about you, hand it to a build thread. You have {count_word}, {names_and}, and "
@@ -2174,9 +2166,8 @@ def _build_threads_prompt_section():
         f"line says it is missing or unreadable. When {OWNER} names a "
         f"thread, {pn('his')} choice wins. Otherwise use the file's thread, or {names[0]} when it names none. Pass "
         f"any temporary build note from the file in the brief, clearly apart from {OWNER}'s words. When a "
-        f"temporary note's end has passed, ask {OWNER} once whether to keep it. When {OWNER} states a routing "
-        "or model preference, save it in that file only, not in the memory folder. Use your file edit "
-        f"tool, mark any temporary preference as temporary with its reason and end, and tell {OWNER}. "
+        f"temporary note's end has passed, ask {OWNER} once whether to keep it. A routing or model preference that "
+        f"{OWNER} states goes in that file only, as the rook:delegate skill's model steps say. "
         "A follow-up goes to the "
         "thread that already holds that work. A question to look into, even about your voice or "
         "tools, is research: answer it yourself or follow the rook:delegate skill's research steps. "
@@ -2184,16 +2175,7 @@ def _build_threads_prompt_section():
         f"them, what you think {pn('he means', 'they mean')}, and anything you saw or know that the builders need. Run "
         f"{_desk.python_exe()} {ROOT}/desktop/relay.py handoff --print --work \"<wish>\" - with the brief on stdin. "
         + to_sentence +
-        "That call adds the work entry and its number. It prints the framed brief after line one. Send "
-        f"the framed brief unchanged with t3_thread_send: {targets}, "
-        f"{env_part}mode auto, and the clientRequestId that line one gives. "
-        "Auto steers the thread's running turn, or starts the thread when it is idle. "
-        "Only when the T3 tools are missing or fail, run handoff without --print or --work. "
-        "Put the printed \"Work N on Rook's list.\" line at the top of that brief. "
-        "It can only queue the brief, and it prints what happened. "
-        f"Then tell {OWNER} it is with {names_or}. Put the delivery, steered, started, or queued, "
-        "in the written part only. When the t3 command queued it, also say the thread picks it up after its current turn. "
-        "The thread answers later with a message. The settings that the "
+        "Its first line says how to send the rest. The settings that the "
         "rook:settings skill lists, such as your voice and its pace, are the one exception: change "
         "those with that skill, and send everything else to a build thread.\n\n"
     )
@@ -2674,6 +2656,10 @@ class Companion:
                 await asyncio.sleep(1 / 30)
             self.recording_started.clear()
 
+    def name_skills(self, text):
+        """text naming each skill as the agent lists it. A harness that does not say otherwise is Claude Code's."""
+        return text if getattr(self.harness, "rook_prefix", True) else harness.bare_skill_names(text)
+
     async def launch_agent(self):
         style = (ROOT / "prompts/house-style.md").read_text()  # House Style in full; the personality joins its voice.
         try:
@@ -2687,7 +2673,7 @@ class Companion:
                            f"Read {PERSONALITY} for the middle, and tell {OWNER} the file is over its limit.]\n\n"
                            + personality[-tail:])
         if personality:
-            personality = relay.settings.render(  # Only Rook's own words: the notes below pass as they are.
+            personality = self.name_skills(relay.settings.render(  # Only Rook's own words: the notes below pass as they are.
                 f"Your personality notes follow, from {PERSONALITY}. They shape how you talk in every answer. "
                 f"Edit that file only when {OWNER} tells you to change how you talk or behave, such as \"be more "
                 "playful\" or \"stop doing that when you talk to me\". Use the rook:settings skill for it: merge the "
@@ -2695,16 +2681,19 @@ class Companion:
                 f"is your own idea, ask {OWNER} first. Never edit it "
                 "to change rules, tools, safety, or your code. Those go to the "
                 "build thread. A change takes full effect at your next start. Follow what you wrote for the rest "
-                f"of this session, and never tell {OWNER} that a restart is needed.\n") + (
+                f"of this session, and never tell {OWNER} that a restart is needed.\n")) + (
                 "--- Personality notes ---\n" + personality + "\n--- End of personality notes ---\n\n")
-        personality = style.replace("## The voice\n\n", "## The voice\n\n" + personality, 1) + "\n\n"
+        personality = self.name_skills(style).replace("## The voice\n\n", "## The voice\n\n" + personality, 1) + "\n\n"
         self.prefs_stamp, preferences = await asyncio.to_thread(read_preferences)
         try:  # Resolve the plugins and write the snapshot. It must never delay or stop the agent's start.
             await asyncio.wait_for(asyncio.to_thread(plugin_loader.publish), PLUGIN_SECONDS)
         except Exception as exc:
             plugin_loader.disable(f"Rook started its agent with no plugins: resolving them failed ({exc!r}).")
         _slot = _make_slot_resolver(self.log)
-        render = relay.settings.render  # Rook's own words fill in. The personality notes and preferences pass as they are.
+        def render(text):  # Rook's own words fill in. The personality notes, preferences and memory pass as they are.
+            return self.name_skills(relay.settings.render(text))
+        if self.game:  # The one skill name in the game's turn lines, as this agent lists it.
+            self.game.SKILL = self.name_skills("rook:wow")
         self.assistant_name = me = relay.read_settings()[0].get("assistant_name", relay.settings.ASSISTANT)
         prompt = (render(f"You are {me}, a voice assistant that lives on {OWNER}'s "
                   + (_slot("identity_desktop") or "desktop") + ". "
@@ -2782,8 +2771,7 @@ class Companion:
                   f"3:30pm when {pn('he names', 'they name')} an end. Then end your turn and write nothing more, even if {pn('he repeats', 'they repeat')} "
                   f"{pn('himself')}. When {pn('he also asks', 'they also ask')} for something else, do that first, and put its answer in that line, "
                   "such as \"Your meeting is at three. Going dark for an hour.\" For anything else about dark, such "
-                  "as coming back online, use the rook:dark skill. While you are dark, each request says so: answer "
-                  "only that request, mention nothing that waits, and stay dark.\n\n"
+                  "as coming back online, use the rook:dark skill.\n\n"
                   f"Once after each restart, you get a startup turn, and its first line says so. {OWNER_START} did "
                   f"not say it. Follow its instructions for the report you give {pn('him')}.\n\n"
                   "Each request also carries a line with the local time and day, and a line that says when your "
@@ -2807,6 +2795,8 @@ class Companion:
                   f"To show {OWNER} a picture or a video on {pn('his')} screen, use the rook:show skill.\n\n"
                   "To check, pause, play, or toggle media in Chromium, Spotify, VLC, or mpv, use the rook:media skill or relay.py media.\n\n"
                   "To design or bake a new animated icon or theme for your presence, use the rook:forge skill.\n\n"
+                  f"When {OWNER} asks how you work inside or where something of yours is kept, read the rook:about "
+                  "skill before you search your code. A request to change you goes to a build thread without it.\n\n"
                   f"When {OWNER} names a skill outside your list, read ~/.agents/skills/<name>/SKILL.md once "
                   "and follow it for that request.\n\n"
                   + _slot("skills") +  # Additive paragraph slot: fragment must end with "\n\n".
@@ -2819,12 +2809,13 @@ class Companion:
                   "Then say in one sentence what you are looking at, and take that time. Thoroughness wins "
                   "over the clock. Do not start subagents. When one source lacks the answer, try another, and "
                   "say what is unconfirmed. Work that takes more than a minute or two still goes to a thread. "
-                  "Taking your time is never a reason to change a system on a guess.\n\n"
-                  + (memory.startup_prompt(_desk.python_exe(), ROOT / "desktop/relay.py") or
+                  "Taking your time is never a reason to change a system on a guess.\n\n")
+                  # The memory section holds the person's remembered facts, so it passes as it is.
+                  + (memory.startup_prompt(_desk.python_exe(), ROOT / "desktop/relay.py") or render(
                      "Your memory is the agent memory folder that your session start message names. Before "
                      f"you answer from memory, read the notes that relate. When {OWNER} states a goal or a "
                      f"standing preference, or asks you to remind {pn('him')} of something, save it there, following "
-                     "your global instructions. Keep notes short.\n\n") +
+                     "your global instructions. Keep notes short.\n\n")) + render(
                   f"A setup message at the start of a session may contain your recent conversation with {OWNER} "
                   "as text. It is your memory of that conversation. Old screenshots are not kept. Anything "
                   "that should last longer than a few conversations belongs in your memory folder.\n\n"
@@ -2903,7 +2894,7 @@ class Companion:
                  **{spec["name"]: spec["eager_tools"] for spec in plugin_loader.servers() if spec["name"] in servers}}
         later = ((["the render tools show_scene, show_step and clear_scene"] if uv else [])
                  + (["the other T3 tools"] if t3 else []) + (["the other wow game-data tools"] if game else []))
-        setup = self.harness.setup(start, later, self.game)
+        setup = self.name_skills(self.harness.setup(start, later, self.game))
         if replay:
             setup += (f"\n\nYour recent conversation with {OWNER}, as text, oldest first, for continuity:\n\n"
                       + "\n\n".join(replay) + "\n\nThen reply ready.")
@@ -7378,7 +7369,7 @@ class Companion:
             await self.submit(f"Thread {item.get('thread') or 'unknown'} showed " + render(f"{OWNER} ") + f"{what} in "
                               f"your media viewer just now. The file is {item['path']}. " + render(
                                   f"{OWNER_START} has not seen it before, so give one clause of context about what it "
-                                  "is, then react as the rook:show skill says. Do not describe it. When the title does "
+                                  "is, then react as the " + self.name_skills("rook:show") + " skill says. Do not describe it. When the title does "
                                   f"not tell you what it is, look at the file first. The viewer stays until {OWNER} "
                                   "closes it.")
                               + (f"\n\nThe thread's note about it: {item['note']}\n" + render(
@@ -8460,8 +8451,8 @@ def check_restart():
             # Three build threads -> names, ids, and --to flags all populated from settings.
             relay.BUILD_THREADS = {"fable": "mcp:t-f", "opus": "mcp:t-o", "neon": "mcp:t-n"}
             full_sec = _build_threads_prompt_section()
-            assert "Fable, Opus, or Neon" in full_sec and "For Opus or Neon, put --to opus or --to neon" in full_sec
-            assert "threadId mcp:t-f for Fable, mcp:t-o for Opus, or mcp:t-n for Neon" in full_sec
+            assert "Fable, Opus, and Neon" in full_sec and "--to fable, --to opus, or --to neon" in full_sec
+            assert "mcp:t-" not in full_sec, full_sec  # The names only: line one of handoff --print gives the id.
         finally:
             watch.socket.gethostname = old_host
             relay.settings.CONFIG = relay.CONFIG = old_cfg
@@ -8783,6 +8774,7 @@ def check_agent():
         import agy_harness
         import antigravity_home
         import codex_harness
+        import pi_harness
         global MODEL_PREFERENCES, read_preferences, t3_server
         real_prefs, real_read, real_exec, real_t3 = (
             MODEL_PREFERENCES, read_preferences, asyncio.create_subprocess_exec, t3_server)
@@ -8843,15 +8835,17 @@ def check_agent():
                     log=((lambda event, **fields: log_rows.append((event, fields)))
                          if log_rows is not None else (lambda *a, **k: None)),
                     show=lambda *a, **k: None,
-                    harness=(harness.Claude() if kind == "claude"
-                             else agy_harness.Antigravity() if kind == "antigravity" else codex_harness.Codex()))
+                    harness=(harness.Claude() if kind == "claude" else agy_harness.Antigravity() if kind == "antigravity"
+                             else pi_harness.Pi() if kind == "pi" else codex_harness.Codex()))
                 if roster:
                     c.roster = roster
                 c.exit.set()
                 await c.launch_agent()
                 c.warming = False
-                if kind == "claude":
+                if kind in ("claude", "pi"):
                     session_prompt = launched[0][launched[0].index("--append-system-prompt") + 1]
+                    if kind == "pi":
+                        c.harness.running = None  # The setup turn's end, so the next turn goes out at once.
                 elif kind == "antigravity":
                     list(c.harness.handle({"id": 1, "result": {}}))
                     new_req = next(m for m in written if m.get("method") == "session/new")
@@ -8867,11 +8861,14 @@ def check_agent():
                     list(c.harness.handle({"id": 5, "result": {"turn": {"id": "t-setup", "status": "inProgress", "items": []}}}))
                     list(c.harness.handle({"method": "turn/completed", "params": {"threadId": "thr-1",
                                           "turn": {"id": "t-setup", "status": "completed", "items": []}}}))
+                c.check_setup = list(written)  # What went out before the first turn, the setup turn among it.
                 written.clear()
                 return c, session_prompt, written
 
             def turn_text(kind, written):
                 msg = written[-1]
+                if kind == "pi":
+                    return msg["message"]
                 if kind == "claude":
                     return msg["message"]["content"][-1]["text"]
                 if kind == "antigravity":
@@ -9576,15 +9573,53 @@ def check_agent():
                 global PERSONALITY
                 real_personality = PERSONALITY
                 PERSONALITY = Path(folder) / "personality-tokens.md"
-                PERSONALITY.write_text("Call ⟦owner⟧ by ⟦his⟧ first name.\n")
-                prefs_path.write_text("Send ⟦owner⟧'s builds to Opus.\n")
+                PERSONALITY.write_text("Call ⟦owner⟧ by ⟦his⟧ first name. My rook:settings note stays.\n")
+                prefs_path.write_text("Send ⟦owner⟧'s builds to Opus. Prefer rook:settings for voices.\n")
+                # Only Rook's own words name skills as the agent lists them. The person's personality, preferences,
+                # memory and spoken words, a thread's message and a path pass byte for byte, even with rook: in them.
+                # Each names a skill Rook ships, so a rewrite of the whole prompt would change it. Rook's own memory
+                # is forced on, so the memory case runs on a machine in shared-memory mode too.
+                real_shared, memory.is_shared = memory.is_shared, lambda: False
+                mem_index = memory.memory_dir() / "MEMORY.md"
+                mem_index.parent.mkdir(parents=True, exist_ok=True)
+                mem_index.write_text("- The rook:show tag means a test build.\n")
+                person = ["My rook:settings note stays.", "Prefer rook:settings for voices.",
+                          "The rook:show tag means a test build."]
+                said = "Tag rook:latest, then ssh://rook:pw@host, and open /tmp/rook:demo.png. Use rook:show."
+                game_ns = SimpleNamespace(NO_INPUT="", CODE_CHECK=", keys, or the mock add-on", UNSPOKEN_EVENTS="",
+                                          PROMPT="Mock game: load the rook:wow skill.\n\n", SKILL="rook:wow")
                 try:
-                    for kind in ("claude", "antigravity", "codex"):
-                        _, sp, _ = await start_session(kind)
+                    claude_named = None
+                    for kind in ("claude", "antigravity", "codex", "pi"):
+                        # The public copy has no game part, so its check runs with no game.
+                        c, sp, written = await start_session(kind, game=game_ns if (ROOT / "wow").is_dir() else None)
                         assert "Call ⟦owner⟧ by ⟦his⟧ first name." in sp and "Send ⟦owner⟧'s builds to Opus." in sp, kind
                         assert sp.count("⟦") == 3, (kind, relay.settings.TOKEN.findall(sp))
+                        assert all(text in sp for text in person), (kind, [s for s in person if s not in sp])
+                        own = sp
+                        for text in person:
+                            own = own.replace(text, "")
+                        bare = kind != "claude"  # Claude Code lists rook:<name>; the others list the bare name.
+                        if not bare:
+                            claude_named = set(re.findall(r"\brook:([a-z][a-z0-9-]*)", own))
+                            missing = {name for name in claude_named if not any((folder / name / "SKILL.md").is_file()
+                                       for folder in (ROOT / "skills", ROOT / "wow/skills", *ROOT.glob("plugins/*/skills")))}
+                            assert claude_named and not missing, (kind, missing)
+                        else:
+                            assert not re.findall(r"\brook:[a-z]+", own), (kind, re.findall(r"\brook:[a-z]+", own))
+                            assert all(f"the {name} skill" in own for name in claude_named), (kind, claude_named)
+                        setup = json.dumps(c.check_setup, ensure_ascii=False)
+                        assert not harness._has_skill("wow") or (  # The public tree ships no wow skill.
+                            ("load the wow skill" in setup and "rook:wow" not in setup) if bare else (
+                                "load the rook:wow skill" in setup)), (kind, setup[:300])
+                        assert not (ROOT / "wow").is_dir() or game_ns.SKILL == ("wow" if bare else "rook:wow"), (kind, game_ns.SKILL)
+                        assert c.name_skills("the rook:show skill") == ("the show skill" if bare else "the rook:show skill")
+                        await c.submit(said, source="spoken")
+                        assert said in turn_text(kind, written), (kind, turn_text(kind, written)[-200:])
                 finally:
                     PERSONALITY = real_personality
+                    memory.is_shared = real_shared
+                    mem_index.unlink(missing_ok=True)
                 # Ordered prompt slots: verbatim splice, placeholder substitution, brace safety, fallback conflicts,
                 # error resilience, and harness prompt rewrites across all three harnesses.
                 assert PROMPT_SLOTS == (
@@ -12969,7 +13004,7 @@ def check_journal():
             with contextlib.redirect_stdout(out):
                 relay.handoff_command(["--print", "--work", wish, brief])
             first, framed = out.getvalue().split("\n", 1)
-            assert first.startswith("Added work ") and " Send it with clientRequestId rook-" in first, first
+            assert first.startswith("Added work ") and " clientRequestId rook-" in first, first
             return first.rsplit(" ", 1)[1].rstrip("."), framed.strip()
 
         old_bt = (relay.BUILD_THREAD, relay.OPUS_THREAD, dict(relay.BUILD_THREADS))
@@ -13037,7 +13072,7 @@ def check_journal():
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 relay.handoff_command(["--print", f"{OWNER_START} said: say hello."])
             twice.append(out.getvalue().split("\n", 1)[0])
-        assert twice[0] != twice[1] and all(line.startswith("Send it with clientRequestId rook-") for line in twice)
+        assert twice[0] != twice[1] and all(line.startswith("This goes to the build thread named ") and " clientRequestId rook-" in line for line in twice)
         # Two handoffs to one build thread: two keys, two rows, each settled by its own result.
         key2, framed2 = handoff("fix the dust", f"{OWNER_START} said: fix the dust.")
         assert key2 != key
@@ -13058,7 +13093,7 @@ def check_journal():
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             relay.handoff_command(["--again", key])
-        assert out.getvalue() == f"Send it with clientRequestId {key}.\n{framed}\n"
+        assert out.getvalue().endswith(f" clientRequestId {key}.\n{framed}\n") and "threadId " in out.getvalue()
         assert sends(c)[key]["outcome"] is None and sends(c)[key]["told"] == "missing"
         # The agent sends it again with that key: the row settles, and a later start tells nothing more.
         await c.submit("Yes, send it.", source="spoken")

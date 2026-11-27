@@ -605,7 +605,7 @@ argv = harness.Claude().command("p", servers, "s", root / "plugin", ())
 dirs = [argv[at + 1] for at, word in enumerate(argv) if word == "--plugin-dir"]
 claude = {key: text for at, folder in enumerate(dirs) for key, text in listed(Path(folder) / "skills", ("rook:", "rook-user:")[at]).items()}
 home = antigravity_home.build()
-agy = listed(home / "config/plugins/rook/skills", "rook:")
+agy = listed(home / "config/plugins/rook/skills", "")  # agy lists Rook's skills by bare name, as its live record shows.
 for entry in json.loads((home / "config/skills.json").read_text())["entries"]:
     agy.update({key: text for key, text in listed(entry["path"], "user:").items()
                 if "include_only" not in entry or key[5:] in entry["include_only"]})

@@ -948,6 +948,59 @@ def check_settings():
     left = {where: sorted({m.group(1) for m in word.finditer(text)}) + settings.unknown_tokens(text)
             for where, text in texts.items() if word.search(text) or settings.unknown_tokens(text)}
     assert not left, left
+    # Every shipped skill is found on every agent. Antigravity, Codex and Pi show only a skill's name and description,
+    # so its triggers live in description, as quoted example phrases, within the Agent Skills limit of 1,024
+    # characters (Pi's; Claude Code cuts at 1,536), even with the longest owner name. The front matter must be strict
+    # YAML: Codex and Pi parse it as such.
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    for f in [*(root / "skills").glob("*/SKILL.md"), *(root / "wow/skills").glob("*/SKILL.md"),
+              *(root / "plugins").glob("*/skills/*/SKILL.md")]:
+        head = f.read_text().split("\n---\n", 1)[0].removeprefix("---\n")
+        if yaml:
+            front = yaml.safe_load(head)
+        else:  # Without PyYAML, a description must at least be one quoted string, which is valid YAML as JSON is.
+            front = {k: json.loads(v) if k == "description" else v for k, v in re.findall(r"(?m)^([a-z_-]+): (.*)$", head)}
+        assert isinstance(front, dict) and isinstance(front.get("description"), str), f"{f}: no description"
+        assert "when_to_use" not in front, f"{f}: put its triggers in description, the field every agent shows"
+        assert re.search(r'"[^"]{3,}"', front["description"]), f"{f}: description gives no quoted trigger phrase"
+        shown = len(settings.render(front["description"], "N" * 40, "they"))
+        assert shown <= 1024, f"{f}: description is {shown} characters, over 1,024"
+    # The about skill stays true. Each path it names exists. Each relay.py command it names is in relay.py's command
+    # table, main(). Each class, function or constant it names is defined in a file named on the same line. Each skill
+    # it names has a folder. It names no setting key, since rook:settings owns those.
+    about = (root / "skills/about/SKILL.md").read_text()
+    code = "\n".join(f.read_text() for f in (root / "desktop").glob("*.py"))
+    table = ast.get_source_segment(Path(__file__).read_text(), next(
+        n for n in ast.parse(Path(__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "main"))
+    commands = {"--help", *re.findall(r'sys\.argv\[1\] == "([a-z-]+)"', table),
+                *(w for group in re.findall(r"sys\.argv\[1\] in \(([^)]*)\)", table) for w in re.findall(r'"([a-z-]+)"', group))}
+    stale = [s for s in re.findall(r"\brook:([a-z][a-z0-9-]*)", about) if not any(
+        (d / s / "SKILL.md").is_file() for d in (root / "skills", root / "wow/skills", *root.glob("plugins/*/skills")))]
+    stale += [c for c in re.findall(r"relay\.py ([a-z-]+)", about) if c not in commands]
+    for line in about.splitlines():
+        items = re.findall(r"`([^`\s]+)`", line)
+        files = [root / i for i in items if re.fullmatch(r"desktop/\w+\.py", i)]
+        for item in items:
+            if item.startswith(("desktop/", "skills/", "plugins/", "prompts/", "themes/")):
+                ok = (root / item).exists()
+            elif item.startswith("~/"):
+                ok = "/rook" not in item or item.rstrip("/").split("/rook", 1)[1].strip("/") in (
+                    "", *re.findall(r"rook/([\w/.-]+)", code))
+            elif m := re.fullmatch(r"([A-Z]\w*)(?:\.(\w+))?", item):
+                defined = [f.read_text() for f in files if f.is_file()]
+                ok = any(re.search(rf"(?m)^(class {m[1]}\b|{m[1]} = )", src) and (
+                    m[2] is None or re.search(rf"(?m)^    (async )?def {m[2]}\(", src)) for src in defined)
+            elif re.fullmatch(r"[\w.-]+\.(json|jsonl|db|md|sock)|rook-[a-z]+|[a-z]+/", item):
+                ok = item.rstrip("/") in code
+            else:
+                ok = True  # A command line or a pattern such as rook:<name>.
+            assert item not in settings.KNOWN_SETTINGS_KEYS, f"skills/about names the setting {item}: name rook:settings instead"
+            if not ok:
+                stale.append(item)
+    assert not stale, f"skills/about names what no longer exists: {stale}"
     assert points_to_engine("voice_pace", 100) == -0.5
     assert points_to_engine("voice_pace", 1) == 0.49
     assert points_to_engine("voice_volume", 0) == 0.0
@@ -4133,8 +4186,11 @@ def check():
                 first_line, rest = comb_res.stdout.split("\n", 1)
                 key_line, printed_rest = print_res.stdout.split("\n", 1)
                 # Each run prints a key of its own: the same brief sent twice on purpose is two messages.
-                key = re.fullmatch(r"Send it with clientRequestId (rook-[0-9a-f]{24})\.", key_line)
-                assert key and first_line.startswith("Added work 1, drafted. Send it with clientRequestId rook-")
+                # Line one says how to send the brief, with the thread id from settings, and ends on its key.
+                key = re.fullmatch(r"This goes to the build thread named \w+\. When the T3 tools are missing or fail, .* call t3_thread_send with threadId "
+                                   + re.escape(thread_id) + r", .*mode auto, .* clientRequestId (rook-[0-9a-f]{24})\.", key_line)
+                assert key and first_line.startswith("Added work 1, drafted. This goes to the build thread named ")
+                assert f"threadId {thread_id}," in first_line and "\"Work 1 on Rook's list.\" above" in first_line, first_line
                 assert key.group(1) not in first_line, (first_line, key_line)
                 assert rest == printed_rest, (rest, printed_rest)
                 assert "Work 1 on Rook's list.\n\n" in rest, rest
@@ -4523,18 +4579,30 @@ def handoff_description(text):
     return " ".join(re.sub(r"\bWork \d+ on Rook's list\.", "", text).split())[:120]
 
 
+def handoff_send_line(key, thread, number=None):
+    """Line one of a printed handoff: how to send the brief below it, so Rook's prompt names no thread id. The key
+    ends the line."""
+    env = watch.machines().get(watch.local_machine(), {}).get("environmentId")
+    again = (f"with \"Work {number} on Rook's list.\" above your brief" if number else "with the same brief")
+    name = next((name for name, tid in active_build_threads().items() if tid == thread), None)
+    return ((f"This goes to the build thread named {name.capitalize()}. " if name else "")
+            + f"When the T3 tools are missing or fail, run handoff again without --print or --work, {again}. Otherwise "
+            f"call t3_thread_send with threadId {thread}, " + (f"environmentId {env}, " if env else "")
+            + f"mode auto, everything after this line unchanged, and clientRequestId {key}.")
+
+
 def handoff_again(key):
     """Print a handoff that did not reach its thread, with its key, to send again unchanged."""
     import journal
     if key.startswith("cli-"):
         sys.exit("T3 never saw a key for a command-line send, so a second send would be a second message.")
-    rows = record_send(lambda conn: conn.execute("SELECT brief, told FROM sends WHERE client = ? AND key = ? AND "
-                                                 "brief IS NOT NULL", (journal.CLIENT, key)).fetchall())
+    rows = record_send(lambda conn: conn.execute("SELECT brief, told, thread, work FROM sends WHERE client = ? AND "
+                                                 "key = ? AND brief IS NOT NULL", (journal.CLIENT, key)).fetchall())
     if not rows:
         sys.exit("Rook keeps no brief under that key: it was settled or never saved.")
     if rows[0][1] == "unknown":
         sys.exit("That handoff may have arrived, so Rook does not send it again.")
-    print(f"Send it with clientRequestId {key}.")
+    print(handoff_send_line(key, rows[0][2], rows[0][3]))
     print(rows[0][0])
 
 
@@ -4630,7 +4698,8 @@ def handoff_command(argv):
             "UPDATE sends SET outcome = 'superseded', settled = ?, brief = NULL WHERE client = ? AND tool = 'handoff' "
             "AND outcome IS NULL AND thread = ? AND work = ?", (time.time(), journal.CLIENT, build_thread, number)))
     if printed:
-        print(f"{added_line + ' ' if added_line else ''}Send it with clientRequestId {key}.")
+        print(f"{added_line + ' ' if added_line else ''}"
+              + handoff_send_line(key, build_thread, entry["id"] if wish is not None else work.named(text)))
         print(message)
         return
     try:

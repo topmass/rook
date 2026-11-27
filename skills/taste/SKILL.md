@@ -1,7 +1,6 @@
 ---
 name: taste
-description: Rook's design judgment for anything people look at, such as an icon, a theme, a diagram, a card or a page, and for critiques of how something looks. Use before designing or judging anything visual, and when ⟦owner⟧ asks what Rook thinks of a look.
-when_to_use: Trigger phrases include "design an icon", "make a theme", "draw a diagram", "how does this look", "critique this visual". Skip it for code, architecture or prose.
+description: "Rook's design judgment for anything people look at, such as an icon, a theme, a diagram, a card or a page, and for critiques of how something looks. Use before designing or judging anything visual, and when ⟦owner⟧ asks what Rook thinks of a look, such as \"design an icon\", \"make a theme\", \"draw a diagram\", \"how does this look\" or \"critique this visual\". Skip it for code, architecture or prose."
 ---
 
 # Taste

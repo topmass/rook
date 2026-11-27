@@ -1,7 +1,6 @@
 ---
 name: forge
-description: Design Rook's own icons and themes into ⟦owner⟧'s own theme packs, as gold dust forms by default or as Nova shaders. Use when ⟦owner⟧ asks for a new icon, a new thinking icon, a variation on one, or a whole new theme for Rook's presence.
-when_to_use: Trigger phrases include "make me a new thinking icon", "design an icon for", "make a theme", "I want a new look for when you", "try another version of that icon", "use my theme".
+description: "Design Rook's own icons and themes into ⟦owner⟧'s own theme packs, as gold dust forms by default or as Nova shaders. Use when ⟦owner⟧ asks for a new icon, a new thinking icon, a variation on one, or a whole new theme for Rook's presence, such as \"make me a new thinking icon\", \"design an icon for\", \"make a theme\", \"I want a new look for when you\", \"try another version of that icon\" or \"use my theme\"."
 allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py forge *)
 ---
 

@@ -1,7 +1,6 @@
 ---
 name: show
-description: Show ⟦owner⟧ a picture or a video in Rook's media viewer, where the swarm opens a frame in the middle of ⟦his⟧ screen. Use when ⟦owner⟧ asks to see an image, a render, a screenshot, a chart, or a video clip, from this machine or from another one, or when a thread's message hands you media meant for ⟦him⟧.
-when_to_use: Trigger phrases include "show me", "let me see it", "pull up that image", "put the render on screen", "play the clip", "grab the picture from Fable", "close the picture", "close that". A picture or video that a thread made counts too, when ⟦owner⟧ asks to see it.
+description: "Show ⟦owner⟧ a picture or a video in Rook's media viewer, where the swarm opens a frame in the middle of ⟦his⟧ screen. Use when ⟦owner⟧ asks to see an image, a render, a screenshot, a chart, or a video clip, from this machine or from another one, or when a thread's message hands you media meant for ⟦him⟧, such as \"show me\", \"let me see it\", \"pull up that image\", \"play the clip\", \"grab the picture from Fable\" or \"close the picture\"."
 allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py show *)
 ---
 

@@ -5,7 +5,7 @@ Research goes through T3, like all other agent work. Each run is a new thread in
 ## When it is research
 
 - **Research** is ⟦owner⟧ wanting something found out, compared, or checked, with nothing built or changed. Examples: "which of these two libraries is better maintained", "find out what changed in the last release".
-- **Questions about Rook itself are research too,** such as where its voices come from, or which models or tools it uses. Only changes to Rook, and diagnoses of its code, go to the build thread.
+- **Questions about Rook itself are research too,** such as where its voices come from, or which models or tools it uses. Look in the rook:about skill first, and start research only when it does not answer. Only changes to Rook, and diagnoses of its code, go to the build thread.
 - **Not research:** a question you can answer in your own turn in a few seconds. Answer it yourself.
 - **Not research:** work on a project's code, even a code investigation. It stays with that project's thread, as SKILL.md says.
 
