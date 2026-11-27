@@ -606,6 +606,58 @@ def build_tesseract_3d(grains: int, rng: random.Random):
     return _by_angle(pts[:grains])
 
 
+LATTICE_BLOCK = 15.0      # Each of the cube's eight blocks is this far from its centre to a face.
+LATTICE_GAP = 2.0         # The seam between two blocks at rest; the cube spans 2 * (2 * BLOCK + GAP / 2) = 62.
+LATTICE_PART = 4.0        # How much wider each seam opens as the cube breathes.
+LATTICE_BREATH = 5.0      # One breath, open and closed, in seconds.
+LATTICE_EDGE = 13         # Grains along each block's share of an outer edge (24 shares, 312 grains).
+_KEY = (-0.42, -0.62, 0.66)  # The key light, from the upper left and in front, in view space (as icons_wow2).
+LATTICE_LIGHT = tuple(c / math.sqrt(sum(k * k for k in _KEY)) for c in _KEY)
+# The cube's facets, each a normal and the axis its grains run along (-1 on a face): 6 faces, then 12 outer edges.
+LATTICE_FACETS = [(tuple(float(s) if q == axis else 0.0 for q in range(3)), -1) for axis in range(3) for s in (-1, 1)]
+LATTICE_FACETS += [(tuple(0.0 if q == axis else 0.7071 * (sj if q == (axis + 1) % 3 else si) for q in range(3)), axis)
+                   for axis in range(3) for sj in (-1, 1) for si in (-1, 1)]
+
+
+def build_lattice_3d(grains: int, rng: random.Random):
+    """The thinking cube: a solid cube of eight blocks, two by two by two, whose seams are the lattice. Grains lie only
+    on the outer faces and the 12 outer edges, so a face turned from the light or the viewer dims and nothing shows
+    through from inside. A grain is (x, y, z, weight, block signs, facet): its place at rest, its brightness weight,
+    the direction its block parts in, and its LATTICE_FACETS index."""
+    pts = []
+    h, c = LATTICE_BLOCK, LATTICE_BLOCK + LATTICE_GAP / 2
+    facet = {f: k for k, f in enumerate(LATTICE_FACETS)}
+    per_face = grains - 24 * LATTICE_EDGE
+    face_n = [per_face // 24 + (1 if k < per_face % 24 else 0) for k in range(24)]
+    k = 0
+    for s in [(sx, sy, sz) for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]:
+        mid = tuple(c * v for v in s)
+        for axis in range(3):
+            j, i = (axis + 1) % 3, (axis + 2) % 3
+            # The outer face across this axis: evenly spread (a jittered R2 sequence), kept off the edges so no line
+            # doubles and no corner gathers a knot.
+            nrm = tuple(float(s[axis]) if q == axis else 0.0 for q in range(3))
+            u0, v0, jit = rng.random(), rng.random(), 0.45 / math.sqrt(face_n[k])
+            for q in range(face_n[k]):
+                u = 0.1 + 0.8 * ((u0 + 0.7548776662 * q + rng.uniform(-jit, jit)) % 1.0)
+                v = 0.1 + 0.8 * ((v0 + 0.5698402910 * q + rng.uniform(-jit, jit)) % 1.0)
+                p = list(mid)
+                p[axis] += s[axis] * h
+                p[j] += (2 * u - 1) * h
+                p[i] += (2 * v - 1) * h
+                pts.append((*p, 1.1, s, facet[(nrm, -1)]))
+            k += 1
+            # The block's share of the outer edge that runs along this axis, evenly spaced, its normal between faces.
+            e = tuple(0.0 if q == axis else 0.7071 * s[q] for q in range(3))
+            for q in range(LATTICE_EDGE):
+                p = list(mid)
+                p[j] += s[j] * h
+                p[i] += s[i] * h
+                p[axis] += (2 * (q + 0.5) / LATTICE_EDGE - 1) * h
+                pts.append((*p, 1.3, s, facet[(e, axis)]))
+    return _by_angle(pts[:grains])
+
+
 def build_knot_3d(grains: int, rng: random.Random):
     """Sculpted 3D trefoil knot: crisp golden mathematical tube slowly turning in space."""
     sin, cos, tau = math.sin, math.cos, 2 * math.pi
@@ -832,7 +884,7 @@ def build_listen_ripples(grains: int, rng: random.Random):
 
 # ---------------------------------------------------------------------------
 # Registry of Round-3 3D point builders and live motion evaluators
-# (rook, lattice, and sphere keep their exact origin/main 3D point sets!)
+# (rook and sphere keep their exact origin/main 3D point sets!)
 # ---------------------------------------------------------------------------
 
 BUILDERS = {
@@ -846,6 +898,7 @@ BUILDERS = {
     "prism": build_prism_3d,
     "astrolabe": build_astrolabe_3d,
     "tesseract": build_tesseract_3d,
+    "lattice": build_lattice_3d,
     "aperture": build_aperture_3d,
     "quill": build_quill_3d,
     "scan": build_scan_3d,
@@ -1023,6 +1076,42 @@ def eval_targets(name: str, points, scene, now: float):
             ty.append(y2 * p)
             b_d, zn = _depth_shade(z2, 46.0)
             tb.append(b_d * boost)
+            tz.append(zn)
+        return tx, ty, tb, tz
+
+    if name == "lattice":
+        # The cube turns slowly, seen from a little above, and every LATTICE_BREATH seconds its eight blocks part along
+        # their diagonals and close, so the seams open as dark lines. It arrives closed and dwells closed. Each facet
+        # is lit once a frame by the key light, and a facet turned from the viewer goes out, so the cube reads as a
+        # solid. It goes fully out, not to a faint floor, because the fast Cairo fallback draws every grain above zero
+        # at its least alpha. An edge seen end on is dimmed by how short it looks, so its grains never stack into a knot.
+        a = now * float(meta.get("spin", 0.40))
+        tilt = float(meta.get("tilt", -0.52))
+        ca, sa, ct, st = cos(a), sin(a), cos(tilt), sin(tilt)
+        o = 0.5 - 0.5 * cos(2 * pi * max(0.0, now - getattr(scene, "form_at", now)) / LATTICE_BREATH)
+        part = 0.5 * LATTICE_PART * o * o
+        lx, ly, lz = LATTICE_LIGHT
+        light = []
+        for nrm, axis in LATTICE_FACETS:
+            nxv, nyv, nzv = _rot_yx(*nrm, ca, sa, ct, st)
+            vis = min(1.0, max(0.0, nzv / 0.25))
+            b = (0.55 + 0.75 * max(0.0, nxv * lx + nyv * ly + nzv * lz)) * vis * vis * (3 - 2 * vis)
+            if axis >= 0:
+                sx, sy, _ = _rot_yx(*(1.0 if q == axis else 0.0 for q in range(3)), ca, sa, ct, st)
+                b *= 0.3 + 0.7 * math.hypot(sx, sy)
+            light.append(b)
+        tx, ty, tb, tz = [], [], [], []
+        inv = 1.0 / persp_d
+        for x, y, z, w, s, f in points:  # _rot_yx and _depth_shade(z2, 46.0), inline.
+            x, y, z = x + s[0] * part, y + s[1] * part, z + s[2] * part
+            z1 = z * ca - x * sa
+            y2, z2 = y * ct - z1 * st, y * st + z1 * ct
+            p = 1.0 / (1.0 - z2 * inv)
+            tx.append((x * ca + z * sa) * p)
+            ty.append(y2 * p)
+            zn = z2 / 46.0
+            zn = -1.0 if zn < -1.0 else 1.0 if zn > 1.0 else zn
+            tb.append(w * (0.855 + 0.378 * (0.5 + 0.5 * zn) ** 1.25) * light[f])
             tz.append(zn)
         return tx, ty, tb, tz
 
@@ -1277,3 +1366,10 @@ def eval_targets(name: str, points, scene, now: float):
         return tx, ty, tb, tz
 
     return None
+
+
+__import__("icons_wow2").register()  # The WoW lookup sketches, round two (desktop/icons_wow2.py).
+import icons_system2; icons_system2.register(globals())  # noqa: E402,E702  The system activities' second-round candidate forms.
+import icons_system3; icons_system3.register(globals())  # noqa: E402,E702  Their third round (desktop/icons_system3.py).
+import icons_tools2; BUILDERS.update(icons_tools2.BUILDERS); eval_targets = icons_tools2.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round two.
+import icons_tools3; BUILDERS.update(icons_tools3.BUILDERS); eval_targets = icons_tools3.extend(eval_targets)  # noqa: E402,E702  Tool icon concepts, round three.

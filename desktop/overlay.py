@@ -78,8 +78,10 @@ Protocol, stdin (one JSON object per line):
     {"show": {"path": "/absolute/file.png", "title": "Optional short title"}} shows a picture (PNG, JPEG, WebP, GIF,
     animated or not, or anything else GdkPixbuf reads) or a video (anything GStreamer plays) in the viewer: the swarm
     flies to the middle of the monitor and opens a black box in the media's own shape, framed by its dust. A new show
-    replaces the one open. {"show": "close"} closes it. Escape (once the viewer has the keyboard) closes it, and so does a
-    click on a picture; a click on a video or Space pauses and resumes it, and its small close mark closes it.
+    replaces the one open. {"show": "close"} closes it. A click on the viewer or its controls gives it the keyboard
+    while the pointer stays on it (never in the game): Escape closes it, and Space pauses and resumes a clip or a video. A click on a picture closes
+    it; a click on a video pauses it, and its small close mark closes it. On hover, controls show under the box: play
+    and pause and a scrub bar for a clip or a video, and a mark that opens the file in the system's own viewer.
 
 Protocol, stdout (one JSON object per line, one per button press or viewer change):
     {"event": "interrupt"}
@@ -149,6 +151,8 @@ gi.require_version("PangoCairo", "1.0")
 import cairo
 import devs_pack  # Data-driven Devs theme pack manifest and 3D form registry.
 import pack_player  # Switchable theme pack loader and flipbook atlas player (FORMAT.md).
+import constellation  # A diagram the model writes as one line, drawn by the presence's own grains.
+import filament  # How a constellation looks: filament lines its grains build, light and carry home.
 import render as scenes  # The render tool's scene format, checker and sampler, beside this file.
 import stage_link  # The stage host's link, for diagrams and the panel when the stage setting is on.
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Graphene, Gsk, Gtk, Pango, PangoCairo
@@ -196,6 +200,28 @@ LOOP_PERIOD = 10.5
 # the grains' brightness, and the whole loop adds QUIET_LIFT. The GL tonemap compresses these: on screen the head is
 # about 1.3 times as bright and the loop about 5% brighter. It fades in over QUIET_IN s and out over QUIET_OUT s.
 QUIET_LAP, QUIET_PEAK, QUIET_LIFT, QUIET_IN, QUIET_OUT = 2.4, 2.2, 0.18, 0.4, 0.3
+# The resting loop's look: one of REST_LOOKS, the owner's pick. Each changes only the grains' brightness, never their
+# places or colour, so the GL and Cairo paths both follow it. "today" is the look before 2026-11-27 and runs no code.
+# At rest a look eases in over REST_IN s once the loop has been home REST_SETTLE s: every grain drops to "dim" of today,
+# but "flecks" of every 100 grains stay at today's brightness (today's sparkle grains first). Each fleck twinkles once
+# every "twinkle" s (a range, each fleck its own period and phase; None holds it steady).
+# A quiet turn replaces the comet: the loop rises over "rise" s to "level" of today, and a glare laps it once every
+# "lap" s: the loop's own grains brighten in a soft band "band" rad wide each side of its centre, up to 1 + "peak" times
+# the level, like light sliding along a metal ring. It adds no grains and no orb. When the quiet turn ends, the loop
+# falls back to rest over REST_FALL s. A turn of the owner's own lights it fully in REST_OUT s.
+REST_LOOK = "dense_fleck"
+REST_LOOKS = {
+    "today": None,
+    "fleck_glare_full": {"dim": 0.3, "flecks": 8, "twinkle": (2.0, 4.0), "level": 1.0, "rise": 1.0, "lap": 4.0,
+                         "peak": 1.4, "band": 0.40},
+    "fleck_glare_soft": {"dim": 0.3, "flecks": 8, "twinkle": (2.0, 4.0), "level": 0.85, "rise": 1.0, "lap": 6.0,
+                         "peak": 1.0, "band": 0.50},
+    "sparse_fleck": {"dim": 0.27, "flecks": 4, "twinkle": None, "level": 0.9, "rise": 1.5, "lap": 5.0,
+                     "peak": 1.2, "band": 0.40},
+    "dense_fleck": {"dim": 0.3, "flecks": 14, "twinkle": (2.0, 4.0), "level": 1.0, "rise": 1.0, "lap": 4.0,
+                    "peak": 1.4, "band": 0.40},
+}
+REST_SETTLE, REST_IN, REST_OUT, REST_FALL = 1.2, 2.0, 0.2, 1.5
 REST_EVERY = 3
 # Particle engine prototype variant: "baseline", "A" (soft HDR + depth), "B" (+ Kawase glow), "C" (+ 3D forms).
 PARTICLE_VARIANT = "C"
@@ -372,26 +398,30 @@ FORM_FOR_STATE = {"listening": "ear", "transcribing": "rows", "thinking": "latti
                   "permission": "question", "error": "sink"}
 # Every other tool shows the lattice and THINKING. The find_* tools are WoWFriend's game lookups, which only arrive in
 # WoW mode.
-ACTIVITY_FORMS = {"find_npc": "figure", "find_quest": "exclaim", "find_item": "chest", "find_upgrades": "sword",
-                  "find_price": "coins", "find_object": "pickaxe",
-                  "WebSearch": "globe", "WebFetch": "globe", "Grep": "magnifier", "Glob": "magnifier", "Read": "scan",
-                  "Edit": "quill", "Write": "quill", "NotebookEdit": "quill", "Bash": "prompt", "Skill": "cog",
-                  "recall": "book", "note": "book", "forget": "book",
+ACTIVITY_FORMS = {"find_npc": "figure2_a", "find_quest": "exclaim2_a", "find_item": "chest2_a",
+                  "find_upgrades": "sword3_a", "find_price": ("coins2_a", "coins2_c"), "find_object": "pickaxe3_e",
+                  "WebSearch": ("globe3_a", "globe3_c"), "WebFetch": ("globe3_a", "globe3_c"), "Grep": "magnifier", "Glob": "magnifier", "Read": "scan",
+                  "Edit": "quill", "Write": "quill", "NotebookEdit": "quill", "Bash": ("prompt3_b", "prompt2_c"), "Skill": "cog2_a",
+                  "recall": "book2_a", "note": "book2_a", "forget": "book2_a",
                   "t3_thread_send": "send_turbine", "t3_thread_launch": "send_turbine", "handoff": "send_turbine",
                   "t3_pending_request": "send_turbine",  # rook.py names only an answer so; a list or read reads.
-                  "t3_thread_read": "message", "t3_queue": "message",
-                  "t3_thread_list": "overlook", "t3_thread_search": "overlook", "t3_thread_organize": "overlook",
-                  "t3_project_list": "overlook", "t3_project_read": "overlook", "t3_project_create": "overlook",
-                  "t3_project_clone": "overlook", "t3_environment_links": "overlook",
-                  "t3_environment_read": "overlook", "orchestrator_capabilities": "overlook", "threads": "overlook",
+                  "t3_thread_read": ("message2_c", "message3_a"), "t3_queue": ("message2_c", "message3_a"),
+                  "t3_thread_list": ("overlook3_b", "overlook3_d"), "t3_thread_search": ("overlook3_b", "overlook3_d"), "t3_thread_organize": ("overlook3_b", "overlook3_d"),
+                  "t3_project_list": ("overlook3_b", "overlook3_d"), "t3_project_read": ("overlook3_b", "overlook3_d"), "t3_project_create": ("overlook3_b", "overlook3_d"),
+                  "t3_project_clone": ("overlook3_b", "overlook3_d"), "t3_environment_links": ("overlook3_b", "overlook3_d"),
+                  "t3_environment_read": ("overlook3_b", "overlook3_d"), "orchestrator_capabilities": ("overlook3_b", "overlook3_d"), "threads": ("overlook3_b", "overlook3_d"),
                   "t3_thread_interrupt": "power",
-                  "screenshot": "eye", "media": "film", "git": "branch", "windows": "tiles", "service": "power",
-                  "timer": "hourglass", "background": "spinner"}
+                  "screenshot": "eye2_c", "media": ("film2_b", "film3_c"), "git": "branch3_a",
+                  "windows": ("tiles2_a", "tiles2_c"), "service": "power2_a",
+                  "timer": "hourglass", "background": ("spinner2_b", "spinner2_c")}
 # Finding something shows the prism: file search, search commands, and WoW waypoints.
 ACTIVITY_FORMS.update(dict.fromkeys(pack_player.FIND_ACTIVITIES, "prism"))
 # rook.py sends one of these in place of "Bash" when it knows what the command runs.
 BASH_ACTIVITIES = ("screenshot", "media", "git", "windows", "service", "timer", "handoff", "threads", "background")
 BASH_ACTIVITIES += ("find", "waypoint")
+# A tuple in ACTIVITY_FORMS is a rotation: each appearance of the tool's form takes the next one and holds it while it
+# shows. FORM_ROTATIONS counts each rotation's appearances.
+FORM_ROTATIONS = {}
 # find_upgrades also prices each upgrade from the auction scan, so it shows gear and prices in turn.
 ACTIVITY_TURNS = {"find_upgrades": ("find_upgrades", "find_price")}
 TURN_SECONDS = 2.2
@@ -651,6 +681,8 @@ VIEW_SWARM_FADE = 0.20  # Main resting swarm fades out on open and back in on cl
 VIEW_END_HOLD = 1.2  # A video rests on its last frame this long, then the viewer closes.
 VIEW_DRIFT, VIEW_WAVE = 10.0, 18.0
 VIEW_LINE_DY, VIEW_CAPTION_DY, VIEW_STRIP = 20, 6, 32
+VIEW_HOVER_GRACE = 0.8  # Seconds the viewer's controls stay after the pointer leaves, so it can reach them.
+VIEW_CLOSE_SIZE = 32  # The close X in the box's top-right corner, in points: big enough to hit at once.
 # Single-row edge style.
 #   matte: black margin between the media and the box's edge, as a share of the media's shorter side, clamped.
 #   dust, density: max grain pool and target grains per pixel of perimeter so tiny and wide boxes match.
@@ -1206,6 +1238,17 @@ def _shape_hourglass(cr):
 SHAPES = {"figure": _shape_figure, "exclaim": _shape_exclaim, "chest": _shape_chest, "sword": _shape_sword,
           "pickaxe": _shape_pickaxe, "coins": _shape_coins, "question": _shape_question, "magnifier": _shape_magnifier, "page": _shape_page,
           "scan": _shape_page,  # Read's flat page, for a variant without the Devs forms; Devs draws its own scan.
+          # The WoW tools' flat shapes, for a variant without the Devs forms; Devs draws its own (icons_wow2.py).
+          "figure2_a": _shape_figure, "exclaim2_a": _shape_exclaim, "chest2_a": _shape_chest,
+          "sword2_a": _shape_sword, "sword3_a": _shape_sword,
+          # The system tools' flat shapes, for a variant without the Devs forms (icons_system2.py, icons_system3.py).
+          "prompt3_b": _shape_prompt, "prompt2_c": _shape_prompt, "book2_a": _shape_book,
+          "message2_c": _shape_message, "message3_a": _shape_message,
+          "overlook3_b": _shape_overlook, "overlook3_d": _shape_overlook, "cog2_a": _shape_cog,
+          "eye2_c": _shape_eye, "branch3_a": _shape_branch, "film2_b": _shape_film, "film3_c": _shape_film,
+          "tiles2_a": _shape_tiles, "tiles2_c": _shape_tiles, "power2_a": _shape_power,
+          "pickaxe3_e": _shape_pickaxe, "coins2_a": _shape_coins, "coins2_c": _shape_coins,
+          "pickaxe2_a": _shape_pickaxe,
           "quill": _shape_quill, "prompt": _shape_prompt, "cog": _shape_cog, "book": _shape_book,
           "message": _shape_message, "overlook": _shape_overlook, "eye": _shape_eye,
           "film": _shape_film, "branch": _shape_branch, "tiles": _shape_tiles, "power": _shape_power,
@@ -1235,7 +1278,7 @@ def _by_angle(points):
 # in outline, as the outline shapes do, and not as boxes of noise. Their cut-out lines are edges too. The chest, the
 # coins and the page cut their straight lines with DEST_OUT: cairo 1.18 paints a straight stroke on whole pixels under
 # CLEAR instead of clearing it, so those lines never showed.
-EDGE_SHARE = {"coins": 0.85, "chest": 0.85, "page": 0.85, "scan": 0.85, "book": 0.85, "tiles": 0.85}
+EDGE_SHARE = {"coins": 0.85, "chest": 0.85, "coins2_a": 0.85, "coins2_c": 0.85, "chest2_a": 0.85, "page": 0.85, "scan": 0.85, "book": 0.85, "book2_a": 0.85, "tiles": 0.85, "tiles2_a": 0.85, "tiles2_c": 0.85}
 
 
 def _mask_points(name, rng, count=GRAINS):
@@ -1742,15 +1785,26 @@ def _word_sprite(cr, word, scale, font=CAPTION_FONT, color=IVORY, spacing=0.0,
     return sprite, pad - logical.y + layout.get_baseline() / Pango.SCALE, pad - logical.x
 
 
-def _lettering_sprite(cr, text, scale, kind, color=None):
+def _grown(font, grow):
+    """font at grow times its size: the same font when grow is 1."""
+    if grow == 1.0:
+        return font
+    font, size = font.copy(), round(font.get_size() * grow)
+    font.set_absolute_size(size) if font.get_size_is_absolute() else font.set_size(size)  # _font's sizes are in px.
+    return font
+
+
+def _lettering_sprite(cr, text, scale, kind, color=None, grow=1.0):
     """text in the pack's lettering for kind ("label" or "name"), as _word_sprite makes it: crisp letters in a thin
-    outline and, where the kind has one, a rim. No halo, plate or blur. color replaces the kind's own colour."""
+    outline and, where the kind has one, a rim. No halo, plate or blur. color replaces the kind's own colour, and grow
+    scales its size."""
     k = LETTERING[kind]
     outline, rim = LETTERING["outline"], (LETTERING["rim"] if k["rim"] and color is None else None)
     # The rim covers the inner part of the outline, so the outline grows by the rim's width and is near opaque: the
     # ink edge then still shows outside the gold, which keeps the letters legible over bright games.
     edge = (outline[0] + rim[0], max(outline[1], 0.95)) if rim else outline[:2]
-    return _word_sprite(cr, text, scale, k["font"], color or k["color"], k["spacing"], (), outline[2], edge, rim=rim)
+    return _word_sprite(cr, text, scale, _grown(k["font"], grow), color or k["color"], k["spacing"] * grow, (),
+                        outline[2], edge, rim=rim)
 
 
 # The pack's reveal ("spread"): grains spread sideways along a word from its start or its centre and settle into the
@@ -3013,34 +3067,172 @@ def _pixbuf_surface(pixbuf, scale):
 
 
 class _Picture:
-    """A still picture, or an animated one (GIF), decoded once at the box's device pixels. frame(t) gives the Cairo
-    image for t seconds after it started; version changes when the frame does."""
+    """A still picture, or an animated one (GIF or WebP), at the box's device pixels. frame(t) gives the image for t
+    seconds on its view's clock; version changes when the frame does. An animated WebP decodes in a thread ahead of
+    the play head (see _load_webp): it plays from its first frame, waits when the decoder falls behind, and loops only
+    once every frame is in. Each frame is kept, so later loops decode nothing. pause, play and seek move its own clock."""
 
-    MAX_FRAMES = 240  # ponytail: a longer animation loops its first 240 frames; decode on the fly if that matters.
+    MAX_FRAMES = 240  # ponytail: a longer GIF loops its first 240 frames; decode on the fly if that matters.
+    # An animated WebP keeps every frame, as textures of at most this many bytes in all. A longer clip is held smaller
+    # and the GPU scales it up. ponytail: every frame stays in memory, since libwebp takes 12 to 18 ms a frame here, which
+    # is 36 to 55% of a core at 30 frames a second; a disk cache of raw frames is the upgrade if RAM matters more.
+    MAX_BYTES = 1 << 29  # 512 MiB: a game shares this machine's RAM, so a long clip is held a little smaller.
 
-    def __init__(self, frames, size, kind):
-        self.frames = frames  # (Cairo image, seconds it shows)
-        self.size = size
-        self.kind = kind
-        self.length = sum(d for _, d in frames)
-        self.textures = {}
+    def __init__(self, frames, size, kind, done=True):
+        self.frames, self.ends = [], []  # (Cairo image or Gdk.Texture, seconds it shows), and when each frame ends.
+        self.size, self.kind, self.textures = size, kind, {}
+        self.length, self.done, self.closed = 0.0, done, False
+        self.total = None  # The file's own length in seconds, when it says, before every frame is in.
+        self.shift, self.held = 0.0, None  # How far the clip lags its view's clock, and where it paused.
+        for frame, d in frames:
+            self.add(frame, d)
+
+    def add(self, frame, d):
+        self.frames.append((frame, d))
+        self.length += d
+        self.ends.append(self.length)
+
+    @property
+    def playing(self):
+        return self.held is None
+
+    def at(self, t):
+        """Seconds into the loop at t on the view's clock."""
+        t = self.held if self.held is not None else t - self.shift
+        if not self.done and t > self.length:  # The decoder is behind: hold its newest frame until it catches up.
+            self.shift += t - self.length
+            t = self.length
+        return t % self.length if self.done and self.length > 0 else t
+
+    def pause(self, t):
+        self.held = self.at(t)
+
+    def play(self, t):
+        if self.held is not None:
+            self.shift, self.held = t - self.held, None
+
+    def seek(self, to, t):
+        to = max(0.0, min(to, self.length))
+        if self.held is not None:
+            self.held = to
+        else:
+            self.shift = t - to
 
     def frame(self, t):
         if len(self.frames) == 1 or self.length <= 0:
             return self.frames[0][0], 0
-        t %= self.length
-        for n, (surface, d) in enumerate(self.frames):
-            if t < d:
-                return surface, n
-            t -= d
-        return self.frames[-1][0], len(self.frames) - 1
+        n = min(bisect_right(self.ends, self.at(t)), len(self.frames) - 1)
+        return self.frames[n][0], n
 
     def close(self):
-        self.frames, self.textures = [], {}
+        self.closed = True  # The decoder thread stops at its next frame.
+        self.frames, self.ends, self.textures = [], [], {}
+
+
+class _WebPData(ctypes.Structure):
+    _fields_ = [("bytes", ctypes.c_char_p), ("size", ctypes.c_size_t)]
+
+
+class _WebPAnimOptions(ctypes.Structure):
+    _fields_ = [("color_mode", ctypes.c_int), ("use_threads", ctypes.c_int), ("pad", ctypes.c_uint32 * 7)]
+
+
+class _WebPAnimInfo(ctypes.Structure):
+    _fields_ = [("width", ctypes.c_uint32), ("height", ctypes.c_uint32), ("loops", ctypes.c_uint32),
+                ("background", ctypes.c_uint32), ("frames", ctypes.c_uint32), ("pad", ctypes.c_uint32 * 4)]
+
+
+def _load_webp(path, bounds, scale):
+    """An animated WebP through libwebp's own decoder, which GdkPixbuf's loader uses too: every frame the file holds,
+    each for its own time, as textures at the box's device pixels. The first frame is decoded here and the rest in a
+    thread of low priority, ahead of the play head. None for a still, or when libwebp is missing."""
+    try:
+        lib = CDLL("libwebpdemux.so.2")
+    except OSError:
+        return None
+    abi, bgra = 0x0107, 8  # WEBP_DEMUX_ABI_VERSION, and MODE_bgrA: premultiplied BGRA, as Cairo and GDK keep it.
+    lib.WebPAnimDecoderNewInternal.restype = ctypes.c_void_p
+    lib.WebPAnimDecoderNewInternal.argtypes = [ctypes.POINTER(_WebPData), ctypes.POINTER(_WebPAnimOptions), ctypes.c_int]
+    lib.WebPAnimDecoderGetInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_WebPAnimInfo)]
+    lib.WebPAnimDecoderGetNext.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)),
+                                           ctypes.POINTER(ctypes.c_int)]
+    lib.WebPAnimDecoderDelete.argtypes = [ctypes.c_void_p]
+    with open(path, "rb") as f:
+        raw = f.read()
+    options = _WebPAnimOptions()
+    if not lib.WebPAnimDecoderOptionsInitInternal(ctypes.byref(options), abi):
+        return None
+    options.color_mode = bgra
+    data = _WebPData(raw, len(raw))  # The decoder reads raw in place, so raw lives as long as the frames below.
+    dec = lib.WebPAnimDecoderNewInternal(ctypes.byref(data), ctypes.byref(options), abi)
+    if not dec:
+        return None  # GdkPixbuf reads it, or says why not.
+    info = _WebPAnimInfo()
+    if not lib.WebPAnimDecoderGetInfo(dec, ctypes.byref(info)) or info.frames < 2:
+        lib.WebPAnimDecoderDelete(dec)
+        return None
+    w, h, count = info.width, info.height, info.frames
+    box, media, (pw, ph), nearest = _view_layout(bounds, (w, h), scale)
+    k = min(1.0, math.sqrt(_Picture.MAX_BYTES / (pw * ph * 4 * count)))
+    pw, ph = max(1, int(pw * k)), max(1, int(ph * k))
+
+    def frames(raw=raw):
+        buf, ends, before = ctypes.POINTER(ctypes.c_uint8)(), ctypes.c_int(), 0
+        try:
+            for _ in range(count):  # The file's own frame count ends the loop, never a frame's pixels.
+                if not lib.WebPAnimDecoderGetNext(dec, ctypes.byref(buf), ctypes.byref(ends)):
+                    raise _MediaError(f"Rook could not read the picture {os.path.basename(path)}: a frame is damaged.")
+                if (pw, ph) == (w, h):
+                    pixels, stride = ctypes.string_at(buf, w * h * 4), w * 4
+                else:
+                    canvas = (ctypes.c_uint8 * (w * h * 4)).from_address(ctypes.addressof(buf.contents))
+                    src = cairo.ImageSurface.create_for_data(canvas, cairo.FORMAT_ARGB32, w, h, w * 4)
+                    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, pw, ph)
+                    cr = cairo.Context(out)
+                    cr.scale(pw / w, ph / h)
+                    cr.set_source_surface(src)
+                    cr.get_source().set_filter(cairo.FILTER_NEAREST if nearest else cairo.FILTER_GOOD)
+                    cr.set_operator(cairo.OPERATOR_SOURCE)
+                    cr.paint()
+                    out.flush()
+                    pixels, stride = bytes(out.get_data()), out.get_stride()
+                texture = Gdk.MemoryTexture.new(pw, ph, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                                GLib.Bytes.new(pixels), stride)
+                yield texture, max(0.02, (ends.value - before) / 1000)  # libwebp gives each frame's end time.
+                before = ends.value
+        finally:
+            lib.WebPAnimDecoderDelete(dec)
+
+    rest = frames()
+    pic = _Picture([next(rest)], (w, h), "animation", done=False)
+    at, total = 12, 0  # Each ANMF chunk holds its frame's duration in milliseconds, 24 bits at byte 12.
+    while at + 8 <= len(raw):
+        size = int.from_bytes(raw[at + 4:at + 8], "little")
+        if raw[at:at + 4] == b"ANMF":
+            total += int.from_bytes(raw[at + 20:at + 23], "little")
+        at += 8 + size + (size & 1)
+    pic.total = total / 1000 or None
+
+    def decode():
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)  # The decoder yields to Rook and the game.
+        try:
+            for frame in rest:
+                if pic.closed:
+                    break
+                pic.add(*frame)
+        except _MediaError:
+            pass  # A damaged frame ends the clip there.
+        finally:
+            rest.close()
+            pic.done = True
+    threading.Thread(target=decode, daemon=True).start()
+    return box, media, pic
 
 
 def _load_picture(path, info, bounds, scale):
     fmt, nw, nh = info
+    if fmt.get_name() == "webp" and (webp := _load_webp(path, bounds, scale)) is not None:
+        return webp
     try:
         anim = GdkPixbuf.PixbufAnimation.new_from_file(path)
         if not anim.is_static_image():
@@ -3299,6 +3491,18 @@ class _Clip:
             self.pipe.set_state(Gst.State.PAUSED)
             self.playing = False
 
+    def where(self):
+        """(seconds played, seconds long), or None until GStreamer knows both."""
+        if self.pipe is None:
+            return None
+        (ok, at), (known, length) = self.pipe.query_position(Gst.Format.TIME), self.pipe.query_duration(Gst.Format.TIME)
+        return (at / Gst.SECOND, length / Gst.SECOND) if ok and known and length > 0 else None
+
+    def seek(self, seconds):
+        if self.pipe is not None:
+            self.pipe.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, int(seconds * Gst.SECOND))
+            self.ended, self.pts = False, -1.0
+
     def volume(self, value):
         if abs(self.pipe.get_property("volume") - value) > 0.01:
             self.pipe.set_property("volume", value)
@@ -3363,7 +3567,142 @@ def _load_media(path, bounds, scale, step=False):
     return box, media, _Clip(path, size, pixels, scale, step)
 
 
+
+def _check_viewer():
+    """The media viewer, offscreen: an animated WebP keeps every frame for its own time, even a frame that repeats the
+    first, and pauses and seeks; a clip plays while it decodes; a new show replaces the open one; a hand close during
+    a load keeps the newer show, and Rook's own close drops it; the hover controls fit the media."""
+    import tempfile
+    # A 2x2 WebP of four frames, black, white, black, white, for 40, 80, 120 and 260 ms.
+    webp = bytes.fromhex(
+        "52494646e400000057454250565038580a00000002000000010000010000414e494d06000000ffffffff0000414e4d4626000000000000"
+        "000000010000010000280000025650384c0e0000002f01400000071011fd0f4444ff03414e4d462a00000000000000000001000001000050"
+        "0000005650384c110000002f0140000007d0fffef7bfff8188e87f0000414e4d46260000000000000000000100000100007800000056"
+        "50384c0e0000002f01400000071011fd0f4444ff03414e4d462a000000000000000000010000010000040100005650384c110000002f"
+        "0140000007d0fffef7bfff8188e87f0000")
+    with tempfile.TemporaryDirectory(prefix="rook_viewer_") as tmp:
+        clip = os.path.join(tmp, "clip.webp")
+        with open(clip, "wb") as f:
+            f.write(webp)
+        _, _, pic = _load_media(clip, (0, 0, 1920, 1080), 1.0)
+        deadline = time.monotonic() + 5
+        while not pic.done and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pic.done and [round(d, 3) for _, d in pic.frames] == [0.04, 0.08, 0.12, 0.26], pic.frames
+        assert pic.total == 0.5 and abs(pic.length - 0.5) < 1e-9, (pic.total, pic.length)
+        assert [pic.frame(t)[1] for t in (0.01, 0.05, 0.13, 0.3, 0.52, 0.56)] == [0, 1, 2, 3, 0, 1]
+        pic.pause(0.13)
+        assert pic.frame(5.0)[1] == 2 and not pic.playing
+        pic.play(5.0)
+        assert pic.frame(5.12)[1] == 3, pic.at(5.12)
+        pic.seek(0.05, 6.0)
+        assert pic.frame(6.0)[1] == 1
+        pic.close()
+        # While the decoder is behind, the clip holds its newest frame and then goes on from there, never skipping.
+        live = _Picture([("a", 0.1)], (2, 2), "animation", done=False)
+        assert live.frame(0.5) == ("a", 0)
+        live.add("b", 0.1)
+        assert live.frame(0.55) == ("b", 1), live.at(0.55)
+
+        stills = []
+        for n, colour in enumerate((0x000000ff, 0xffffffff)):
+            pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 4, 4)
+            pixbuf.fill(colour)
+            stills.append(os.path.join(tmp, f"still{n}.png"))
+            pixbuf.savev(stills[-1], "png", [], [])
+        a, b = stills
+        events, drawn = [], []
+        ov = Overlay.__new__(Overlay)
+        ov.scene, ov.quitting, ov.left, ov.top, ov.bounds, ov.monitor = Scene(0.0), False, 0, 0, (0, 0, 1920, 1080), None
+        ov._media_job, ov._media_loaded, ov._staged, ov._video_clock, ov._viewer_region = 0, None, None, None, None
+        ov.media = ov.media_leaving = ov.media_path = None
+        ov.media_title, ov.media_paused, ov._media_ended_at, ov.opacity = "", False, None, 1.0
+        ov.flight = ov.return_at = None
+        ov.wow = ov.in_game = ov._viewer_hover = ov._scrubbing = False
+        visible = [False]
+        ov.viewer = types.SimpleNamespace(set_visible=lambda v: visible.__setitem__(0, v), get_visible=lambda: visible[0],
+                                          set_opacity=lambda _v: None, get_surface=lambda: None)
+        ov.viewer_area = types.SimpleNamespace(queue_draw=lambda: drawn.append(1))
+        ov._emit, ov._jump_home, ov._centre, ov._monitor_scale = events.append, lambda: None, lambda: (960, 540), lambda: 1.0
+        ov._place = lambda _why: None
+        modes = []
+        saved = LayerShell.set_keyboard_mode, LayerShell.set_monitor
+        LayerShell.set_keyboard_mode = lambda _win, mode: modes.append(mode)
+        LayerShell.set_monitor = lambda *_: None
+
+        def show(path, close=None):
+            events.clear()
+            ov._show_media({"path": path, "title": os.path.basename(path)})
+            if close:
+                ov._close_media(close)
+            until = time.monotonic() + 5
+            while ov._media_loaded is None and time.monotonic() < until:
+                time.sleep(0.01)
+            ov._step_viewer(time.monotonic())
+            return [(e["event"], os.path.basename(e["path"]), e.get("why")) for e in events]
+        try:
+            assert show(a) == [("shown", "still0.png", None)]
+            assert show(b) == [("closed", "still0.png", "replaced"), ("shown", "still1.png", None)]
+            assert ov.media_path == b and visible[0]
+            # The owner clicks the open picture away while the next one loads: the next one still shows.
+            assert show(a, close="click") == [("closed", "still1.png", "click"), ("shown", "still0.png", None)]
+            assert ov.media_path == a
+            # Rook's own close drops a load under way.
+            assert show(b, close="rook") == [("closed", "still0.png", "rook")]
+            # Hover controls: a picture has the open mark and the X; a clip adds play and the scrub bar, and Space-style
+            # pause toggles it. A click gives the viewer the keyboard only while the pointer is on it, never a pass over.
+            show(a)
+            later = time.monotonic() + 5
+            assert ov._view_controls(later) == {} and modes[-1] == LayerShell.KeyboardMode.NONE
+            ov._viewer_hovered(True)
+            assert set(ov._view_controls(later)) == {"row", "open", "close"}
+            assert modes[-1] == LayerShell.KeyboardMode.ON_DEMAND
+            assert show(clip)[-1] == ("shown", "clip.webp", None)
+            controls = ov._view_controls(later)
+            assert set(controls) == {"row", "open", "play", "scrub", "close"} and controls["scrub"][2] > 0, controls
+            ov._toggle_pause()
+            assert ov.media_paused and not ov.media.playing
+
+            def middle(rect):
+                return rect[0] + rect[2] / 2, rect[1] + rect[3] / 2
+            # A click on a clip plays or pauses it; it never closes it.
+            box = ov._viewer_rects(later)[0]
+            real_now, time.monotonic = time.monotonic, lambda: later
+            try:
+                ov._viewer_clicked(None, 1, *middle(box))
+                assert not ov.media_paused and ov.scene.view.closing is None, "a click on a clip closed it"
+                # The pointer leaves on its way to the controls: they stay for the grace, and the row keeps the pointer.
+                ov._viewer_hovered(False)
+                assert set(ov._view_controls(later)) >= {"play", "scrub"}, "the controls left with the pointer"
+                assert modes[-1] == LayerShell.KeyboardMode.ON_DEMAND
+                ov._viewer_hovered(True)
+                ov._viewer_hovered(False)
+                ov._viewer_hover_until = later - 1
+                ov._viewer_hover_ended()
+                assert modes[-1] == LayerShell.KeyboardMode.NONE and ov._view_controls(later) == {}
+                assert len(ov._viewer_rects(later)) >= 2, "the controls row left the input region"
+                # The X in the top-right corner lights under the pointer, and closes it.
+                ov._viewer_hovered(True)
+                ov._viewer_pointer_moved(None, *middle(ov._view_controls(later)["close"]))
+                assert ov._close_hot, "the X did not light under the pointer"
+                ov._viewer_pointer_moved(None, *middle(box))
+                assert not ov._close_hot, "the X stayed lit off the pointer"
+                ov._viewer_clicked(None, 1, *middle(ov._view_controls(later)["close"]))
+                assert ov.scene.view.closing is not None, "the X did not close the viewer"
+            finally:
+                time.monotonic = real_now
+            ov._viewer_hover = False
+            ov.wow = ov.in_game = True
+            ov._viewer_hovered(True)
+            assert modes[-1] == LayerShell.KeyboardMode.NONE, "the viewer took the keyboard in the game"
+        finally:
+            LayerShell.set_keyboard_mode, LayerShell.set_monitor = saved
+            ov._drop_media()
+    print("viewer: every WebP frame at its own time, pause and seek, decode ahead, replace, close during a load, "
+          "hover controls with a grace, the X, click to pause: ok")
+
 # The render tool's scenes (see render.py). A diagram grows the swarm past GRAINS for as long as it shows.
+TITLE_GROW = 1.2  # A constellation's title is this much larger than its names.
 RENDER_FADE = 0.4  # How long a diagram's extra grains take to come in, and to fade once they are not needed.
 RENDER_LOOSEN = 0.08  # The arrival burst when one scene or step follows another; a full one would scatter the morph.
 RENDER_HOLD = 1.2  # The overlay keeps its larger canvas this long after a scene ends, while the grains fly back.
@@ -3382,7 +3721,7 @@ def _interleave(form):
     core = [g * n // GRAINS for g in range(GRAINS)]
     taken = set(core)
     order = core + [k for k in range(n) if k not in taken]
-    for key in ("x", "y", "part", "move", "bright", "owner", "bright_base", "grain_u", "swarm"):
+    for key in ("x", "y", "part", "move", "bright", "owner", "bright_base", "grain_u", "swarm", "recs"):
         if key in form:
             form[key] = [form[key][k] for k in order]
     form["parents"] = list(range(GRAINS)) + [k * GRAINS // n for k in order[GRAINS:]]
@@ -3390,6 +3729,8 @@ def _interleave(form):
 
 def _scene_step_answer(steps, step):
     """The answer for a step of a scene with these steps: what shows, or why the step is wrong."""
+    if isinstance(step, list) and step and all(type(s) is int and 0 < s <= len(steps) for s in step):
+        return {"ok": True, "said": f"Showing steps {', '.join(map(str, step))} of {len(steps)}."}
     if isinstance(step, bool) or not isinstance(step, int) or not 0 <= step <= len(steps):
         return {"ok": False, "error": f"The scene has {len(steps)} steps. Give 1 to {len(steps)}, or 0 for "
                                       "the whole scene."}
@@ -4552,6 +4893,7 @@ class Scene:
         self.vignette = (0.0, 0.0, 50.0, 50.0)
         self.home = False
         self.quiet, self.quiet_mix = False, 0.0  # A quiet turn thinks now, and how far its comet has faded in.
+        self.rest_dim, self.glare_mix = 0.0, 0.0  # How far REST_LOOK's rest and its quiet glare have eased in.
         self.extra = 1.0
         self.lift = FALLBACK_LIFT
         self.rest_pad = REST_PAD  # How far below the canvas top the resting loop's centre sits.
@@ -4607,6 +4949,7 @@ class Scene:
         self.render_since = self.render_end = None
         self.render_gone = -math.inf
         self.render_reach_px = 0
+        self.render_width_px = WIDTH  # The canvas width while a scene shows: a constellation's own, else WIDTH.
         self.size_k = 1.0  # How large grains are drawn against their own size: a scene's GRAIN_SCALE while it shows.
         self.fade_at = None
         self.grown_at = -math.inf
@@ -4918,16 +5261,91 @@ class Scene:
                 return {"ok": False, "error": "No scene is on screen. Show one first."}
             steps = self.render["scene"]["steps"]
             answer = _scene_step_answer(steps, step)
-            if answer["ok"]:
+            if answer["ok"] and self.render_form.get("kind") == "constellation":
+                self.render_form["con"].light(step, now)
+            elif answer["ok"]:
+                step = step[-1] if isinstance(step, list) else step
                 self._render_set(scenes.sample(self.render["scene"], step=step - 1 if step else None,
                                                previous=self.render_form), now)
             return answer
+        if "diagram" in spec:
+            scene, form = self.diagram_form(spec["diagram"])
+            if form is None:
+                return {"ok": False, "error": "A diagram needs two nodes joined by > or -."}
+            return self.render_commit(scene, form, now)
         scene, errors = scenes.validate(spec.get("scene"))
         if errors:
             return {"ok": False, "errors": errors}
         form = scenes.sample(scene, previous=self.render_form if shown else None, entrance=self.diagram_entrance,
                              dance=self.diagram_dance)
         return self.render_commit(scene, form, now)
+
+    def diagram_form(self, doc):
+        """A constellation's scene and form from {"graph", "title"} or a mark's inside, its names measured in their
+        own lettering. Both are None when the graph has fewer than two nodes. Repairs go to stderr for the builders,
+        never back to the model."""
+        doc = doc if isinstance(doc, dict) else {"graph": str(doc)}
+        title, graph = str(doc.get("title") or "").strip(), str(doc.get("graph") or "")
+        probe = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+
+        def measure(text, grow=1.0):
+            sprite = self._diagram_sprite(probe, text, 1.0, grow)
+            return sprite.get_width() - 28, sprite.get_height() - 28  # Less the sprite's 14 px pad each side.
+
+        title, nodes, con, repairs = constellation.make(f"{title} | {graph}" if title else graph, measure,
+                                                        measure_title=lambda text: measure(text, TITLE_GROW))
+        if repairs:
+            print(f"diagram repairs: {'; '.join(repairs)} in {graph[:200]!r}", file=sys.stderr, flush=True)
+        if con is None:
+            return None, None
+        scene = {"name": title or "diagram", "title": title, "size": "diagram", "parts": [], "nodes": len(nodes),
+                 "steps": [{"caption": ""} for _ in nodes]}
+        form = {"kind": "constellation", "name": scene["name"], "title": title, "caption": "", "scene": scene,
+                "budget": len(con.recs), "recs": con.recs, "size": con.plan["size"], "step": None,
+                "parts": [], "labels": [], "notes": []}
+        _interleave(form)  # The swarm's own grains spread over every node; the extra ones are born beside them.
+        form["part"] = form["move"] = []  # No stencil parts, so nothing for scenes._moving to fly.
+        form["con"] = constellation.Constellation(con.plan, nodes, form["recs"])
+        return scene, form
+
+    def _diagram_sprite(self, cr, text, scale, grow=1.0):
+        """A constellation name in the send names' lettering, at grow times its size, cached per text, size, scale and
+        lettering."""
+        key = ("diagram", text, scale, grow, id(LETTERING), id(PALETTE))
+        if key not in self.label_sprites:
+            if LETTERING:
+                sprite = _lettering_sprite(cr, text, scale, "name", grow=grow)[0]
+            else:
+                font, spacing = RENDER_TYPE["icon"]
+                sprite = _word_sprite(cr, text, scale, _grown(font, grow), PALETTE["label"], spacing * grow,
+                                      PALETTE["label_halos"],
+                                      PALETTE["label_halo"], PALETTE["label_outline"])[0]
+            self.label_sprites[key] = sprite
+        return self.label_sprites[key]
+
+    def diagram_names(self, now):
+        """What a constellation's names show now: (text, x, y, alpha, grow) for each name and the title, x and y the
+        top left of its ink box about the drawing's centre, grow its size against a name's. Empty when no constellation
+        shows."""
+        form = self.render_form
+        if self.render is None or form is None or form.get("kind") != "constellation" or self.form != "render":
+            return ()
+        con, t = form["con"], now - self.render_since - form["start"]
+        fade = 1.0 if self.render_end is None else max(0.0, 1 - (now - self.render_end) / RENDER_FADE)
+        out = [(text, box[0], box[1], con.name_alpha(k, t, now) * fade, 1.0)
+               for k, (text, box) in enumerate(zip(con.plan["labels"], con.plan["names"]))]
+        if con.plan["title_box"]:
+            box = con.plan["title_box"]
+            out.append((con.plan["title"].upper(), box[0], box[1], con.title_alpha(t) * fade, TITLE_GROW))
+        return [row for row in out if row[3] > 0.004]
+
+    def filament_frame(self, now):
+        """A constellation's filament layer now: (Constellation, seconds since its reveal, how far below Rook's centre
+        the drawing sits), or None when no constellation shows."""
+        form = self.render_form
+        if self.render is None or form is None or form.get("kind") != "constellation" or self.form != "render":
+            return None
+        return form["con"], now - self.render_since - form["start"], self.render["dy"]
 
     def render_commit(self, scene, form, now):
         """Attach a prepared scene form and start its entrance on the active scene."""
@@ -4948,6 +5366,8 @@ class Scene:
     @staticmethod
     def render_said(scene, form):
         """The answer for a scene that shows, or that is staged to show at the reveal."""
+        if scene.get("nodes"):
+            return {"ok": True, "said": f"Showing {scene['nodes']} nodes."}
         steps = len(scene["steps"])
         said = (f"Showing {scene['name']} as {'a diagram' if scene['size'] == 'diagram' else 'an icon'} of "
                 f"{form['budget']} grains, with {len(scene['parts'])} parts"
@@ -4983,10 +5403,24 @@ class Scene:
                 self.render_end = now - RENDER_FADE - 0.01
             elif self.render_end is None:
                 self.render_end = now
+            if self.render_form.get("kind") == "constellation":
+                self.render_form["con"].end(self.render_end)  # The lines hand the drawing back to the grains.
 
     def _render_set(self, form, now):
         """Make form the scene's form. A form that follows a form on screen morphs, with a small arrival burst."""
         old = self.render_form
+        if form.get("kind") == "constellation":
+            if self.form == "render":
+                self.render_old, self.prev, self.form_at = old, "render_old", now
+                self.loosen, self.delay_scale = RENDER_LOOSEN, 1.0
+            form["start"] = now - self.render_since
+            self.render_form = form
+            h = form["size"][1] - 2 * constellation.PAD
+            # Centred on Rook, and moved down only as far as its top needs to stay on the canvas.
+            self.render["dy"] = dy = max(0.0, h / 2 - (self.lift + ORB / 2 - RENDER_TOP))
+            self.render["bottom"] = h / 2 + dy
+            self.render["lit"] = None
+            return
         if form["budget"] > GRAINS and (old is None or old["budget"] != form["budget"]):
             _interleave(form)
         else:
@@ -5020,8 +5454,12 @@ class Scene:
 
     def render_reach(self, now):
         """How far below the working centre the canvas must reach while a scene shows, or None."""
-        if self.render is not None:
+        if self.render is not None and self.render_form.get("kind") == "constellation":
+            self.render_reach_px = int(self.render["bottom"] + constellation.PAD)  # Its own bounds and a margin.
+            self.render_width_px = min(WIDTH, self.render_form["size"][0])
+        elif self.render is not None:
             self.render_reach_px = int(self.render["bottom"] + 60)  # Room for three lines under the scene.
+            self.render_width_px = WIDTH
         elif now - self.render_gone > RENDER_HOLD:
             return None
         return self.render_reach_px
@@ -5029,7 +5467,7 @@ class Scene:
     def _size_swarm(self, form, now):
         """Draw a scene's grains at its GRAIN_SCALE; grow the swarm to a scene's grains, fade the extra grains once they
         are not needed, then drop them."""
-        k = scenes.GRAIN_SCALE[self.render_form["kind"]] if form == "render" else 1.0
+        k = scenes.GRAIN_SCALE.get(self.render_form["kind"], 1.0) if form == "render" else 1.0
         if k != self.size_k:
             # Rebuilt from base by the same sum as at the start, so the swarm's own sizes come back exactly.
             self.size_k, self.size = k, [(1.0 + 0.8 * b) * k for b in self.base]
@@ -5087,7 +5525,14 @@ class Scene:
 
     def _render_targets(self, form, now):
         """A scene's form now, by scenes.targets. A turning grain leads its target by the time its spring trails it,
-        so a gear's teeth stay sharp. A diagram's extra grains come in, and fade out, over RENDER_FADE."""
+        so a gear's teeth stay sharp. A diagram's extra grains come in, and fade out, over RENDER_FADE. A constellation's
+        targets come from its own light state, with depth, as a presence form's do."""
+        if form.get("kind") == "constellation":
+            tx, ty, tb, self._target_z = form["con"].targets(now - self.render_since - form["start"], now,
+                                                              (self.render or {}).get("dy") or 0.0)
+            if len(self.x) > GRAINS and (level := self.render_level(now)) < 1.0:
+                tb = tb[:GRAINS] + [b * level for b in tb[GRAINS:]]
+            return tx, ty, tb
         lead = None
         if any(part["motion"] == "turn" for part in form["parts"]) or self._render_flying(form, now):
             w = self.omega  # The swarm may have fewer grains than the form while it grows or after it shrinks.
@@ -5146,6 +5591,8 @@ class Scene:
     def _render_labels_moment(self, now):
         """What of now _render_labels draws: nothing while its alpha is too low to draw, else that alpha and where the
         moved parts fly. Equal moments draw the same pixels."""
+        if self.render_form.get("kind") == "constellation":
+            return repr([(text, round(alpha, 3)) for text, _, _, alpha, _ in self.diagram_names(now)])
         alpha = self._render_label_alpha(now)
         if alpha <= 0.01:
             return "hidden"
@@ -5156,6 +5603,13 @@ class Scene:
         """The scene's labels as letter outlines with no plate, as the state labels are, and its title or the step's
         caption under it. Labels of parts a step does not light are dimmer."""
         r, form, now = self.render, self.render_form, self.last
+        if form.get("kind") == "constellation":
+            scale = cr.get_target().get_device_scale()[0]
+            for text, x, y, alpha, grow in self.diagram_names(now):
+                sprite = self._diagram_sprite(cr, text, scale, grow)
+                cr.set_source_surface(sprite, *_device_round(cr, cx + x - 14, cy + r["dy"] + y - 14))
+                cr.paint_with_alpha(alpha)
+            return
         alpha = self._render_label_alpha(now)
         if alpha <= 0.01:
             return
@@ -5423,6 +5877,14 @@ class Scene:
         if self.quiet or self.quiet_mix:
             on = self.quiet and self.form == "loop" and not self.dark
             self.quiet_mix = min(1.0, self.quiet_mix + dt / QUIET_IN) if on else max(0.0, self.quiet_mix - dt / QUIET_OUT)
+        look = REST_LOOKS[REST_LOOK]
+        if look:
+            home = self.home and self.form == "loop"
+            settled = home and now - self.form_at > REST_SETTLE
+            self.rest_dim = min(1.0, self.rest_dim + dt / REST_IN) if settled else max(0.0, self.rest_dim - dt / REST_OUT)
+            on = home and self.quiet and not self.dark
+            self.glare_mix = (min(1.0, self.glare_mix + dt / look["rise"]) if on else
+                              max(0.0, self.glare_mix - dt / REST_FALL) if home else 0.0)
         self.err += ((1.0 if s == "error" and not self.home else 0.0) - self.err) * _glide(dt, 0.8)
         share = 0.035 if self.quiet else 0.09 if s == "thinking" and self.activity else 0.06 if s == "thinking" else 0.035
         self.share += (share - self.share) * _glide(dt, 0.8)
@@ -5500,6 +5962,10 @@ class Scene:
                   and ACTIVITY_FORMS[self.shown_activity(now)] not in devs_pack.SEND_FORMS):
                 # A send form shows only with its fan (above), never a lone device before or after it.
                 form = ACTIVITY_FORMS[self.shown_activity(now)]
+                if form.__class__ is tuple:
+                    if self.form not in form:
+                        FORM_ROTATIONS[form] = FORM_ROTATIONS.get(form, -1) + 1
+                    form = self.form if self.form in form else form[FORM_ROTATIONS[form] % len(form)]
             elif s == "thinking":
                 # Plain thinking alternates the rook with the theme pack's thinking icons, THINK_TURN seconds each.
                 if self.thinking_since is None:
@@ -5523,7 +5989,9 @@ class Scene:
                 fast = "frame" in (form, self.form)
                 self.pace, self.delay_scale = ((2.4 if form == "frame" else 2.0), 0.35) if fast else (1.0, 1.0)
                 self.prev, self.form, self.form_at = self.form, form, now
-                self.loosen = 1.0
+                # A constellation pours out along its own paths: a scattering burst would blur its glyphs.
+                self.loosen = RENDER_LOOSEN if form == "render" and self.render_form.get("kind") == "constellation" \
+                    else 1.0
                 self.loose_until = [-math.inf] * len(self.x)
                 self.spring_unloose = True  # The chip's grains let go of their loose springs too (see _DustGL.step_springs).
             if self.dispatch is not None:  # The strands leave the send form's ports as the form turns.
@@ -5601,6 +6069,29 @@ class Scene:
         k, dx, dy = FORM_FIT[name]
         return [x * k + dx for x in tx], [y * k + dy for y in ty], tb
 
+    def _rest_look(self, look, points, flow, tb, now):
+        """REST_LOOK on the loop's brightness tb: the dim rest with its flecks, and the quiet turn's glare."""
+        rest, glare = _smooth(self.rest_dim), _smooth(self.glare_mix)
+        if not rest and not glare:
+            return
+        dim, cut, twinkle, level = look["dim"], look["flecks"], look["twinkle"], look["level"]
+        centre, tau, exp, sin = now * 2 * math.pi / look["lap"], 2 * math.pi, math.exp, math.sin
+        peak, band = look["peak"], look["band"]
+        sparkles = round(float(devs_pack.LOOK.get("sparkle_fraction", 0.12)) * 100)
+        for i in self.idx:
+            h = (i * 2654435761) & 0xFFFFFFFF
+            if h % 100 < cut:  # A fleck: today's sparkle grains first, as the shaders pick them (sparkle_fraction).
+                f = 1.0 if twinkle is None else 0.8 + 0.35 * sin(
+                    tau * now / (twinkle[0] + (twinkle[1] - twinkle[0]) * (h >> 8 & 255) / 255) + (h >> 16 & 1023))
+            else:  # The other sparkle grains dim to the plain grains' light, so only the flecks sparkle.
+                f = dim * 0.3 if h % 100 < sparkles else dim
+            f = 1.0 + (f - 1.0) * rest
+            if glare:
+                # The glare keys on the grain's place on the loop, as the comet does: a soft band, no orb.
+                d = (points[i][0] + flow - centre + math.pi) % tau - math.pi
+                f += (level * (1.0 + peak * exp(-(d / band) ** 2)) - f) * glare
+            tb[i] *= f
+
     def _form_targets(self, name, now):
         """Where each grain belongs in a form right now, at the form's own size."""
         self._target_z = [0.0] * GRAINS
@@ -5630,7 +6121,10 @@ class Scene:
                 ty[i] = rest_y + 26 * 2 * sa * ca + offset
                 # The strand through the crossing at a = 0 is in front; the other passes behind it.
                 tb[i] = 0.55 + 0.225 * (ca + 1)
-            if self.quiet_mix:
+            look = REST_LOOKS[REST_LOOK]
+            if look:
+                self._rest_look(look, points, flow, tb, now)
+            elif self.quiet_mix:
                 # A quiet turn: only brightness changes. The comet keys on each grain's place on the loop, so it follows
                 # the figure eight through the crossing: a soft head 0.24 rad ahead of it and a tail 1.2 rad behind.
                 glow, head, tau, exp = _smooth(self.quiet_mix), now * 2 * math.pi / QUIET_LAP, 2 * math.pi, math.exp
@@ -6359,6 +6853,11 @@ class Scene:
                 if base[i] > 0.85:
                     sparks.append(i)
             self._paint_grains(cr, cx, cy, x, y, size, buckets, sparks, zoom)
+        frame = self.filament_frame(now) if self.render is not None else None
+        if frame is not None:  # A constellation's lines, as the GL passes draw them (see _DustGL._filament).
+            con, t, dy = frame
+            light = PALETTE["operator"] != cairo.OPERATOR_ADD
+            filament.draw(cr, con.elements, con.lines(t, now, light), cx, cy + dy, light)
         if self.dispatch_active(now):
             self.dispatch.draw_strands_cairo(cr, cx, cy + self.dispatch_y_offset(), now, PALETTE,
                                              is_nova=(self.pack_kind == "flipbook"))
@@ -7045,6 +7544,76 @@ def _paint_view_line(cr, scene, now, centre, line, mark):
             cr.set_source_rgba(*rgb, a * LABEL_ALPHA * p)
             cr.stroke()
         cr.restore()
+
+
+def _paint_view_controls(cr, controls, playing, progress):
+    """The viewer's hover controls, drawn like the close mark beside them: label-gold marks with the label's halo and
+    no plates, so they sit on the line under the box as the title does. A play or pause mark, the scrub bar as a
+    hairline the gold fills along to a small bead of the same line, and an "open in the system viewer" arrow.
+    controls are the rects from Overlay._view_controls; progress runs from 0 to 1, or is None."""
+    halo_w, halo_a = PALETTE["label_outline"]
+    def ink(path, width=1.6, fill=False, alpha=1.0):
+        for w, rgb, a in ((2 * halo_w + width, PALETTE["label_halo"], halo_a), (width, PALETTE["label"], 1.0)):
+            path()
+            cr.set_line_width(w)
+            cr.set_source_rgba(*rgb, a * alpha * LABEL_ALPHA)
+            if fill and rgb is PALETTE["label"]:
+                cr.fill_preserve()
+            cr.stroke()
+    cr.save()
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    if "play" in controls:
+        x, y, w, h = controls["play"]
+        cx, cy = x + w / 2, y + h / 2
+        if playing:
+            ink(lambda: (cr.move_to(cx - 2.5, cy - 4.5), cr.line_to(cx - 2.5, cy + 4.5),
+                         cr.move_to(cx + 2.5, cy - 4.5), cr.line_to(cx + 2.5, cy + 4.5)), width=2.0)
+        else:
+            ink(lambda: (cr.move_to(cx - 3, cy - 5), cr.line_to(cx + 4.5, cy), cr.line_to(cx - 3, cy + 5),
+                         cr.close_path()), width=1.2, fill=True)
+    if "scrub" in controls and controls["scrub"][2] > 0:
+        x, y, w, h = controls["scrub"]
+        x0, x1, cy = x + 4, x + w - 4, y + h / 2
+        ink(lambda: (cr.move_to(x0, cy), cr.line_to(x1, cy)), width=2.4, alpha=0.45)
+        if progress is not None:
+            head = x0 + (x1 - x0) * max(0.0, min(1.0, progress))
+            ink(lambda: (cr.move_to(x0, cy), cr.line_to(head, cy)), width=3.2)
+            ink(lambda: (cr.new_sub_path(), cr.arc(head, cy, 4.2, 0, 2 * math.pi)), width=1.0, fill=True)
+    if "open" in controls:
+        x, y, w, h = controls["open"]
+        cx, cy = x + w / 2, y + h / 2
+        ink(lambda: (cr.move_to(cx - 4, cy + 4), cr.line_to(cx + 4, cy - 4),
+                     cr.move_to(cx - 1, cy - 4), cr.line_to(cx + 4, cy - 4), cr.line_to(cx + 4, cy + 1)))
+    cr.restore()
+
+
+def _paint_view_close(cr, rect, hot=False):
+    """The viewer's close X in its own node at rect: a soft disc in the label halo's colour, so it reads over any
+    picture, under a label-gold X with the label's halo, as the other controls are drawn. While the pointer is on it
+    (hot), the disc fills more and a gold ring circles it, so the press target is plain."""
+    x, y, w, h = rect
+    cx, cy, r, arm = x + w / 2, y + h / 2, w / 2, w * 0.2
+    cr.save()
+    cr.set_source_rgba(*PALETTE["label_halo"], 0.7 if hot else 0.45)  # Dark under the dark theme's gold, light under the light one's brown.
+    cr.arc(cx, cy, r - 1, 0, 2 * math.pi)
+    cr.fill()
+    if hot:
+        cr.set_line_width(1.6)
+        cr.set_source_rgba(*PALETTE["label"], LABEL_ALPHA)
+        cr.arc(cx, cy, r - 1.8, 0, 2 * math.pi)
+        cr.stroke()
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    for width, rgb, a in ((2 * PALETTE["label_outline"][0] + 2.0, PALETTE["label_halo"], PALETTE["label_outline"][1]),
+                          (2.0, PALETTE["label"], 1.0)):
+        cr.move_to(cx - arm, cy - arm)
+        cr.line_to(cx + arm, cy + arm)
+        cr.move_to(cx + arm, cy - arm)
+        cr.line_to(cx - arm, cy + arm)
+        cr.set_line_width(width)
+        cr.set_source_rgba(*rgb, a * LABEL_ALPHA)
+        cr.stroke()
+    cr.restore()
 
 
 def _view_caption_origin(scene, now, centre):
@@ -8461,6 +9030,53 @@ void main() {
 }
 """
 
+# A constellation's filament layer (filament.py): one quad over the drawing's texture, whose texels say each pixel's
+# core and ink coverage, how far along its stroke it lies, and its element. The element's state comes per frame as
+# three vec4 uniforms (Constellation.lines). mode 0 adds the glow into the HDR frame for the bloom, mode 1 puts the
+# ink edge under what is drawn, mode 2 draws the cores over it.
+_FILAMENT_VERT = """#version 430 core
+uniform vec4 rect;  // The texture's left, top, width and height in device pixels.
+uniform vec2 size_px;
+void main() {
+    vec2 corner = vec2(gl_VertexID & 1, gl_VertexID >> 1);
+    gl_Position = vec4((rect.xy + corner * rect.zw) / size_px * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+_FILAMENT_FRAG = f"""#version 430 core
+uniform sampler2D art;
+uniform vec4 rect, hot_rgb;
+uniform int mode;
+uniform float amount;  // Of the glow: all of it before the bloom, then most of it taken back (see _draw_soft_hdr).
+uniform vec4 fa[{filament.MAX_ELEMENTS}], fb[{filament.MAX_ELEMENTS}], fc[{filament.MAX_ELEMENTS}];
+out vec4 result;
+void main() {{
+    vec4 t = texelFetch(art, ivec2(gl_FragCoord.xy - rect.xy), 0);
+    int e = int(t.a * 255.0 + 0.5) - 1;
+    if (e < 0) discard;
+    vec4 a = fa[e], b = fb[e], c = fc[e];  // See Constellation.lines for the twelve values.
+    float s = t.b;
+    if (b.x <= 0.001 || s > b.x + 0.003) discard;  // Not drawn on yet.
+    bool hot = b.y > 0.0 && (b.z > 0.5 ? 1.0 - s : s) <= b.y + 0.003;
+    vec3 col = hot ? hot_rgb.rgb : a.rgb;
+    float alpha = hot ? c.z : a.a, glow = hot ? c.w : b.w;
+    if (c.y > 0.5 && s >= b.x - 0.05) {{  // The pen of light at the tip of a line that draws on.
+        col = hot_rgb.rgb;
+        alpha = max(alpha, c.z);
+        glow = max(glow, c.w);
+    }}
+    if (mode == 0) {{
+        result = vec4(vec3({filament.GLOW_LIN[0]:.4f}, {filament.GLOW_LIN[1]:.4f}, {filament.GLOW_LIN[2]:.4f})
+                      * ({filament.GLOW_K:.4f} * glow * t.g * amount), 0.0);
+    }} else if (mode == 1) {{
+        float k = t.g * min(0.55, 0.6 * alpha);
+        result = vec4(vec3({filament.INK[0]:.4f}, {filament.INK[1]:.4f}, {filament.INK[2]:.4f}) * k, k);
+    }} else {{
+        float k = t.r * min(1.0, alpha);
+        result = vec4(col * k, k);
+    }}
+}}
+"""
+
 _KAWASE_UP_FRAG = """#version 430 core
 uniform sampler2D src_tex;
 uniform sampler2D tap_tex;
@@ -8638,7 +9254,8 @@ def _gl_functions():
         "glTexParameteri": (None, u, u, i), "glGenFramebuffers": (None, i, ctypes.POINTER(u)),
         "glBindFramebuffer": (None, u, u), "glFramebufferTexture2D": (None, u, u, u, u, i),
         "glCheckFramebufferStatus": (u, u), "glViewport": (None, i, i, i, i), "glDisable": (None, u),
-        "glEnable": (None, u), "glBlendFunc": (None, u, u), "glScissor": (None, i, i, i, i),
+        "glEnable": (None, u), "glBlendFunc": (None, u, u), "glBlendEquation": (None, u),
+        "glScissor": (None, i, i, i, i),
         "glGenerateMipmap": (None, u), "glDeleteShader": (None, u),
         "glColorMask": (None, ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_ubyte),
         "glDrawArrays": (None, u, i, i), "glDrawArraysInstanced": (None, u, i, i, i),
@@ -8695,6 +9312,8 @@ class _DustGL:
         self.direct_prog = self._program((0x8B31, _DIRECT_VERT), (0x8B30, _DIRECT_FRAG))
         self.soft_prog = self._program((0x8B31, _SOFT_VERT), (0x8B30, _SOFT_FRAG))
         self.strand_prog = self._program((0x8B31, _STRAND_VERT), (0x8B30, _STRAND_FRAG))
+        self.fil_prog = self._program((0x8B31, _FILAMENT_VERT), (0x8B30, _FILAMENT_FRAG))
+        self.fil_tex, self.fil_key, self.fil_size, self.fil_at = None, None, (0, 0), None  # See _filament.
         self.kawase_down_prog = self._program((0x8B31, _RESOLVE_VERT), (0x8B30, _KAWASE_DOWN_FRAG))
         self.kawase_up_prog = self._program((0x8B31, _RESOLVE_VERT), (0x8B30, _KAWASE_UP_FRAG))
         self.tonemap_prog = self._program((0x8B31, _RESOLVE_VERT), (0x8B30, _TONEMAP_FRAG))
@@ -9143,6 +9762,49 @@ class _DustGL:
             gl.BufferData(0x8892, ctypes.sizeof(arr), arr, 0x88E8)
             gl.DrawArrays(5, 0, n * 2)  # GL_TRIANGLE_STRIP
 
+    def _filament(self, gl, scene, W, H, centre, scale, mode, light=False, amount=1.0):
+        """A constellation's filament layer, one pass of it (see _FILAMENT_FRAG) into the bound frame. The drawing's
+        texture is made once per diagram and scale; per frame only its elements' state goes up, once for all passes.
+        Nothing happens without a constellation, and then it returns False."""
+        frame = scene.filament_frame(scene.last) if scene.render is not None else None
+        if frame is None:
+            if self.fil_tex is not None:  # The last diagram's texture goes with it.
+                gl.DeleteTextures(1, (ctypes.c_uint * 1)(self.fil_tex))
+                self.fil_tex = self.fil_key = None
+            return False
+        con, t, dy = frame
+        prog = self.fil_prog
+        gl.UseProgram(prog)
+        gl.ActiveTexture(0x84C0)
+        if self.fil_key is None or self.fil_key[0] is not con.elements or self.fil_key[1] != scale:
+            data, tw, th = filament.art(con.elements, con.plan["size"], scale)
+            if self.fil_tex is None:
+                ids = (ctypes.c_uint * 1)()
+                gl.GenTextures(1, ids)
+                self.fil_tex = ids[0]
+            gl.BindTexture(0x0DE1, self.fil_tex)
+            gl.TexImage2D(0x0DE1, 0, 0x8058, tw, th, 0, 0x1908, 0x1401, data)  # GL_RGBA8 from GL_RGBA bytes
+            gl.TexParameteri(0x0DE1, 0x2801, 0x2600)  # GL_NEAREST: one level, so texelFetch sees a whole texture
+            gl.TexParameteri(0x0DE1, 0x2800, 0x2600)
+            self.fil_key, self.fil_size, self.fil_at = (con.elements, scale), (tw, th), None
+        gl.BindTexture(0x0DE1, self.fil_tex)
+        if self.fil_at != (scene.last, con, light):
+            self.fil_at = (scene.last, con, light)
+            st, n = con.lines(t, scene.last, light), filament.MAX_ELEMENTS
+            for name, at in (("fa", 0), ("fb", 4), ("fc", 8)):
+                values = [st[j + at + q] for j in range(0, len(st), 12) for q in range(4)]
+                gl.Uniform4fv(self._u(prog, name), n, (ctypes.c_float * (4 * n))(*values))
+        tw, th = self.fil_size
+        hot = filament.LIGHT[filament.HOT] if light else filament.HOT
+        self._set(prog, art=0, mode=mode, amount=float(amount), size_px=(float(W), float(H)), hot_rgb=(*hot, 1.0),
+                  rect=(float(round(centre[0] * scale) - tw // 2), float(round((centre[1] + dy) * scale) - th // 2),
+                        float(tw), float(th)))
+        gl.Enable(0x0BE2)
+        gl.BlendFunc(*((1, 1), (0x0305, 1), (1, 0x0303))[mode])  # Add; under what is there; premultiplied over.
+        gl.BindVertexArray(self.empty_vao)
+        gl.DrawArrays(5, 0, 4)
+        return True
+
     def _draw_soft_hdr(self, gl, palette, scene, W, H, centre, scale, under, out_tex):
         """Render soft round/elliptical grains (+ helix gold strands) into RGBA16F and tone-map onto out_tex."""
         hdr = self._ensure_hdr(W, H)
@@ -9174,9 +9836,20 @@ class _DustGL:
             gl.BindVertexArray(self.dispatch_vao)
             self._set(prog, spark=0)
             gl.DrawArraysInstanced(5, 0, 4, len(drows) // 11)
+        glowed = self._filament(gl, scene, W, H, centre, scale, 0)  # A constellation's glow, for the bloom to spread.
         gl.Disable(0x0BE2)
         bloom_tex = self._draw_kawase_bloom(gl, hdr, W, H) if (
             PARTICLE_VARIANT in ("B", "C") and hasattr(self, "_draw_kawase_bloom")) else None
+        if glowed:  # Once spread, most of the glow comes out again, so the line stays a crisp core in a soft glow.
+            gl.BindFramebuffer(0x8D40, self.out_fbo)
+            gl.FramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, hdr, 0)
+            gl.Viewport(0, 0, W, H)
+            gl.BlendEquation(0x800B)  # GL_FUNC_REVERSE_SUBTRACT: what is there, less the glow.
+            try:
+                self._filament(gl, scene, W, H, centre, scale, 0, amount=1.0 - filament.GLOW_KEEP)
+            finally:
+                gl.BlendEquation(0x8006)  # GL_FUNC_ADD, always: every later pass blends by adding.
+            gl.Disable(0x0BE2)
         # Resolve HDR (+ optional bloom) through the warm-gold (or Nova plasma) tone curve onto out_tex.
         gl.BindFramebuffer(0x8D40, self.out_fbo)
         gl.FramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, out_tex, 0)
@@ -9208,6 +9881,10 @@ class _DustGL:
         gl.BindVertexArray(self.empty_vao)
         gl.DrawArrays(5, 0, 4)
         gl.ActiveTexture(0x84C0)
+        if scene.render is not None:  # A constellation's ink edge, then its crisp cores, over the frame.
+            self._filament(gl, scene, W, H, centre, scale, 1)
+            self._filament(gl, scene, W, H, centre, scale, 2)
+            gl.Disable(0x0BE2)
 
     def _draw_soft_light(self, gl, palette, scene, W, H, centre, scale, under, out_tex):
         """Render burnished-amber light-theme soft round grains (+ chestnut shadow + helix/dispatch strands) via GL."""
@@ -9239,6 +9916,7 @@ class _DustGL:
             self._upload(self.dispatch_buf, drows)
             gl.BindVertexArray(self.dispatch_vao)
             gl.DrawArraysInstanced(5, 0, 4, len(drows) // 11)
+        self._filament(gl, scene, W, H, centre, scale, 2, light=True)  # A constellation's lines, in amber.
         gl.Disable(0x0BE2)
 
     def _draw_direct_live(self, gl, palette, scene, W, H, centre, scale):
@@ -10382,6 +11060,8 @@ class Overlay(Gtk.Application):
             self.scene.set_pack(self._initial_pack, self.scene.last)
         self._render_seq, self._render_busy, self._render_pending_id, self._render_queue = 0, False, None, []
         self._staged = None  # (request id, scene, form) of a baked scene that waits for Rook's reveal.
+        self._name_textures = {}  # A constellation's names as textures, per text, scale and lettering.
+        self._probe_cr = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
         self.monitor = self.left = self.top = None
         # True while the WoW window is focused. Without WoW mode Rook then hides everything, because WoW's own
         # overlay takes over; in WoW mode Rook is that overlay.
@@ -10421,6 +11101,9 @@ class Overlay(Gtk.Application):
         # box, the file being checked and decoded in a worker thread, and when a video ended.
         self.viewer = None
         self.viewer_ready = False
+        self._viewer_hover = self._scrubbing = False  # The pointer is over the box or its controls; a scrub drags.
+        self._viewer_hover_until = 0.0  # After the pointer leaves, the controls stay until this monotonic time.
+        self._close_hot = False  # The pointer is on the close X, which then shows its ring.
         self.media = self.media_leaving = None
         self._video_clock = None  # The viewer's frame clock callback while a video plays; see _video_frame.
         self._edges = None  # The open viewer's dust strips as render nodes, kept until the dust moves.
@@ -10858,6 +11541,16 @@ class Overlay(Gtk.Application):
         click = Gtk.GestureClick()
         click.connect("released", self._viewer_clicked)
         area.add_controller(click)
+        hover = Gtk.EventControllerMotion()
+        hover.connect("enter", lambda *_: self._viewer_hovered(True))
+        hover.connect("leave", lambda *_: self._viewer_hovered(False))
+        hover.connect("motion", self._viewer_pointer_moved)
+        area.add_controller(hover)
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", lambda g, x, y: self._viewer_scrub(g, x, y, 0.0))
+        drag.connect("drag-update", lambda g, dx, dy: self._viewer_scrub(g, *g.get_start_point()[1:], dx))
+        drag.connect("drag-end", lambda *_: setattr(self, "_scrubbing", False))
+        area.add_controller(drag)
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._viewer_key)
         win.add_controller(keys)
@@ -10932,22 +11625,24 @@ class Overlay(Gtk.Application):
         self.media_paused, self._media_ended_at = False, None
         if self.monitor is not None:
             LayerShell.set_monitor(self.viewer, self.monitor)
-        mode = LayerShell.KeyboardMode.NONE if self.wow and self.in_game else LayerShell.KeyboardMode.ON_DEMAND
-        LayerShell.set_keyboard_mode(self.viewer, mode)
+        self._viewer_hovered(self._viewer_hover and replacing)  # A new viewer waits for the pointer to come.
         self.viewer.set_visible(True)
         self._viewer_region = None
         self._emit({"event": "shown", "path": path, "kind": media.kind, "width": media.size[0],
                     "height": media.size[1]})
 
     def _close_media(self, why):
-        """Close the viewer: fade the media out, ease the box and edge dust away, and drop any file still loading."""
-        self._media_job += 1
+        """Close the viewer: fade the media out and ease the box and edge dust away. Only Rook's own close drops a file
+        still loading. A hand close, an end or an error closes what shows, and a newer show still opens."""
+        if why == "rook":
+            self._media_job += 1
         view = self.scene.view
         if view is None or view.closing is not None:
             return
         self.scene.close_view(time.monotonic())
         if self.media is not None and self.media.kind == "video":
             self.media.pause()
+        self._viewer_hover = False
         LayerShell.set_keyboard_mode(self.viewer, LayerShell.KeyboardMode.NONE)
         self._viewer_region = None
         self._emit({"event": "closed", "path": self.media_path, "why": why})
@@ -10963,9 +11658,13 @@ class Overlay(Gtk.Application):
 
     def _toggle_pause(self):
         media = self.media
-        if media is None or media.kind != "video" or self.scene.view is None or self.scene.view.closing is not None:
+        if media is None or media.kind == "image" or self.scene.view is None or self.scene.view.closing is not None:
             return
-        if media.playing:
+        if media.kind == "animation":
+            t = time.monotonic() - self.scene.view.media_at
+            media.pause(t) if media.playing else media.play(t)
+            self.media_paused = not media.playing
+        elif media.playing:
             media.pause()
             self.media_paused = True
         else:
@@ -11048,8 +11747,8 @@ class Overlay(Gtk.Application):
         cx, cy = self._centre()
         bx, by, bw, bh = view.box(now)
         rects = [(cx + bx, cy + by, bw, bh)]
-        if self.media is not None and self.media.kind == "video":
-            rects.append((cx + bx + bw - 21, cy + by + bh + VIEW_LINE_DY - 14, 28, 28))
+        if (row := self._view_controls(now, always=True).get("row")) is not None:
+            rects.append(row)
         if self.scene.captions and self.scene.caption_box and self.details.strip() and not self.answer_open:
             ox, oy = _view_caption_origin(self.scene, now, (cx, cy))
             x, y, w, h = self.scene.caption_box
@@ -11075,11 +11774,18 @@ class Overlay(Gtk.Application):
 
         def inside(rect):
             return rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]
-        video = self.media is not None and self.media.kind == "video"
-        if video and len(rects) > 1 and inside(rects[1]):
+        moving = self.media is not None and self.media.kind in ("video", "animation")
+        controls = self._view_controls(now)
+        if "close" in controls and inside(controls["close"]):
             self._close_media("close mark")
+        elif "scrub" in controls and inside(controls["scrub"]):
+            return  # The drag gesture seeks.
+        elif "play" in controls and inside(controls["play"]):
+            self._toggle_pause()
+        elif "open" in controls and inside(controls["open"]):
+            self._open_elsewhere()
         elif rects and inside(rects[0]):
-            if video:
+            if moving:
                 self._toggle_pause()
             else:
                 self._close_media("click")
@@ -11094,6 +11800,97 @@ class Overlay(Gtk.Application):
             self._toggle_pause()
             return True
         return False
+
+    def _viewer_hovered(self, over):
+        """The pointer came onto the box or its controls, or left them. While the pointer is on it, a click gives the viewer
+        the keyboard, for Space and Escape. Passing over it never takes the owner's typing, and the game never loses it.
+        After the pointer leaves, the controls stay VIEW_HOVER_GRACE seconds, so a pointer on its way to them, or a
+        compositor that sends leave and enter as the keyboard mode changes, never makes them vanish."""
+        if over:
+            self._viewer_hover_until = 0.0
+            if not self._viewer_hover:
+                self._viewer_hover = True
+                game = self.wow and self.in_game
+                LayerShell.set_keyboard_mode(self.viewer, LayerShell.KeyboardMode.NONE if game
+                                             else LayerShell.KeyboardMode.ON_DEMAND)
+        elif self._viewer_hover:
+            self._viewer_hover_until = time.monotonic() + VIEW_HOVER_GRACE
+            GLib.timeout_add(int(VIEW_HOVER_GRACE * 1000) + 20, self._viewer_hover_ended)
+        self.viewer_area.queue_draw()
+
+    def _viewer_pointer_moved(self, _controller, x, y):
+        """The pointer moved over the viewer: the close X lights while it is on it. A redraw only when that changes."""
+        close = self._view_controls(time.monotonic()).get("close")
+        hot = close is not None and close[0] <= x < close[0] + close[2] and close[1] <= y < close[1] + close[3]
+        if hot != self._close_hot:
+            self._close_hot = hot
+            self.viewer_area.queue_draw()
+
+    def _viewer_hover_ended(self):
+        """The grace after the pointer left has run out with no return: hide the controls and give back the keyboard."""
+        if self._viewer_hover and self._viewer_hover_until and time.monotonic() >= self._viewer_hover_until:
+            self._viewer_hover, self._viewer_hover_until, self._close_hot = False, 0.0, False
+            LayerShell.set_keyboard_mode(self.viewer, LayerShell.KeyboardMode.NONE)
+            self.viewer_area.queue_draw()
+        return False
+
+    def _view_controls(self, now, always=False):
+        """The hover controls of the open box, as rects in the viewer's coordinates: "row" under the box takes the
+        pointer, "play" and "scrub" show for a clip or a video, "open" for any file, and "close", an X in the box's
+        top-right corner. Empty while the pointer is elsewhere, unless always, which the input region uses so the
+        pointer can reach the row before the controls show."""
+        view, media = self.scene.view, self.media
+        if (not (always or self._viewer_hover) or media is None or view is None or view.closing is not None
+                or view.opened(now) < 0.5):
+            return {}
+        cx, cy = self._centre()
+        bx, by, bw, bh = view.box(now)
+        x, y, yc = cx + bx, cy + by + bh, cy + by + bh + VIEW_LINE_DY
+        controls = {"row": (x - 7, y, bw + 14, VIEW_LINE_DY + 14)}
+        controls["close"] = (x + bw - VIEW_CLOSE_SIZE - 6, cy + by + 6, VIEW_CLOSE_SIZE, VIEW_CLOSE_SIZE)
+        open_x = x + bw - 7
+        controls["open"] = (open_x - 14, yc - 14, 28, 28)
+        if media.kind != "image":
+            controls["play"] = (x - 7, yc - 14, 28, 28)
+            controls["scrub"] = (x + 28, yc - 14, max(0, open_x - 22 - x - 28), 28)
+        return {k: tuple(int(round(v)) for v in r) for k, r in controls.items()}
+
+    def _media_progress(self, now):
+        """How far the clip or video has played, from 0 to 1, or None."""
+        media, view = self.media, self.scene.view
+        if media is None or view is None or media.kind == "image":
+            return None
+        if media.kind == "animation":
+            total = media.total or media.length
+            return min(1.0, media.at(now - view.media_at) / total) if total > 0 else None
+        where = media.where()
+        return where[0] / where[1] if where else None
+
+    def _viewer_scrub(self, _gesture, x, y, dx):
+        """A press or drag on the scrub bar moves the clip or video there."""
+        now = time.monotonic()
+        scrub = self._view_controls(now).get("scrub")
+        if scrub is None or not (self._scrubbing or (scrub[0] <= x < scrub[0] + scrub[2]
+                                                     and scrub[1] <= y < scrub[1] + scrub[3])):
+            return
+        self._scrubbing = True
+        to = max(0.0, min(1.0, (x + dx - scrub[0]) / max(1, scrub[2])))
+        media = self.media
+        if media.kind == "animation":
+            media.seek(to * (media.total or media.length), now - self.scene.view.media_at)
+        elif (where := media.where()) is not None:
+            media.seek(to * where[1])
+            self._media_ended_at = None
+        self.viewer_area.queue_draw()
+
+    def _open_elsewhere(self):
+        """Open the file in the system's own viewer. Rook's viewer stays open."""
+        try:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", self.media_path],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as error:
+            self._emit({"event": "show_error", "path": self.media_path, "error": f"Rook could not open it: {error}."})
 
     def _media_texture(self, media, surface, version):
         """The media frame as a GPU texture, made once per frame: the box and the media cost the CPU nothing more."""
@@ -11283,6 +12080,9 @@ class Overlay(Gtk.Application):
         cx, cy = self._canvas_cx(w), scene.lift + ORB / 2
         state = scene.label if scene.label and scene.label_alpha > 0.01 else None
         render = scene.render if scene.render is not None and scene.form == "render" else None
+        names = scene.diagram_names(scene.last)
+        if names:
+            render = None  # A constellation's names are textures of their own (below), not part of this layer.
         dispatch = scene.dispatch if scene.dispatch_active(scene.last) else None
         guide = scene.guide_key() if scene.guide_shown and scene.guide_shown[2] else None
         if state is not None or render is not None or guide is not None:
@@ -11312,6 +12112,21 @@ class Overlay(Gtk.Application):
             texture = self._labels[1]
             snap.append_texture(texture, Graphene.Rect().init(0, 0, texture.get_width() / scale,
                                                                texture.get_height() / scale))
+        for text, x, y, alpha, grow in names:
+            key = (text, scale, grow, id(LETTERING), id(PALETTE))
+            if key not in self._name_textures:
+                if len(self._name_textures) > 64:
+                    self._name_textures.clear()
+                sprite = scene._diagram_sprite(self._probe_cr, text, scale, grow)
+                self._name_textures[key] = (DispatchState._surface_to_texture(sprite),
+                                            sprite.get_width() / scale, sprite.get_height() / scale)
+            texture, tw, th = self._name_textures[key]
+            # On whole device pixels, so GSK never resamples the letters.
+            left = round((cx + x - 14) * scale) / scale
+            top = round((cy + scene.render["dy"] + y - 14) * scale) / scale
+            snap.push_opacity(min(1.0, alpha))
+            snap.append_texture(texture, Graphene.Rect().init(left, top, tw, th))
+            snap.pop()
         if dispatch is not None:
             dispatch.append_gl_overlay(snap, cx, cy + scene.dispatch_y_offset(), w, scene.last,
                                        scene.monitor_width, scale, PALETTE, is_nova=(scene.pack_kind == "flipbook"))
@@ -11426,11 +12241,16 @@ class Overlay(Gtk.Application):
                 snap.append_node(self._edges[1])
         bx, by, bw, bh = view.box(now)
         line = "PAUSED" if self.media_paused else self.media_title
-        mark = self.media is not None and self.media.kind == "video"
+        mark = False  # The X in the box's corner closes every file now (see _view_controls).
         label = p > 0.002 and bool(scene.label)
-        if line or mark or label:
+        controls = self._view_controls(now)
+        if (close := controls.get("close")) is not None:
+            _paint_view_close(cairo_node(*close), close, self._close_hot)
+        if line or mark or label or controls:
             cr = cairo_node(cx + bx - 12, cy + by + bh + 4, bw + 24, VIEW_LINE_DY + 28)
-            _paint_view_line(cr, scene, now, centre, line, mark)
+            _paint_view_line(cr, scene, now, centre, "" if controls else line, mark)
+            if controls:
+                _paint_view_controls(cr, controls, not self.media_paused, self._media_progress(now))
             if label:
                 scene._label(cr, cx, cy, in_view=True, fade=p)
         if scene.captions and p > 0.002:
@@ -11673,7 +12493,7 @@ class Overlay(Gtk.Application):
                 self._reveal_render()
             return
         if self._render_busy or self._staged:
-            if isinstance(spec, dict) and (spec.get("clear") or "scene" in spec):
+            if isinstance(spec, dict) and (spec.get("clear") or "scene" in spec or "diagram" in spec):
                 if self._cancel_render() and spec.get("clear"):  # The model was told it shows, so it is cleared.
                     self.scene.end_render(time.monotonic())
                     self._emit({"event": "rendered", "id": req_id, "ok": True, "said": "Cleared."})
@@ -11687,6 +12507,23 @@ class Overlay(Gtk.Application):
                         return
                 self._render_queue.append(spec)
                 return
+        if isinstance(spec, dict) and "diagram" in spec and not spec.get("clear"):
+            try:  # A few ms on the main loop: no bake, no thread.
+                scene, form = self.scene.diagram_form(spec["diagram"])
+            except Exception as error:
+                self._emit({"event": "rendered", "id": req_id, "ok": False, "error": f"The diagram failed: {error!r}."})
+                return
+            if form is None:
+                self._emit({"event": "rendered", "id": req_id, "ok": False,
+                            "error": "A diagram needs two nodes joined by > or -."})
+            elif spec.get("stage") is True:  # Rook reveals it when its voice starts the answer.
+                self._staged = (req_id, scene, form)
+                self._emit({"event": "rendered", "id": req_id, **self.scene.render_said(scene, form)})
+            else:
+                self._emit({"event": "rendered", "id": req_id,
+                            **self._commit_scene(req_id, scene, form, time.monotonic())})
+                self._apply_state()
+            return
         if isinstance(spec, dict) and "scene" in spec and not spec.get("clear"):
             scene, errors = scenes.validate(spec.get("scene"))
             if errors:
@@ -11768,6 +12605,9 @@ class Overlay(Gtk.Application):
             self._apply_state()
         except Exception as error:
             self._drop_bad_scene("reveal", error, now)
+            self._drain_render(self._render_seq)
+            return
+        if form.get("kind") == "constellation":
             self._drain_render(self._render_seq)
             return
         self._render_busy = True
@@ -12642,7 +13482,7 @@ class Overlay(Gtk.Application):
             return
         reach = self.scene.render_reach(now)
         if reach is not None:
-            size = (WIDTH, self.scene.lift + ORB // 2 + max(ORB_H - ORB // 2, reach))
+            size = (self.scene.render_width_px, self.scene.lift + ORB // 2 + max(ORB_H - ORB // 2, reach))
             win_w = WIDTH
         elif self.scene.dispatch_active(now):
             win_w = self.scene.dispatch_canvas_width()
@@ -14105,6 +14945,25 @@ def _check_render():
     # Reading a file shows the Devs scan ring.
     reader = _simulate(_thinking_on("Read"), 3.0, lift=0)[0]
     assert reader.form == "scan" and devs_pack.eval_targets("scan", _form("scan"), reader, 3.0) is not None
+    # The WoW and system tools show their orb-free Devs forms (the owner's picks, 2026-11-27).
+    for tool in ("find_npc", "find_quest", "find_item", "find_upgrades", "find_price", "find_object",
+                 "Skill", "screenshot", "git", "media", "windows", "service", "background", "Bash", "recall",
+                 "t3_thread_read", "WebSearch", "threads"):
+        seeker = _simulate(_thinking_on(tool), 1.5, lift=0)[0]  # Before find_upgrades turns to prices.
+        names = ACTIVITY_FORMS[tool] if ACTIVITY_FORMS[tool].__class__ is tuple else (ACTIVITY_FORMS[tool],)
+        assert seeker.form in names, (tool, seeker.form)
+        assert devs_pack.eval_targets(seeker.form, _form(seeker.form), seeker, 1.5) is not None, tool
+    # find_price takes coins A and C in rotation: each appearance takes the next form and holds it while it shows.
+    coins, shown = ACTIVITY_FORMS["find_price"], []
+    for _ in coins:
+        seeker, t = _simulate(_thinking_on("find_price"), 1.5, lift=0)
+        held = {seeker.form}
+        for k in range(1, 126):  # Two more seconds of the same appearance.
+            seeker.step(t + k * TICK_MS / 1000)
+            held.add(seeker.form)
+        assert len(held) == 1 and seeker.form in coins, held
+        shown.append(seeker.form)
+    assert set(shown) == set(coins), shown
 
     # Devs listening shows only the helix (the owner, 2026-11-25). The ripples ring stays built as the halo style.
     cycle = devs_pack.STATES["listening"]["cycle"]
@@ -14261,6 +15120,25 @@ def _check_render():
         pass
     assert scene.render is None and scene.render_form is None
     run(0.2)
+    # A constellation: it grows the swarm to its fixed budget, its names fade in, a step lights a node, a list lights
+    # two, the voice's end leaves all known, and the swarm shrinks back once it ends. Too few nodes shows nothing.
+    assert not scene.render_command({"diagram": {"graph": "solo"}}, clock[0])["ok"] and scene.render is None
+    said = scene.render_command({"diagram": {"title": "Web", "graph": "browser > dns:globe > server* > page"}},
+                                clock[0])["said"]
+    assert said == "Showing 4 nodes.", said
+    run(1.5)
+    con = scene.render_form["con"]
+    assert len(scene.x) == constellation.BUDGET and scene.size_k == 1.0 and len(scene.diagram_names(clock[0])) == 5
+    assert scene.render_reach(clock[0]) <= scene.render_form["size"][1] and scene.render_width_px <= WIDTH
+    assert scene.render_command({"step": 2}, clock[0])["ok"] and con.focal == 1
+    assert scene.render_command({"step": [3, 4]}, clock[0])["ok"] and con.lit == {2, 3} and 1 in con.known
+    assert not scene.render_command({"step": 9}, clock[0])["ok"]
+    run(1)
+    scene.render_command({"step": 0}, clock[0])
+    assert con.focal is None and con.known == {0, 1, 2, 3}
+    scene.render_command({"clear": True}, clock[0])
+    run(RENDER_FADE + 0.5)
+    assert scene.render is None and len(scene.x) == GRAINS and not scene.diagram_names(clock[0])
     # Review 38 offscreen guards: Cairo frame cost (dark, light, flight), light GL support, u_time wrap,
     # broken-pack resilience + stdin watch armor, Nova zero-dust-work, and full Nova tour.
     global PARTICLE_VARIANT
@@ -14606,7 +15484,7 @@ def _check_render():
     sa = Scene(0.0)
     sa.handle({"state": "thinking", "activity": "t3_thread_read"}, 0.0)
     sa.step(0.5)
-    assert sa.form == "message" and sa.dispatch is None, sa.form
+    assert sa.form in ACTIVITY_FORMS["t3_thread_read"] and sa.dispatch is None, sa.form  # A form, or forms in turn.
     sd.handle({"state": "thinking"}, 1.28)
     # 4) Lone surrogates + markup + control chars across dispatch, captions, scene labels, and titles never crash Pango.
     sd.handle({"send": [{"name": "\ud800<b>Urgent\x07\n<span color='red'>&amp;</b> " + "longword " * 40,
@@ -14700,7 +15578,7 @@ def _check_render():
         sd_web = Scene(0.0)
         sd_web.handle({"state": "thinking", "activity": "WebSearch"}, 0.0)
         sd_web.step(0.1)
-        assert sd_web.form == "globe"
+        assert sd_web.form in ACTIVITY_FORMS["WebSearch"]
         # Missing state fallback: walk every companion state & activity against a pack holding only rest + thinking icons.
         p_minimal = {
             **s_nv_d.pack,
@@ -15140,6 +16018,8 @@ def _check_render():
     assert caption[1] + 8 < guide[0] and guide[1] < CAPTION_H + GUIDE_ROOM - 24 and 0 < guide[2] < guide[3] < WIDTH - 1, (
         caption, guide)
     print("onboarding guide (shows, listens, clears, expires, dark, caps, send fan, worst case): ok")
+    global REST_LOOK
+    default_look, REST_LOOK = REST_LOOK, "today"  # The comet checks below are today's look; the rest looks follow.
     # A quiet turn: Rook stays at rest with no label, form, or send fan, and only a comet lights the loop. Speaking
     # pulls it down, hidden leaves it at rest, a steer (quiet false) drops it down, and dark shows nothing.
     ready, quiet = (0.0, {"state": "ready"}), (0.5, {"state": "thinking", "quiet": True})
@@ -15170,6 +16050,41 @@ def _check_render():
     q = _simulate([ready, (0.2, {"dark": True}), quiet], 2.0)[0]
     assert q.home and q.quiet_mix == 0.0  # At rest while dark, so the window shows nothing (see _should_show).
     print("quiet turn (parked, comet, no label, activity or fan; speaking, pass, steer, normal, dark): ok")
+    # The resting loop's look: "today" never dims. Every other look dims the rest with flecks at today's light, lifts a
+    # quiet turn to its level under a glare lap, falls back to rest when it ends, and lights fully for a turn at once.
+    # It changes brightness only, never a grain's place.
+    saved, work = default_look, [ready, (5.0, {"state": "thinking", "quiet": True})]
+    try:
+        REST_LOOK = "today"
+        today, calm = {t: _simulate(work, t)[0] for t in (4.9, 8.0)}, _simulate([ready], 8.0)[0]
+        assert all(s.rest_dim == s.glare_mix == 0.0 for s in today.values())
+        for name, look in REST_LOOKS.items():
+            if not look:
+                continue
+            REST_LOOK = name
+            rest, quiet = _simulate(work, 4.9)[0], _simulate(work, 8.0)[0]
+            for s, ref in ((rest, today[4.9]), (quiet, today[8.0])):
+                assert (s.x, s.y) == (ref.x, ref.y), (name, "a look moved the grains")
+            assert rest.rest_dim == 1.0 and rest.glare_mix == 0.0 and quiet.glare_mix == 1.0, name
+            flecks = [i for i in range(GRAINS) if (i * 2654435761 & 0xFFFFFFFF) % 100 < look["flecks"]]
+            plain = [i for i in range(GRAINS) if (i * 2654435761 & 0xFFFFFFFF) % 100 >= max(12, look["flecks"])]
+            assert all(abs(rest.depth[i] / today[4.9].depth[i] - look["dim"]) < 1e-6 for i in plain), name
+            assert min(rest.depth[i] / today[4.9].depth[i] for i in flecks) > 0.44, name
+            lit = max(range(GRAINS), key=lambda i: quiet.depth[i] / calm.depth[i])  # Over the loop with no comet.
+            gap = (_form("loop")[lit][0] + 8.0 * 2 * math.pi / LOOP_PERIOD - 8.0 * 2 * math.pi / look["lap"]
+                   + math.pi) % (2 * math.pi) - math.pi
+            assert abs(gap) < look["band"] / 2, (name, gap)  # The brightest grain is at the band's centre.
+            done = _simulate(work + [(8.0, {"state": "ready"})], 8.0 + REST_FALL + 0.1)[0]
+            assert done.glare_mix == 0.0 and done.rest_dim == 1.0, name
+            turn = _simulate(work, 6.0)[0]
+            turn.handle({"state": "speaking"}, 6.0)
+            for t in (6.1, 6.2, 6.25):  # REST_OUT is 0.2 s.
+                turn.step(t)
+            assert turn.rest_dim == turn.glare_mix == 0.0, name
+    finally:
+        REST_LOOK = saved
+    print(f"resting looks ({', '.join(n for n in REST_LOOKS if n != 'today')}: brightness only, "
+          "flecks, glare, fall back, wake): ok")
     print("render scenes in the engine: ok")
 
 
@@ -15922,6 +16837,9 @@ def main():
         return 0
     if "--check-render" in args:
         _check_render()
+        return 0
+    if "--check-viewer" in args:
+        _check_viewer()
         return 0
     return Overlay(demo="--demo" in args, theme=theme, wow="--wow" in args, pack=pack).run(None)
 

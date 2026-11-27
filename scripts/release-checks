@@ -127,6 +127,7 @@ run start-limit "$SYS_PY" desktop/start_limit.py --check
 run machine "$SYS_PY" desktop/machine.py
 run boundaries "$SYS_PY" scripts/check_boundaries.py
 run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
+run overlay-viewer "$SYS_PY" desktop/overlay.py --check-viewer
 wait
 
 if [ ! -d "$X" ]; then

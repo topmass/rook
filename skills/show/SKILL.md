@@ -12,13 +12,14 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 - `relay.py show /full/path/file.mp4 --title "A few words" --machine <machine>` copies a file from another machine first. Rook keeps the copy in memory and removes it when the viewer closes.
 - `relay.py show --close` closes the viewer.
 
-It shows PNG, JPEG, WebP and GIF pictures, animated or not, and video such as MP4 and WebM, with sound. The command prints `Shown.`, or a plain sentence that says why the file was refused. A refused file moves nothing on screen.
+It shows PNG, JPEG, WebP and GIF pictures, animated or not, and video such as MP4 and WebM, with sound. The command prints `Shown.`, or `Shown, in place of ...` when it replaced the open one, or a plain sentence that says why the file was refused. A refused file moves nothing on screen.
 
 ## When
 
 - Show media when ⟦owner⟧ asks to see it. Also show it when a thread's message hands you media and says it is for ⟦him⟧.
 - Never show a screenshot of ⟦owner⟧'s own screen back to ⟦him⟧, and never show files ⟦he⟧ did not ask about.
-- Show one thing at a time. A new show replaces the one open, so you can step through a few files when ⟦verb:he asks|they ask⟧.
+- A diagram of how things connect is not media: write the `{diagram ...}` mark from your instructions instead.
+- Show one thing at a time. A new show replaces the one open, so never close it first. You can step through a few files when ⟦verb:he asks|they ask⟧.
 - When you do not know the file's full path, find it first. On another machine, read the thread or run `ls` through the machine's route. Never guess a path.
 
 ## How

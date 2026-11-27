@@ -69,6 +69,7 @@ else:
     except ImportError:
         InputDevice = ecodes = list_devices = None
 
+import constellation  # The diagram mark's parser; the overlay draws the diagram.
 import harness  # How Rook starts its main agent, writes to it, and reads from it.
 import journal  # The durable record of each request, and the notices the owner is owed after a restart.
 import machine  # Explicit state machines: strict in checks, logged in life.
@@ -381,6 +382,13 @@ SPOKEN_SENTENCES = 12
 # A step mark in the answer: "{step 2}" lights step 2 of the scene when the sentence that carries it starts to play.
 # Braces never occur in spoken prose, so a mark cannot be mistaken for text. Marks never reach speech, panel or log.
 STEP_MARK = re.compile(r"\{\s*step\s*(\d+)\s*\}[ \t]*", re.IGNORECASE)
+# A diagram mark at the start of the answer: "{diagram TITLE | GRAPH}" (desktop/constellation.py). Rook takes it from
+# the stream and stages it, and it never reaches speech, panel or log. A mark ends at "}", a newline or the text's end;
+# while it is still open at the end of the streamed text, the speech waits. A mark longer than DIAGRAM_HOLD
+# characters is not one: only its "{diagram" goes, and its words are spoken.
+DIAGRAM_HOLD = 600
+DIAGRAM_MARK = re.compile(r"\{\s*diagram\b([^{}\n]{0,%d})(?:\}|\n|\Z)\s*" % DIAGRAM_HOLD, re.IGNORECASE)
+DIAGRAM_OPENER = re.compile(r"\{\s*diagram\b\s*", re.IGNORECASE)
 # With no marks, a scene's steps take turns while Rook speaks: each holds the speech's length shared by the steps,
 # and at least this long.
 STEP_LOOP_SECONDS = 3.0
@@ -676,8 +684,25 @@ def spoken_lead(answer):
     return " ".join(sentences[:SPOKEN_SENTENCES] + ["The rest is in the written answer."])
 
 
+def undiagrammed(text):
+    """text with every diagram mark taken out, and the "{diagram" of a mark too long to be one."""
+    return DIAGRAM_OPENER.sub("", DIAGRAM_MARK.sub("", text))
+
+
 def unmarked(text):
-    return STEP_MARK.sub("", text)
+    return STEP_MARK.sub("", undiagrammed(text))
+
+
+def name_marks(spoken, names, seen):
+    """Step marks for a diagram's nodes: each sentence that names a node for the first time, as a whole word with or
+    without a plural s, starts with that node's {step N}. seen holds the nodes named so far, and grows."""
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", spoken):
+        new = [k for k, name in enumerate(names) if k not in seen
+               and re.search(rf"(?<!\w){re.escape(name)}s?(?!\w)", sentence, re.IGNORECASE)]
+        seen.update(new)
+        out.append("".join(f"{{step {k + 1}}}" for k in new) + sentence)
+    return " ".join(out)
 
 
 def render_text(text):
@@ -1056,9 +1081,9 @@ def voice_parts(spoken):
     """Cut spoken text at each sentence that carries a step mark. Return (step or None, text) pairs, marks removed."""
     parts = []
     for sentence in re.split(r"(?<=[.!?])\s+", spoken):
-        mark = STEP_MARK.search(sentence)
-        if mark or not parts:
-            parts.append([int(mark[1]) if mark else None, ""])
+        marks = [int(m) for m in STEP_MARK.findall(sentence)]  # A sentence that names two nodes lights both.
+        if marks or not parts:
+            parts.append([(marks[0] if len(marks) == 1 else marks) if marks else None, ""])
         parts[-1][1] = (parts[-1][1] + " " + unmarked(sentence)).strip()
     return [(step, text) for step, text in parts if text]
 
@@ -2241,6 +2266,8 @@ def _build_threads_prompt_section():
 
 
 class Companion:
+    diagram_names = ()  # The labels of the diagram shown in this turn, for lighting each node as the voice names it.
+    diagram_seen = frozenset()  # The nodes the voice has named so far.
     mailbox_down = False  # Whether the last mailbox call failed, so an outage logs one line.
     stamp = None  # {"turn", "items", "release"}: the mailbox items of a turn, until the owner hears its answer.
     spoke_turn = None  # The turn whose last speech played to the end. A stop clears it.
@@ -2881,8 +2908,8 @@ class Companion:
                   "that should last longer than a few conversations belongs in your memory folder.\n\n"
                   f"Everything you write is spoken or shown to {OWNER} as you write it. Before your "
                   f"first tool call, you may write one short sentence that tells {pn('him')} something "
-                  f"real about what you are doing, such as what you are checking for {pn('him')}. For a handoff or "
-                  "a diagram, always write it: where it goes or what it will show, and how you read the "
+                  f"real about what you are doing, such as what you are checking for {pn('him')}. For a handoff, "
+                  "always write it: where it goes, and how you read the "
                   "request, such as \"That goes to Opus: the halo should scatter.\" Your answer then confirms "
                   "it in a few words. Never "
                   "write filler such as \"let me check\" or \"one moment\". Write nothing between later "
@@ -2911,7 +2938,12 @@ class Companion:
                   f"paths. {OWNER_START} hears only this part, so it holds everything {pn('he')} must hear, above all any question "
                   f"you have for {pn('him')}. Never tell {pn('him')} you asked something that is not in it. Then leave a "
                   "blank line and write the full answer. Put exact commands, paths, and code only "
-                  "there.\n"))
+                  "there.\n\n"
+                  "To show a diagram of how things connect, start the spoken answer with one mark, such as "
+                  "{diagram How a page loads | browser > dns:globe > server* > page:file}. Use two to eight short "
+                  "names. name:icon picks an icon, * marks the main node, > is an arrow, - a plain line, a comma "
+                  "fans out, and ; starts another chain. The mark is never spoken, and each node lights as your "
+                  "voice names it.\n"))
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
@@ -2954,7 +2986,7 @@ class Companion:
         game = self.game and uv  # --wow
         start = {"t3": T3_START if t3 else (), "wow": WOW_START if game else (),
                  **{spec["name"]: spec["eager_tools"] for spec in plugin_loader.servers() if spec["name"] in servers}}
-        later = ((["the render tools show_scene, show_step and clear_scene"] if uv else [])
+        later = ((["the render tools show_diagram, show_scene, show_step and clear_scene"] if uv else [])
                  + (["the other T3 tools"] if t3 else []) + (["the other wow game-data tools"] if game else []))
         setup = self.name_skills(self.harness.setup(start, later, self.game))
         if replay:
@@ -3233,6 +3265,7 @@ class Companion:
         self.first_speech, self.stream_text, self.stream_prefix, self.stream_ended = None, None, None, None
         self.thought_buf, self.pending_thought, self.turn_answer_started = "", None, False
         self.scene_steps = 0
+        self.diagram_names, self.diagram_seen = (), frozenset()
         self.show("thinking")
         self.log("request", turn=self.latest_turn, text=text, screenshots=len(shots), source=source)
         if source in ("spoken", "typed") and not client:  # A request typed on the phone is no presence at the desk.
@@ -3368,7 +3401,8 @@ class Companion:
                     answer = failed
                 if not message.get("is_error"):
                     answer = self.strip_pass(answer)
-                marked, answer = answer, unmarked(answer)
+                # The diagram mark leaves the spoken text too, so it matches what the stream spoke.
+                diagram, marked, answer = DIAGRAM_MARK.search(answer), undiagrammed(answer), unmarked(answer)
                 muted = self.latest_turn in completed and (self.dark_muted() or self.latest_turn in self.phone_turns)
                 if self.phone:
                     if (self.latest_turn in completed and self.phone.wants_voice(self.latest_turn)
@@ -3408,6 +3442,8 @@ class Companion:
                 elif message.get("is_error"):
                     self.show("error", details=answer or f"{self.harness.name} could not finish the request.")
                 elif answer and not passed(spoken_lead(answer)):  # PASS is silence.
+                    if diagram and not self.diagram_names:  # The answer came whole, not streamed.
+                        self.stage_diagram(diagram[1])
                     self.last_reply = {"spoken": spoken_lead(marked), "details": answer}
                     if self.silenced_turn in completed or muted:  # The owner silenced it, or it went dark: written only.
                         self.show("result", details=answer)
@@ -3462,6 +3498,8 @@ class Companion:
                     case "content_block_delta" if (self.stream_text is not None
                                                    and event["delta"].get("type") == "text_delta"):
                         self.stream_text = self.strip_pass(self.stream_text + event["delta"]["text"])
+                        if "{" in self.stream_text:
+                            self.take_diagram()
                         if (self.phone and self.phone.subscribers and not self.warming
                                 and self.latest_turn in self.pending_turns):
                             self.phone.draft(self.latest_turn, unmarked(self.stream_text))
@@ -3951,6 +3989,8 @@ class Companion:
     def say(self, spoken, loop=True):
         """Queue an answer's spoken part, one speech item per step mark, so each step lights as its sentence plays.
         Without marks, a scene shown in this turn takes its steps in turn while the speech plays."""
+        if self.diagram_names and not STEP_MARK.search(spoken):
+            spoken = name_marks(spoken, self.diagram_names, self.diagram_seen)
         parts = voice_parts(spoken)
         for step, text in parts:
             self.spoke_turn = None  # New speech must play to the end before it counts as heard.
@@ -3962,10 +4002,42 @@ class Companion:
                 self.staged_item = self.voice_id
             if step is not None:
                 self.voice_steps[self.voice_id] = step
-            elif loop and self.scene_steps and len(parts) == 1:
+            elif loop and self.scene_steps and len(parts) == 1 and not self.diagram_seen:
                 seconds = max(STEP_LOOP_SECONDS, len(text) * self.speech_rate / self.scene_steps)
                 self.step_loop = (self.voice_id, seconds)
             self.send_speech(self.speech(text))
+
+    def take_diagram(self):
+        """Take every diagram mark out of the streamed text and stage it. A mark still open at the text's end stays,
+        so it is never spoken: first_sentence never ends a sentence inside braces. Past DIAGRAM_HOLD characters it is
+        no mark: only its "{diagram" goes."""
+        if self.warming or self.latest_turn not in self.pending_turns:
+            return  # Only the running turn's own answer shows a diagram.
+        while "{" in self.stream_text:
+            mark = DIAGRAM_MARK.search(self.stream_text)
+            if mark is None:
+                self.stream_text = DIAGRAM_OPENER.sub("", self.stream_text)
+                return
+            if "}" not in mark[0] and "\n" not in mark[0]:
+                return  # Still open: more of it is on the way.
+            self.stream_text = self.stream_text[:mark.start()] + self.stream_text[mark.end():]
+            self.stage_diagram(mark[1])
+
+    def stage_diagram(self, graph):
+        """Send a diagram's graph to the overlay, staged: the voice's next speech reveals it, as a scene's. A graph
+        with fewer than two nodes shows nothing. Repairs go to the log, never to the model."""
+        title, nodes, links, repairs = constellation.parse(graph)
+        self.log("render", action="diagram", ok=bool(nodes), name=title or None, nodes=len(nodes), links=len(links),
+                 repairs=repairs or None)
+        if not nodes:
+            return
+        self.render_count += 1
+        key = str(self.render_count)
+        self.stop_loop()
+        self.show(None, render={"diagram": {"graph": graph}, "id": key, "stage": True})
+        self.staged, self.staged_item = key, None
+        self.scene_steps, self.diagram_names, self.diagram_seen = len(nodes), [n["label"] for n in nodes], set()
+        self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
 
     def reveal_scene(self, key, fallback=False):
         """Show the staged scene with request id key, if it still waits. The overlay holds the steps for its entrance.
@@ -4105,7 +4177,8 @@ class Companion:
         The rest of the paragraph queues together later so speech.py adds at most one item boundary."""
         desk = self.can_speak_stream()
         phone = not desk and self.can_phone_voice()
-        if not (desk or phone) or (desk and self.scene_steps and not STEP_MARK.search(self.stream_text)):
+        if not (desk or phone) or (desk and self.scene_steps and not self.diagram_names
+                                    and not STEP_MARK.search(self.stream_text)):
             return
         first = first_sentence(self.stream_text)
         if not first:
@@ -4841,9 +4914,10 @@ class Companion:
         self.render_count += 1
         key = str(self.render_count)
         waiter = self.render_waiters[key] = self.loop.create_future()
-        if "scene" in data or data.get("clear"):  # The overlay drops a staged scene for either.
+        diagram = data.get("diagram") if isinstance(data.get("diagram"), dict) else None
+        if "scene" in data or diagram or data.get("clear"):  # The overlay drops a staged scene for each.
             self.staged = self.staged_item = None
-        self.show(None, render={**data, "id": key, **({"stage": True} if "scene" in data else {})})
+        self.show(None, render={**data, "id": key, **({"stage": True} if "scene" in data or diagram else {})})
         try:
             answer = await asyncio.wait_for(waiter, RENDER_SECONDS)
         except TimeoutError:
@@ -4855,14 +4929,21 @@ class Companion:
         scene = data.get("scene") if isinstance(data.get("scene"), dict) else {}
         if answer.get("ok") and ("step" in data or data.get("clear")):
             self.stop_loop()  # Rook's own step or clear ends the loop of steps.
-        if answer.get("ok") and (scene or data.get("clear")):
-            self.scene_steps = len(scene.get("steps") or ())
+        if answer.get("ok") and diagram:
+            title, graph = str(diagram.get("title") or "").strip(), str(diagram.get("graph") or "")
+            nodes = constellation.parse(f"{title} | {graph}" if title else graph)[1]  # As Scene.diagram_form reads it.
+            self.scene_steps, self.diagram_names, self.diagram_seen = len(nodes), [n["label"] for n in nodes], set()
+            self.staged = key
+            self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
+        elif answer.get("ok") and (scene or data.get("clear")):
+            self.scene_steps, self.diagram_names = len(scene.get("steps") or ()), ()
             if scene:  # Staged: the voice's next speech, the turn's end, or the timeout reveals it.
                 self.staged = key
                 self.loop.call_later(STAGE_SECONDS, self.reveal_scene, key, True)
             else:
                 self.scene_at = None
-        self.log("render", action="clear" if data.get("clear") else "step" if "step" in data else "scene",
+        self.log("render", action="clear" if data.get("clear") else "step" if "step" in data else
+                 "diagram" if diagram else "scene",
                  ok=bool(answer.get("ok")), name=scene.get("name"), step=data.get("step"),
                  problems=len(answer.get("errors") or ()) or None)
         return answer
@@ -4881,6 +4962,7 @@ class Companion:
         if why := self.overlay_off():
             return {"ok": False, "error": why}
         waiter = self.show_waiters[path] = self.loop.create_future()
+        before = self.viewing  # What the viewer shows now, which the overlay's "closed" for a replace clears.
         self.show(None, show={"path": path, "title": title})
         if self.phone and self.phone.subscribers and self.latest_turn in self.pending_turns:
             self.phone.activity(self.latest_turn, "show")
@@ -4891,6 +4973,8 @@ class Companion:
         finally:
             self.show_waiters.pop(path, None)
         if answer.get("ok"):
+            if before:
+                answer["said"] = f"Shown, in place of {before[1] or os.path.basename(before[0])}."
             self.viewing = (path, title)
             self.scene_at = self.staged = self.staged_item = None  # The viewer ends a scene. It drops a staged one.
             self.log("media_shown", path=path, title=title, source=source, kind=answer.get("kind"),
@@ -7995,6 +8079,15 @@ def check_steps():
     assert voice_parts("{step 1} One. Two. {step 2} Three. Four.") == [(1, "One. Two."), (2, "Three. Four.")]
     assert voice_parts("Lead in. {step 2} Two.") == [(None, "Lead in."), (2, "Two.")]
     assert spoken_lead("{step 1} One.\n\n{step 2} Written.") == "{step 1} One."
+    assert unmarked("{diagram Web | a > b, c} One. {step 2}Two.") == "One. Two."
+    assert unmarked(spoken_lead("{diagram a > b}\n\nOne.\n\nWritten.")) == ""  # Streamed, the mark is taken first.
+    assert voice_parts("{step 1}{step 2}One. Two.") == [([1, 2], "One. Two.")]
+    # A mark left open at the end of the turn, or ended by a newline, never reaches speech, panel or log.
+    assert unmarked("One. {diagram a > b") == "One. " and unmarked("{diagram a > b\nOne.") == "One."
+    assert spoken_lead(unmarked("{diagram a > b, c\n\nOne.\n\nWritten.")) == "One."
+    assert name_marks("The browsers ask. DNS answers the browser. Done.", ["browser", "dns"], set()) == \
+        "{step 1}The browsers ask. {step 2}DNS answers the browser. Done."
+    assert name_marks("A browsing session.", ["browser"], set()) == "A browsing session."  # Whole words only.
     # Search commands and WoW waypoints show the overlay's find form.
     assert [bash_activity(c) for c in ("rg foo", "cd x && fd -e py", "sudo plocate rook", "ps aux | grep rook")] == [
         "find", "find", "find", "Bash"]
@@ -8046,6 +8139,39 @@ def check_steps():
         await asyncio.sleep(0.17)
         await play(0)
         assert lit == [1, 2, 3, 1, 0], lit
+        # A diagram mark split across chunks is held until it closes, staged, and never spoken. Each sentence lights
+        # the nodes it names first, both at once when it names two, and no loop runs.
+        lit.clear(); sent.clear()
+        STEP_LOOP_SECONDS = 3.0
+        c.__dict__.update(warming=False, latest_turn="t", pending_turns={"t"}, render_count=0, scene_steps=0)
+        text = ""
+        for piece in ("{diag", "ram Web | browser > dn", "s:globe > server*}", " The browser asks DNS. The ",
+                      "server answers."):
+            c.stream_text = text + piece
+            c.take_diagram()
+            text = c.stream_text
+            assert "{" not in text or first_sentence(text) is None, text
+        assert text.strip() == "The browser asks DNS. The server answers." and c.staged == "1", text
+        assert c.diagram_names == ["browser", "dns", "server"] and c.scene_steps == 3
+        c.say(text.strip())
+        assert [m["text"] for m in sent] == ["The browser asks DNS.", "The server answers."], sent
+        for item in range(2):
+            await play(item, "start")
+            await play(item)
+        assert lit == [None, "1", [1, 2], 3, 0], lit
+        c.stream_text = "{diagram a > b\nHello there."  # A newline closes a mark left open.
+        c.take_diagram()
+        assert c.stream_text == "Hello there." and c.diagram_names == ["a", "b"]
+        c.stream_text = "{diagram a > b} {diagram c > d}Hi there."  # Two marks in one chunk: both go, the last shows.
+        c.take_diagram()
+        assert c.stream_text == "Hi there." and c.diagram_names == ["c", "d"] and c.staged == "4", c.stream_text
+        long = "{diagram " + "word " * 130 + "end. More."  # Past DIAGRAM_HOLD it is no mark: its words are spoken.
+        c.stream_text = long
+        c.take_diagram()
+        assert c.stream_text == long[len("{diagram "):] and c.staged == "4", c.stream_text[:40]
+        c.stream_text, c.latest_turn = "{diagram a > b} Hi.", "old"  # Another turn's text never stages.
+        c.take_diagram()
+        assert c.stream_text == "{diagram a > b} Hi." and unmarked(c.stream_text) == "Hi."
         voice.feed_eof()
         await reader
 
@@ -8977,6 +9103,7 @@ def check_agent():
                 for kind in ("claude", "antigravity", "codex"):
                     c, sp, written = await start_session(kind)
                     assert "Rook found no routing preferences file" in sp and "--- Model preferences ---" not in sp, sp
+                    assert "start the spoken answer with one mark, such as {diagram How a page loads |" in sp, kind
                     read_calls.clear()
                     await c.submit("Ping.", source="spoken")
                     assert "routing preferences" not in turn_text(kind, written) and not read_calls
@@ -10377,6 +10504,59 @@ def check_speech():
         await c.read_stream()
         assert [m["text"] for _, m in sent] == ["Checking the log.", "Found two errors.", "Both are fixed."], sent
         assert sent[1][0] < sent[2][0], sent
+
+        # 3b. A diagram mark, split across chunks as Claude Code streams it and as Antigravity's ACP chunks arrive
+        # (agy_harness turns each chunk into a delta at once): staged before the first sentence, never spoken, its
+        # nodes lit as the voice names them, and gone from the logged answer.
+        import agy_harness
+        agy = agy_harness.Antigravity()
+        agy.first_words, agy.open, agy.texting, agy.answer, agy.abandoned = 0.0, True, False, "", False
+        pieces = ("{diag", "ram How a page loads | browser > dns:gl", "obe > server*}\n", "The browser asks DNS. ",
+                  "Then the server ", "answers.\n\nDetails.")
+        answer = "".join(pieces)
+        for shape in ("claude", "antigravity"):
+            c, sent, rows, states, lit, voice, received = make_companion()
+            c.render_count = 0
+            c.exit.set()
+            reader = asyncio.create_task(c.read_voice(c.voice))
+            await c.submit("How does a page load?", source="spoken")
+
+            async def marked(_):
+                if shape == "claude":
+                    yield {"type": "stream_event", "event": {"type": "content_block_start",
+                                                             "content_block": {"type": "text"}}}
+                    events = [{"type": "stream_event", "event": {"type": "content_block_delta",
+                                                                 "delta": {"type": "text_delta", "text": p}}}
+                              for p in pieces]
+                else:
+                    events = [e for p in pieces for e in agy.update({"sessionUpdate": "agent_message_chunk",
+                                                                     "content": {"text": p}})]
+                for event in events:
+                    if event["event"]["type"] == "content_block_delta":
+                        received[0] += len(event["event"]["delta"]["text"])
+                    yield event
+                yield {"type": "stream_event", "event": {"type": "content_block_stop"}}
+                yield {"type": "result", "user_message_uuids": sorted(c.pending_turns), "result": answer,
+                       "terminal_reason": "completed"}
+
+            c.harness.read = marked
+            await c.read_stream()
+            staged = [f["render"] for _, f in states if "diagram" in f.get("render", {})]
+            speaks = [(at, m) for at, m in sent if m["type"] == "speak"]
+            assert staged == [{"diagram": {"graph": " How a page loads | browser > dns:globe > server*"}, "id": "1",
+                               "stage": True}], (shape, staged)
+            assert [m["text"] for _, m in speaks] == ["The browser asks DNS.", "Then the server answers."], speaks
+            assert speaks[0][0] <= len("".join(pieces[:5])), (shape, speaks)  # Spoken once the next words prove it.
+            for _, m in speaks:
+                voice.feed_data((json.dumps({"id": m["id"], "event": "start"}) + "\n").encode())
+                await asyncio.sleep(0)
+                voice.feed_data((json.dumps({"id": m["id"]}) + "\n").encode())
+                await asyncio.sleep(0)
+            voice.feed_eof()
+            await reader
+            assert lit == [None, "1", [1, 2], 3, 0], (shape, lit)
+            response = [fields for event, fields in rows if event == "response"][-1]
+            assert "{" not in response["text"] and "diagram" not in response["spoken"], response
 
         # 4. Dive repeat: a two-sentence paragraph repeated after a tool call is never spoken again.
         c, sent, _, _, _, _, _ = make_companion()

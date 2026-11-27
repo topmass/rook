@@ -28,10 +28,17 @@
     "presence": [
       "desktop/overlay.py",
       "desktop/devs_pack.py",
+      "desktop/icons_wow2.py",
+      "desktop/icons_system2.py",
+      "desktop/icons_system3.py",
+      "desktop/icons_tools2.py",
+      "desktop/icons_tools3.py",
       "desktop/pack_player.py",
       "desktop/stage_link.py",
       "desktop/render.py",
-      "desktop/stencils.py"
+      "desktop/stencils.py",
+      "desktop/constellation.py",
+      "desktop/filament.py"
     ],
     "phone": [
       "desktop/server.py",
@@ -94,6 +101,12 @@
       "to": "desktop/render.py",
       "kind": "presence",
       "reason": "Companion.scene_showing reads SCENE_SECONDS from render.py at import time (rook.py:75)."
+    },
+    {
+      "from": "desktop/rook.py",
+      "to": "desktop/constellation.py",
+      "kind": "presence",
+      "reason": "Companion parses the {diagram} mark's graph with constellation.parse, to stage it and light nodes by name (rook.py:72)."
     },
     {
       "from": "desktop/rook.py",

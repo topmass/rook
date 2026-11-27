@@ -61,6 +61,14 @@ def show_scene(scene: dict | str) -> str:
 
 
 @mcp.tool(structured_output=False)
+def show_diagram(graph: str, title: str = "") -> str:
+    """Show a diagram of how things connect, when you cannot start your answer with the {diagram} mark: outside
+    speech, or after a tool call. graph is the mark's graph, such as "browser > dns:globe > server* > page:file". Its
+    nodes light as your voice names them."""
+    return call({"diagram": {"graph": graph, "title": title}})
+
+
+@mcp.tool(structured_output=False)
 def show_step(step: int) -> str:
     """Light one step of the scene on screen now: 1 for its first step. 0 shows the whole scene again, with no step
     lit. Use it only for a step outside your spoken answer; in speech, {step N} marks time each step to your voice."""
