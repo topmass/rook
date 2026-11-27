@@ -374,7 +374,7 @@ FORM_FOR_STATE = {"listening": "ear", "transcribing": "rows", "thinking": "latti
 # WoW mode.
 ACTIVITY_FORMS = {"find_npc": "figure", "find_quest": "exclaim", "find_item": "chest", "find_upgrades": "sword",
                   "find_price": "coins", "find_object": "pickaxe",
-                  "WebSearch": "globe", "WebFetch": "globe", "Grep": "magnifier", "Glob": "magnifier", "Read": "page",
+                  "WebSearch": "globe", "WebFetch": "globe", "Grep": "magnifier", "Glob": "magnifier", "Read": "scan",
                   "Edit": "quill", "Write": "quill", "NotebookEdit": "quill", "Bash": "prompt", "Skill": "cog",
                   "recall": "book", "note": "book", "forget": "book",
                   "t3_thread_send": "send_turbine", "t3_thread_launch": "send_turbine", "handoff": "send_turbine",
@@ -1205,6 +1205,7 @@ def _shape_hourglass(cr):
 # The figure, exclaim, chest, sword, and pickaxe are World of Warcraft shapes, used only by WoW mode's tools.
 SHAPES = {"figure": _shape_figure, "exclaim": _shape_exclaim, "chest": _shape_chest, "sword": _shape_sword,
           "pickaxe": _shape_pickaxe, "coins": _shape_coins, "question": _shape_question, "magnifier": _shape_magnifier, "page": _shape_page,
+          "scan": _shape_page,  # Read's flat page, for a variant without the Devs forms; Devs draws its own scan.
           "quill": _shape_quill, "prompt": _shape_prompt, "cog": _shape_cog, "book": _shape_book,
           "message": _shape_message, "overlook": _shape_overlook, "eye": _shape_eye,
           "film": _shape_film, "branch": _shape_branch, "tiles": _shape_tiles, "power": _shape_power,
@@ -1234,7 +1235,7 @@ def _by_angle(points):
 # in outline, as the outline shapes do, and not as boxes of noise. Their cut-out lines are edges too. The chest, the
 # coins and the page cut their straight lines with DEST_OUT: cairo 1.18 paints a straight stroke on whole pixels under
 # CLEAR instead of clearing it, so those lines never showed.
-EDGE_SHARE = {"coins": 0.85, "chest": 0.85, "page": 0.85, "book": 0.85, "tiles": 0.85}
+EDGE_SHARE = {"coins": 0.85, "chest": 0.85, "page": 0.85, "scan": 0.85, "book": 0.85, "tiles": 0.85}
 
 
 def _mask_points(name, rng, count=GRAINS):
@@ -14101,6 +14102,9 @@ def _check_render():
         pen = _simulate(_thinking_on(tool), 3.0, lift=0)[0]
         assert pen.form == "quill" and devs_pack.BUILDERS["quill"] is devs_pack.build_quill_3d, tool
         assert devs_pack.eval_targets("quill", _form("quill"), pen, 3.0) is not None, tool
+    # Reading a file shows the Devs scan ring.
+    reader = _simulate(_thinking_on("Read"), 3.0, lift=0)[0]
+    assert reader.form == "scan" and devs_pack.eval_targets("scan", _form("scan"), reader, 3.0) is not None
 
     # Devs listening shows only the helix (the owner, 2026-11-25). The ripples ring stays built as the halo style.
     cycle = devs_pack.STATES["listening"]["cycle"]

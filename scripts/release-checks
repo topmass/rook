@@ -112,6 +112,7 @@ run relay-settings "$SYS_PY" desktop/relay.py --check-settings
 run relay-herdr "$SYS_PY" desktop/relay.py --check-herdr
 run relay-memory "$SYS_PY" desktop/relay.py --check-memory
 run relay-plugins "$SYS_PY" desktop/relay.py --check-plugins
+run relay-verify "$PY" desktop/relay.py --check-verify
 run work "$SYS_PY" desktop/work.py
 run watch "$SYS_PY" desktop/watch.py
 run mailbox "$SYS_PY" desktop/mailbox.py

@@ -36,6 +36,15 @@ relay.py onboard --scan [--as t3|herdr|pi|none]
                             Print what onboarding detects: system, agent, memory, coding tools, machines, code
                             folders and the shared agent setup. --as prints a rehearsal stand-in for that tool.
 relay.py onboard --tour     Print the optional tour after setup: one line and one thing to try per feature.
+relay.py everystate install [--dry-run]
+                            Install Everystate, a free checker for a Rook build thread, for this user only. Every file
+                            is checked against its pinned SHA-256 first.
+relay.py verify [--json] [--only ROW[,ROW]] [--talk]
+                            Check every piece of a working first turn, for a coding agent setting Rook up: Python,
+                            models, a speech round trip, the service, the desktop, the agent's sign-in as Rook runs
+                            it, the microphone and speakers, the permissions and the talk key. Each row that fails
+                            prints its fix. --talk adds one real turn: hold the talk key and speak. It reads no
+                            credential.
 relay.py onboard [CHOICES] [--dry-run]
                             Apply the onboarding choices: one settings write, then the projects folder, the shared
                             agent setup, the shared memory, Everystate and a T3 build thread, as chosen. A record goes
@@ -734,6 +743,8 @@ def settings_command(argv):
         value = value.lower()
         if value not in SMART_TURNS:
             leave(f"smart_turn must be {' or '.join(SMART_TURNS)}. {value} is not one of them.")
+        if value != "off":
+            fetch_smart_turn_model()
     elif key == "speak_thoughts":
         value = value.lower()
         if value not in SPEAK_THOUGHTS_MODES:
@@ -1032,7 +1043,7 @@ def check_settings():
             env = {k: v for k, v in os.environ.items() if k not in ("T3CODE_THREAD_ID", "ROOK_MEDIUM_VOICE_URL")}
             env.update(XDG_CONFIG_HOME=str(cfg_home), XDG_RUNTIME_DIR=str(rt_dir),
                        XDG_STATE_HOME=str(base / "state"), XDG_DATA_HOME=str(base / "data"),
-                       XDG_CACHE_HOME=str(base / "cache"), **extra)
+                       XDG_CACHE_HOME=str(base / "cache"), ROOK_NO_MODEL_DOWNLOAD="1", **extra)
             if med_url is not None:
                 env["ROOK_MEDIUM_VOICE_URL"] = med_url  # Never nimbus-pc.
             return subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=env)
@@ -2485,6 +2496,57 @@ def work_command(argv):
         print(work.line(entry, now))
 
 
+SMART_TURN_FETCH_SECONDS = 120  # The most the switch-on download may take.
+
+
+def fetch_smart_turn_model():
+    """Fetch and check Smart Turn's model now, as it is switched on, so no live turn waits for a download. A failed
+    download leaves Smart Turn off. ROOK_NO_MODEL_DOWNLOAD=1 (the self-checks) fetches nothing."""
+    if os.environ.get("ROOK_NO_MODEL_DOWNLOAD") == "1":
+        return
+    import contextlib
+    import threading
+    import turn_end
+    path = turn_end.default_model_path()
+    own = bool(os.environ.get(turn_end.MODEL_ENV_VAR, "").strip())  # The person's own model path: never deleted.
+    if path.is_file() and not own:
+        if path.stat().st_size == turn_end.MODEL_SIZE_BYTES and turn_end._sha256_file(path) == turn_end.MODEL_SHA256:
+            return
+        path.unlink()  # The wrong size or checksum can never pass its check, so Rook's own copy is fetched again.
+    elif path.is_file():
+        try:
+            turn_end.ensure_model(path)
+        except ValueError as error:
+            leave(f"Smart Turn stays off: {error} That path comes from {turn_end.MODEL_ENV_VAR}, so Rook leaves the file "
+                  "as it is.")
+        return
+    print(f"Fetching Smart Turn's model (about {round(turn_end.MODEL_SIZE_BYTES / 1e6)} MB) and checking it...", flush=True)
+    started = time.time()
+    outcome = {}
+
+    def fetch():
+        try:
+            turn_end.ensure_model(path)
+            outcome["ok"] = True
+        except Exception as error:  # noqa: BLE001 - any failure leaves Smart Turn off, with its reason.
+            outcome["error"] = error
+
+    worker = threading.Thread(target=fetch, daemon=True, name="smart-turn-fetch")
+    worker.start()
+    worker.join(SMART_TURN_FETCH_SECONDS)  # The whole download, not only each read.
+    if worker.is_alive():
+        for part in path.parent.glob(f".{path.name}.*.tmp"):  # This run's unfinished download, by its start time.
+            with contextlib.suppress(OSError):
+                if part.stat().st_mtime >= started - 1:
+                    part.unlink()
+        leave(f"Smart Turn stays off: its model did not finish downloading in {SMART_TURN_FETCH_SECONDS // 60} "
+              "minutes. Try again on a faster connection.")
+    if "error" in outcome:
+        leave(f"Smart Turn stays off: its model did not download ({outcome['error']}). Try again when this computer is "
+              "online.")
+    print("Smart Turn's model is ready.")
+
+
 def ask_command(argv):
     flags = [arg for arg in argv[1:] if arg in ("--no-image", "--test")]
     args = [arg for arg in argv[1:] if arg not in flags]
@@ -3846,7 +3908,7 @@ def mac_access_command(argv):
     if verb == "ask" and grant == "automation":
         print("macOS asks about each app the first time Rook controls it. Nothing to ask now.")
         return
-    helper = os.environ.get("ROOK_MAC_HELPER") or str(Path.home() / "Applications/Rook.app/Contents/MacOS/RookHelper")
+    helper = os.environ.get("ROOK_MAC_HELPER") or str(desk.mac_app() / "Contents/MacOS/RookHelper")
 
     def access(ask=None):
         try:
@@ -5873,6 +5935,8 @@ def main():
         return dream_command(sys.argv[2:])
     if sys.argv[1:] == ["--check-herdr"]:
         return check_herdr()
+    if sys.argv[1:] == ["--check-verify"]:
+        return _onboard().check_verify()
     if sys.argv[1:] == ["--check-plugins"]:
         import plugin_loader  # Its check lives there, so relay.py stays small for every command.
         return plugin_loader.check()
@@ -5904,8 +5968,12 @@ def main():
         return _onboard().audition_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "shared-agents":
         return _onboard().shared_agents_command(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "everystate":
+        return _onboard().everystate_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "onboard":
         return _onboard().onboard_command(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "verify":
+        return _onboard().verify_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] in ("watch", "watching"):
         return watch_command(sys.argv[1:])
     if len(sys.argv) >= 2 and sys.argv[1] == "inbox":

@@ -53,6 +53,14 @@ exit 0
 SH
 chmod +x "$FAKE_BIN/systemctl"
 
+# Never the real launchctl, even when this suite runs on a Mac: every case's launchd calls are logged only.
+cat >"$FAKE_BIN/launchctl" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "${FAKE_LAUNCHCTL_LOG:-/dev/null}"
+exit 0
+SH
+chmod +x "$FAKE_BIN/launchctl"
+
 # Without FAKE_GPU it fails like a computer with no NVIDIA driver.
 cat >"$FAKE_BIN/nvidia-smi" <<'SH'
 #!/usr/bin/env bash
@@ -310,8 +318,12 @@ run_in_sb() {
     XDG_STATE_HOME="$sb/.local/state" \
     XDG_RUNTIME_DIR="$sb/run" \
     FAKE_SYSTEMCTL_LOG="$TEST_ROOT/systemctl.log" \
+    ROOK_SYSTEM_APPS="$sb/no-system-apps" \
+    ROOK_SIGN_IDENTITY=- \
     "$@"
 }
+# On a real Mac the cases below run as a Mac: ROOK_SYSTEM_APPS keeps Rook.app out of the real /Applications,
+# ROOK_SIGN_IDENTITY=- signs ad hoc instead of touching a keychain, and the fake launchctl loads no job.
 
 echo "=== Case 1: Pre-existing folder with notes.txt at each target is never deleted ==="
 for target in live venv voice-phonon; do
@@ -1399,6 +1411,7 @@ chmod +x "$MAC_BIN"/*
 # The fake curl refuses every call, so the medium voice server's health check never answers: the failed first run.
 set +e
 OUT28_1="$(run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+  ROOK_SYSTEM_APPS="$SB28/no-system-apps" \
   bash "$INSTALL_SH" --voice medium --voice-model no --recogniser no --service yes --recogniser-source "$FAKE_WHEEL" 2>&1)"
 RC28_1=$?
 set -e
@@ -1419,7 +1432,8 @@ sha = hashlib.sha256(open(want, "rb").read()).hexdigest()
 sys.exit(0 if any(e.get("path") == want and e.get("created") and e.get("sha256") == sha for e in entries) else 1)
 PY
 : >"$TEST_ROOT/launchctl.log"
-run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" bash "$UNINSTALL_SH" --yes >/dev/null
+run_in_sb "$SB28" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" \
+  ROOK_SYSTEM_APPS="$SB28/no-system-apps" bash "$UNINSTALL_SH" --yes >/dev/null
 [ ! -e "$PLIST28" ] || fail "28 uninstall left the medium voice plist"
 [ ! -e "$SB28/.local/share/rook/medium-voice" ] || fail "28 uninstall left the medium voice folder"
 grep -qF "bootout gui/$(id -u)/com.rook.medium-voice" "$TEST_ROOT/launchctl.log" || fail "28 uninstall did not boot out the medium voice job"
@@ -1430,7 +1444,10 @@ mac_sb() {  # mac_sb SANDBOX [ENV=VALUE...] -- SCRIPT [OPTIONS...]: run install.
   local envs=()
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done
   shift
+  # ROOK_SYSTEM_APPS: a scratch stand-in for /Applications, so on a real Mac no case builds into the real one. A
+  # case's own ROOK_SYSTEM_APPS, given later, wins.
   run_in_sb "$sb" env PATH="$MAC_BIN:$FAKE_BIN:$PATH" FAKE_LAUNCHCTL_LOG="$TEST_ROOT/launchctl.log" ROOK_SIGN_IDENTITY=- \
+    ROOK_SYSTEM_APPS="$sb/no-system-apps" \
     "${envs[@]}" bash "$@"
 }
 medium_lines() { grep 'com.rook.medium-voice' "$TEST_ROOT/launchctl.log" || true; }
@@ -1693,4 +1710,66 @@ printf '%s\n' "$OUT37_HANG" | grep -qF "I could not check the sign-in. If it is 
 ! printf '%s\n' "$OUT37_HANG" | grep -qF "Sign in by hand" || fail "37 a hung status was told as signed out: $OUT37_HANG"
 pass "Sign-in line: printed for a signed-out Claude Code only; a status that hangs is 'could not check'"
 
-echo "All install failure and recovery tests passed (37/37)."
+echo "=== Case 38: Mac: Rook.app goes to /Applications when writable, stays where it was recorded, and never replaces another ==="
+SB38="$(new_sandbox mac-app-place)"
+SYS38="$SB38/sysapps"  # Stands in for /Applications.
+mkdir -p "$SYS38"
+mac38() { mac_sb "$SB38" FAKE_CURL_OK=1 "$@" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no --service yes \
+  --recogniser-source "$FAKE_WHEEL"; }
+set +e
+mac38 ROOK_SYSTEM_APPS="$SYS38" >"$TEST_ROOT/out38.txt" 2>&1
+RC38=$?
+set -e
+[ "$RC38" -eq 2 ] || fail "38 install failed ($RC38): $(cat "$TEST_ROOT/out38.txt")"
+[ -x "$SYS38/Rook.app/Contents/MacOS/RookHelper" ] || fail "38 Rook.app did not go to the writable system folder"
+[ ! -e "$SB38/Applications/Rook.app" ] || fail "38 Rook.app also went to ~/Applications"
+grep -qF "$SYS38/Rook.app/Contents/MacOS/RookHelper" "$SB38/Library/LaunchAgents/com.rook.companion.plist" \
+  || fail "38 the launchd agent does not run the app where it was put"
+# The rerun names only mac_sb's empty scratch system folder, so only the recorded place can keep it there.
+set +e
+mac38 >"$TEST_ROOT/out38b.txt" 2>&1
+RC38B=$?
+set -e
+[ "$RC38B" -eq 2 ] && grep -qF "OK: Built and signed $SYS38/Rook.app." "$TEST_ROOT/out38b.txt" \
+  || fail "38 the rerun did not rebuild Rook.app where it was recorded ($RC38B): $(cat "$TEST_ROOT/out38b.txt")"
+[ ! -e "$SB38/Applications/Rook.app" ] || fail "38 the rerun moved Rook.app to ~/Applications"
+mac_sb "$SB38" ROOK_SYSTEM_APPS="$SYS38" -- "$UNINSTALL_SH" --yes >/dev/null
+[ ! -e "$SYS38/Rook.app" ] || fail "38 uninstall left Rook.app in the system folder"
+SB38C="$(new_sandbox mac-app-foreign)"
+SYS38C="$SB38C/sysapps"
+mkdir -p "$SYS38C/Rook.app"
+echo "someone else's app" >"$SYS38C/Rook.app/notes.txt"
+set +e
+mac_sb "$SB38C" FAKE_CURL_OK=1 ROOK_SYSTEM_APPS="$SYS38C" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no \
+  --service yes --recogniser-source "$FAKE_WHEEL" >/dev/null 2>&1
+RC38C=$?
+set -e
+[ "$RC38C" -eq 2 ] || fail "38 install beside a foreign Rook.app failed ($RC38C)"
+[ "$(cat "$SYS38C/Rook.app/notes.txt")" = "someone else's app" ] && [ ! -e "$SYS38C/Rook.app/Contents" ] \
+  || fail "38 a Rook.app that is not ours was changed"
+[ -x "$SB38C/Applications/Rook.app/Contents/MacOS/RookHelper" ] || fail "38 Rook.app did not fall back to ~/Applications"
+SB38D="$(new_sandbox mac-app-home-first)"
+SYS38D="$SB38D/sysapps"
+mkdir -p "$SYS38D" "$SB38D/Applications/Rook.app/Contents/MacOS"
+echo "an earlier Rook.app, made before the manifest" >"$SB38D/Applications/Rook.app/notes.txt"
+set +e
+mac_sb "$SB38D" FAKE_CURL_OK=1 ROOK_SYSTEM_APPS="$SYS38D" -- "$INSTALL_SH" --voice small --voice-model no --recogniser no \
+  --service yes --recogniser-source "$FAKE_WHEEL" >"$TEST_ROOT/out38d.txt" 2>&1
+RC38D=$?
+set -e
+[ "$RC38D" -eq 2 ] || fail "38 install beside an earlier ~/Applications/Rook.app failed ($RC38D): $(cat "$TEST_ROOT/out38d.txt")"
+[ ! -e "$SYS38D/Rook.app" ] || fail "38 a second Rook.app went to the system folder beside the one in ~/Applications"
+grep -qF "Kept $SB38D/Applications/Rook.app as it is" "$TEST_ROOT/out38d.txt" || fail "38 the earlier app was not kept: $(cat "$TEST_ROOT/out38d.txt")"
+pass "Mac Rook.app: the system folder when writable, the recorded place on reruns and at uninstall, an earlier ~/Applications app keeps the place, and another Rook.app left alone"
+
+echo "=== Case 39: A run with no --voice (relay.py update) shows the saved voice, not the default small one ==="
+SB39="$(new_sandbox voice-banner)"
+mkdir -p "$SB39/.config/rook"
+printf '%s\n' '{"voice_engine": "medium", "medium_voice_url": "http://127.0.0.1:8090"}' >"$SB39/.config/rook/settings.json"
+OUT39="$(run_in_sb "$SB39" bash "$INSTALL_SH" --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT39" | grep -qF "  Voice:      medium (kept from your settings)" || fail "39 the banner did not show the saved voice: $OUT39"
+printf '%s\n' "$OUT39" | grep -qF "voice_engine=medium," || fail "39 the settings line did not show the saved voice: $OUT39"
+grep -qF '"voice_engine": "medium"' "$SB39/.config/rook/settings.json" || fail "39 the saved voice changed"
+pass "Voice banner: a run with no --voice shows the saved medium voice, and keeps it"
+
+echo "All install failure and recovery tests passed (39/39)."

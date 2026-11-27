@@ -752,6 +752,48 @@ def build_quill_3d(grains: int, rng: random.Random):
     return _by_angle(pts[:grains])
 
 
+# Reading a file: a ring of light descends round a turning page of text, lighting each line as it passes, because
+# reading is a pass down the file. The ring's white-hot bead stays level with the line it lights.
+RING_ROWS, RING_R, RING_TILT = (-36.0, -24.0, -12.0, 0.0, 12.0, 24.0, 36.0), 40.0, 0.12  # The rows, ring radius, tilt.
+RING_PERIOD, RING_SWEEP = 3.0, 2.4  # The loop, and the ring's pass down the page.
+
+
+def _read_words(rng, x0, x1, count):
+    """count grains spread evenly over words of random length from x0 to x1, so a line of dust reads as text."""
+    words, x = [], x0
+    while x < x1 - 3.0:
+        length = min(rng.uniform(5.0, 13.0), x1 - x)
+        words.append((x, length))
+        x += length + rng.uniform(3.5, 5.0)
+    total = sum(length for _, length in words)
+    out = []
+    for k in range(count):
+        d = total * (k + 0.5) / count
+        for w0, length in words:
+            if d <= length:
+                out.append(w0 + d)
+                break
+            d -= length
+        else:
+            out.append(words[-1][0] + words[-1][1])
+    return out
+
+
+def build_scan_3d(grains: int, rng: random.Random):
+    """Seven rows of words, the ring, and the ring's white-hot bead at its front. A record is (x, y, kind, a, b):
+    a word grain's x and row, or a ring grain's angle."""
+    pts, last = [], len(RING_ROWS) - 1
+    for row, y in enumerate(RING_ROWS):
+        for x in _read_words(rng, -30.0, 8.0 if row == last else 30.0, 34 if row == last else 50):
+            pts.append((x, y + rng.gauss(0, 0.45), 1, x, row))
+    for k in range(250):
+        a = _TAU * (k + 0.5 + rng.uniform(-0.2, 0.2)) / 250
+        pts.append((RING_R * math.cos(a), RING_ROWS[0] - 8.0, 2, a, rng.gauss(0, 0.5)))
+    while len(pts) < grains:
+        pts.append((0.0, RING_ROWS[0] - 8.0, 3, rng.gauss(0, 1.8), rng.gauss(0, 1.4)))
+    return _by_angle(pts[:grains])
+
+
 # The listening ripples: a slowly turning gold ring of radius 40 px, as the old halo. While the voice is up, gold
 # ripples are born just inside the rim and contract to a bright core at the centre, each turning against the last.
 # Each of the RIPPLE_SLOTS slots has its own grains and carries one ripple at a time. A louder voice keeps more busy.
@@ -806,6 +848,7 @@ BUILDERS = {
     "tesseract": build_tesseract_3d,
     "aperture": build_aperture_3d,
     "quill": build_quill_3d,
+    "scan": build_scan_3d,
 }
 
 
@@ -1143,6 +1186,45 @@ def eval_targets(name: str, points, scene, now: float):
             tx[i], ty[i] = x1 * p, y2 * p
             b_d, zn = _depth_shade(z2, 44.0)
             tb[i], tz[i] = b_d * boost, zn
+        return tx, ty, tb, tz
+
+    if name == "scan":
+        # Reading a file: the ring descends round the turning page, and each row lights as the bead passes it.
+        exp = math.exp
+        d = max(0.0, now - scene.form_at)
+        tx, ty, tb, tz = [], [], [], []
+
+        def put(x, y, z, boost, view):
+            x1, y2, z2 = _rot_yx(x, y, z, *view)
+            p = 1.0 / (1.0 - z2 / persp_d)
+            b_d, zn = _depth_shade(z2, 44.0)
+            tx.append(x1 * p)
+            ty.append(y2 * p)
+            tb.append(b_d * boost)
+            tz.append(zn)
+
+        ph = d % RING_PERIOD
+        yaw = float(meta.get("yaw_base", -0.35)) + 0.30 * sin(2 * pi * now / (2 * RING_PERIOD))
+        pitch = float(meta.get("pitch", -0.30))
+        view = (cos(yaw), sin(yaw), cos(pitch), sin(pitch))
+        ct, st = cos(RING_TILT), sin(RING_TILT)
+        top, span = RING_ROWS[0] - 8.0, RING_ROWS[-1] - RING_ROWS[0] + 16.0
+        bead = top + span * min(1.0, ph / RING_SWEEP) if ph <= RING_SWEEP + 0.25 else top  # The bead's height.
+        # The ring rides higher than its bead, which tilt and view carry down to the row it lights.
+        scan = bead - RING_R * (st + ct * -sin(pitch) / cos(pitch))
+        ring = _smooth(ph / 0.3) * _smooth((RING_SWEEP + 0.25 - ph) / 0.25)
+        settle = _smooth((ph - RING_SWEEP) / 0.7)  # After the pass the rows dim, ready to be read again.
+        for _, _, kind, a, b in points:
+            if kind == 1:
+                passed = RING_SWEEP * (RING_ROWS[b] - top) / span
+                lit = 0.5 if ph < passed else 1.15 + 1.1 * exp(-(ph - passed) / 0.22)
+                lit += (0.5 - lit) * settle
+                put(a, RING_ROWS[b], 0.0, lit, view)
+            elif kind == 2:
+                rx, rz = (RING_R + b) * cos(a), (RING_R + b) * sin(a)
+                put(rx, scan + rz * st, rz * ct, 0.95 * ring, view)
+            else:
+                put(a, scan + RING_R * st + b, RING_R * ct, (2.7 - 0.2 * (a * a + b * b)) * ring, view)
         return tx, ty, tb, tz
 
     if name == "quill":

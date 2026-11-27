@@ -622,6 +622,20 @@ class Codex(Harness):
         self.process, self.heard = None, 0
         self.home = None
 
+    def signin_status(self, env=None):
+        """codex login status: exit 0 is signed in; a failure that says "not logged in" is signed out; anything
+        else cannot be told. The output is dropped."""
+        from harness import signin_sentence, status_run
+        program = shutil.which("codex", path=(env if env is not None else os.environ).get("PATH"))
+        ran = program and status_run([program, "login", "status"], env=env)
+        if not ran:
+            return "unknown", None
+        if ran[0] == 0:
+            return "in", None
+        if re.search(r"not (logged|signed) in", ran[1], re.I):
+            return "out", signin_sentence(self.name, f"{program} login")
+        return "unknown", None
+
     def ready(self):
         """Return None when `codex` is installed, else one short sentence on why it cannot start."""
         if shutil.which("codex"):

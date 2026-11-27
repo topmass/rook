@@ -91,7 +91,7 @@ main() {
   guide="https://github.com/topmass/rook/blob/main/INSTALL.md"
   if [ -n "$agent" ]; then
     [ -n "$named" ] || set -- --agent "$agent" "$@"
-    say "Rook will run on $label ($(command -v "$agent_cmd")). To use another agent, add --agent claude, codex, antigravity or pi after \"sh -s --\"."
+    say "Rook will run on $label ($(command -v "$agent_cmd")). To use another agent, add --agent claude, codex, antigravity or pi to the install command."
   elif [ -n "$named" ] && [ "$dry" -eq 0 ]; then
     die "Rook is set to run on $named with --agent, but that agent is missing or does not run. Install it and sign in (see $guide), or pick another with --agent claude, codex, antigravity or pi."
   elif [ "$dry" -eq 0 ]; then
@@ -182,7 +182,7 @@ main() {
     "medium "*--voice*) ;;
     medium*)
       size="3.3 GB"; [ "$(uname -s)" != Darwin ] || size="2.5 GB"
-      say "Rook also gets its medium voice, a $size voice model. To skip it, press Ctrl+C and add --voice small to the install command." ;;
+      say "Rook also gets its medium voice, a $size voice model. The install option --voice small skips it." ;;
   esac
   rc=0
   ROOK_GET_STARTS_ROOK=1 bash "$code/install/install.sh" --source "$source" \
@@ -194,27 +194,9 @@ main() {
   fi
   case " $* " in *" --dry-run "*) exit 0 ;; esac
 
-  # 5. Rook hands real work to T3 Code or Herdr. With neither here, offer Herdr through its official installer.
-  # Without a terminal to answer on, nothing installs, and onboarding offers Herdr again.
-  if ! command -v t3 >/dev/null 2>&1 && ! command -v herdr >/dev/null 2>&1; then
-    say ""
-    say "Rook hands real work to background threads, and needs T3 Code or Herdr to run them. Neither is here."
-    say "We recommend T3 Code: download it from https://t3.codes and open it, and Rook finds it."
-    printf '%s' "Or install Herdr now, a lighter option that runs in your terminal? [y/N] "
-    answer=$( (read -r reply </dev/tty && printf '%s' "$reply") 2>/dev/null ) || answer=""
-    say ""
-    case "$answer" in
-      [Yy]*)
-        if curl -fsSL https://herdr.dev/install.sh | sh && command -v herdr >/dev/null 2>&1; then
-          say "Herdr is installed. Rook walks you through starting it during setup."
-        else
-          say "Herdr did not install. Rook can try again during setup."
-        fi ;;
-      *) say "No Herdr for now. Rook offers it again during setup." ;;
-    esac
-  fi
-
-  # 6. Start Rook. Its own voice onboarding asks the rest.
+  # 5. Start Rook. relay.py verify then checks every piece, and Rook's own voice onboarding asks the rest.
+  rook="${XDG_DATA_HOME:-$HOME/.local/share}/rook"
+  verify="$rook/venv/bin/python $rook/live/desktop/relay.py verify"
   if [ "$(uname -s)" != Darwin ] && ! id -Gn | tr ' ' '\n' | grep -qx input; then
     say ""
     say "The talk key works only after you join the input group and log in again (see the note above)."
@@ -224,16 +206,21 @@ main() {
   if [ "$(uname -s)" = Darwin ] && [ -f "$plist" ]; then
     # Through launchd only, so the permissions belong to Rook.app. A Rook that is already loaded keeps running.
     launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || launchctl bootstrap "gui/$(id -u)" "$plist"
-    app="${ROOK_APP:-$HOME/Applications/Rook.app}"
+    # The app the launchd agent runs, wherever the installer put it: /Applications or ~/Applications.
+    app=$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:0" "$plist" 2>/dev/null)
+    app=${app%/Contents/MacOS/RookHelper}
+    app=${app:-$HOME/Applications/Rook.app}
     say ""
     say "Rook is starting. Give it the microphone and the talk key first:"
     say "  open -W -n \"$app\" --args --request-access microphone   (click Allow)"
     say "  open -W -n \"$app\" --args --request-access input        (switch Rook on, then click Later)"
+    say "  If no dialog appears, add Rook by hand: System Settings > Privacy & Security > Input Monitoring, click +, pick $app."
     say "  launchctl kickstart -k gui/$(id -u)/$label"
-    say "Then hold Right Option and say \"run onboarding\"."
+    say "Then hold Right Option and say hello: Rook takes it from there."
+    say "Next, check every piece: $verify   (each row marked FIX prints its fix)"
   elif [ "$(uname -s)" = Darwin ]; then
     say ""
-    say "Start Rook with the command above, then hold Right Option and say \"run onboarding\"."
+    say "Start Rook with the command above, then hold Right Option and say hello."
   else
     # The talk key in force: the saved one, else Right Control.
     key=$(python3 -c 'import json, re, sys
@@ -244,16 +231,14 @@ except (OSError, ValueError, AttributeError):
 key = keys[0] if keys and isinstance(keys, list) and isinstance(keys[0], str) else "RightCtrl"
 print(re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", key).replace("Ctrl", "Control"))' \
       "${XDG_CONFIG_HOME:-$HOME/.config}/rook/settings.json" 2>/dev/null) || key="Right Control"
-    rook="${XDG_DATA_HOME:-$HOME/.local/share}/rook"
     say ""
     if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rook.service" ]; then
       systemctl --user start rook.service
-      say "Rook is starting. When it says it is ready, hold $key and say \"run onboarding\"."
+      say "Rook is starting. Once every piece checks out, hold $key and say hello: Rook takes it from there."
     else
-      say "Start Rook with the command above, then hold $key and say \"run onboarding\"."
+      say "Start Rook with the command above. Once every piece checks out, hold $key and say hello."
     fi
-    say "Until the talk key works, type instead: $rook/venv/bin/python $rook/live/desktop/relay.py ask \"run onboarding\""
-    say "To remove Rook later: bash $rook/live/install/uninstall.sh"
+    say "Next, check every piece: $verify   (each row marked FIX prints its fix)"
     [ -z "${from_tarball:-}" ] || say "This copy came from a .tar.gz file, so relay.py update cannot update it. To update later, uninstall and install again from a git URL."
   fi
   # Last, so it is the line a person reads: an agent that is not signed in answers nothing.

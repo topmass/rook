@@ -143,7 +143,10 @@ ALLOWED_DIR_ROLES = frozenset({"prefix", "rook_venv", "voice_venv", "medium_voic
 ALLOWED_PLISTS = frozenset({f"{launchd_label}.plist", f"{launchd_label}.daily.plist",
                             f"{os.environ.get('ROOK_MEDIUM_LABEL') or 'com.rook.medium-voice'}.plist"})
 LAUNCH_AGENTS_REAL = os.path.realpath(os.path.normpath(launch_agents_arg))
-MAC_APP_REAL = os.path.realpath(os.path.normpath(mac_app_arg))
+# Rook.app sits where the installer recorded it: /Applications, ~/Applications, or the place ROOK_APP named.
+MAC_APP_PLACES = {os.path.realpath(os.path.normpath(place)) for place in (
+    mac_app_arg, os.path.join(os.environ.get("ROOK_SYSTEM_APPS") or "/Applications", "Rook.app"),
+    os.path.join(home_arg, "Applications", "Rook.app"))}
 UNIT_MARKER = "# Managed by Rook install/install.sh"
 # Ignored files that Python/Rook itself may generate inside a checkout.
 ALLOWED_IGNORED_NAMES = ("__pycache__/", "*.pyc", "*.pyo")
@@ -594,9 +597,10 @@ for raw_entry in manifest.get("entries") or []:
                 owned_units_to_remove.add(base)
                 to_remove.append((norm, "unit", "systemd user unit"))
     elif kind == "dir" and role == "mac_app":
-        if is_link or not is_dir or real_target != MAC_APP_REAL or not os.path.isfile(
+        if is_link or not is_dir or real_target not in MAC_APP_PLACES or not os.path.isfile(
                 os.path.join(norm, "Contents", "MacOS", "RookHelper")):
-            skipped_bad.append((raw_path, f"Rook.app entry is not the app the installer builds at {MAC_APP_REAL}"))
+            skipped_bad.append((raw_path, "Rook.app entry is not an app the installer builds, in "
+                                          + " or ".join(sorted(MAC_APP_PLACES))))
             remaining_entries.append(raw_entry)
             continue
         if norm not in seen_targets:

@@ -77,16 +77,14 @@ NO_ORCHESTRATOR = (
     "replace the coding tool step's first line.\n"
     "  First. Say: \"One thing matters a lot here. I stay free to talk with you because I hand real work to background "
     "threads and keep track of them, and for that I need a tool that runs those threads. We highly recommend T3 Code "
-    "right now, an app you download and open. I also run on Herdr, a lighter option in your terminal, and I can "
-    "install it for you.\" Ask: \"Which would you like?\"\n"
+    "right now, an app you download and open. I also run on Herdr, a lighter option in your terminal.\" Ask: "
+    "\"Which would you like?\"\n"
     "  T3 Code. Say: \"Download T3 Code from t3 dot codes, install it, and open it.\" Ask: \"Can you tell me when "
     "it's open?\" Then run onboard --scan again; in a rehearsal, take their word. Once T3 Code is running, say: "
     "\"Got it. I'll connect to T3 Code when I next start, and tell you if it needs you to sign me in.\" Then ask where "
     "their projects live, and give --orchestrator t3. While it is not running, ask them to check that it's open.\n"
-    "  Herdr. Run relay.py herdr install, with --dry-run in a rehearsal. When it worked, say: \"Herdr's in. Open a "
-    "terminal and type herdr once to start it, and I'll hand work to it from then on.\" Then ask the Herdr question, "
-    "and give --orchestrator herdr. When it failed, say why in one sentence, and ask whether they'd rather set up T3 "
-    "Code.\n"
+    "  Herdr. Say: \"Your coding agent can install it with one command, relay.py herdr install. Then type herdr "
+    "once in a terminal to start it, and I'll hand work to it after my next start.\" Give --orchestrator herdr.\n"
     "  Skip. Say: \"Okay. Background work won't be available until you add T3 Code or Herdr, so ask me any time.\" "
     "Then go on as with no tool.")
 BUILD_BRIEF = ("You are Rook's build thread, set up during onboarding. Rook is {owner}'s voice assistant. Its code is "
@@ -455,6 +453,17 @@ def install_everystate(dry, fetch=None):
     return f"Installed Everystate {EVERYSTATE_VERSION} at {binary}, with its skill at {skill}."
 
 
+def everystate_command(argv):
+    """relay.py everystate install [--dry-run]: Everystate for a build thread, offered once during setup."""
+    if argv not in (["install"], ["install", "--dry-run"]):
+        sys.exit("Usage: relay.py everystate install [--dry-run]")
+    try:
+        line = install_everystate(dry="--dry-run" in argv)
+    except StepFailed as error:
+        sys.exit(f"Everystate did not install: {error}.")
+    print(line if line.endswith(".") else f"Dry run: nothing changed. A real install would {line}.")
+
+
 def shared_agents_command(argv):
     """relay.py shared-agents [--dry-run]: link every coding agent's instructions and skills to one shared pair."""
     if argv not in ([], ["--dry-run"]):
@@ -568,22 +577,12 @@ def onboard_scan(as_tool=None):
         "them off for good, just say: turn off screenshots.\"" if capture else
         "Rook cannot take screenshots on this system yet. Say: \"On this computer I can't see your screen yet, so I "
         "work from your words. I send nothing to the people who made me.\" Give --screenshots on."))
-    if memory.is_shared():
-        print("Memory: the shared memory system is installed here. Say so briefly, and give --memory rook.")
-    else:
-        tidy, claude, timers = agent in TIDY_AGENTS, bool(shutil.which("claude")), bool(shutil.which("systemctl"))
-        print("Memory: Rook's own memory. " + ("Its nightly tidy runs with this agent. " if tidy else
-                                               f"Its nightly tidy does not run with {AGENT_NAMES.get(agent, agent)} "
-                                               "yet: notes are saved and loaded, not tidied. ")
-              + ("The shared system for all Claude Code projects can be installed." if claude and timers
-                 else "The shared system needs systemd for its nightly tidy, and this computer has none." if claude
-                 else "The shared system needs Claude Code, which is not installed.") + " Say: \""
-              + ("Each night, a dreaming run tidies and repairs what I learned that day. It uses your own model quota. "
-                 if tidy else "")
-              + ("The shared version also switches off Claude Code's own automatic memory, so only one memory keeps notes.\"" if claude and timers
-                 else "The shared version isn't available on this computer yet, so for now my memory is just mine.\" "
-                      "Give --memory rook." if claude
-                 else "The shared version needs Claude Code, so for now my memory is just mine.\" Give --memory rook."))
+    tidy, claude = agent in TIDY_AGENTS, bool(shutil.which("claude"))
+    print("Memory: " + ("the shared memory system is installed here." if memory.is_shared() else
+                        "Rook's own memory. " + ("Its nightly tidy runs with this agent." if tidy else
+                                                 f"Its nightly tidy does not run with {AGENT_NAMES.get(agent, agent)} yet.")
+                        + ("" if claude else " The shared system needs Claude Code, which is not installed."))
+          + " The coding agent offers the shared memory during setup, so ask nothing about it.")
     print(build_thread_line(as_tool == "t3" if as_tool else bool(shutil.which("t3"))))
     if as_tool:
         print(f"Rehearsal stand-in for {as_tool}, not this machine:")
@@ -628,23 +627,6 @@ def onboard_scan(as_tool=None):
     print(f"Code folders: {', '.join(found) or 'none found'}. Git projects directly in your home folder: {loose}.")
     folder, source = projects_folder_in_force(saved)
     print(f"New projects start in: {folder} ({source}).")
-    lines, can = shared_agents(dry=True)
-    links = [line for line in lines if " linked" in line or "left" in line]
-    linked = bool(links) and all(line.endswith("already linked.") for line in links)  # No agent shares nothing.
-    agents_here = sum((Path.home() / agent[1]).is_dir() for agent in SHARED_AGENTS)
-    print("Shared agent setup: " + (
-        "no coding agent is installed yet. Say: \"You have no coding agents installed yet, so there's nothing to share.\" "
-        "Give --shared-agents no."
-        if not agents_here else
-        "only one coding agent is here, so there is nothing to share yet. Ask nothing, and give --shared-agents no."
-        if agents_here == 1 else
-        "you already share one setup. Say: \"You already share one setup across your coding agents, just as I'd "
-        "recommend.\" Give --shared-agents no." if not can and linked and lines else
-        "can be linked safely. Say: \"One more good habit: one shared instruction file and one shared skills folder "
-        "for all your coding agents, so they all follow the same rules.\"" if can else
-        "nothing can be linked safely. Say: \"Your coding agents each keep their own setup, so I'll leave them as they "
-        "are.\" Give --shared-agents no.")
-          + ("".join(f"\n  {line}" for line in lines) if agents_here > 1 else ""))
 
 
 TOUR = (  # The optional tour after setup: one sentence and one thing to try per feature, or None.
@@ -934,3 +916,801 @@ def onboard_command(argv):
                             + " Everything else is done. To finish the rest later, ask me to run setup again: "
                               "it keeps what is already done."))
     relay.guide(None)  # Setup is over: the overlay drops its guide.
+
+
+# relay.py verify: the checks a coding agent runs after the install and after each fix, until every piece of a first
+# turn works. Each row checks the real thing where it can. Checks that must run as Rook runs them go through the
+# running Rook (its probe request). It never reads a credential, and never clicks or approves anything.
+VERIFY_ROWS = ("python", "models", "speech", "service", "desktop", "agent", "input", "output", "mic", "keys")
+VERIFY_SETTLE = 10  # Seconds between the two reads of the service's restart count: it must stay up.
+TALK_SECONDS = 150  # How long --talk waits for the first spoken turn and its answer (onboarding starts there).
+TALK_EARLY = 120  # A spoken turn that began up to this many seconds before the command still counts: the person may
+                  # say hello a moment before the agent starts the command.
+TALK_SENTENCE = "Rook is ready to talk."
+INPUT_DIR = Path("/dev/input")  # Where the keyboards appear on Linux.
+
+
+def rook_python(ctx):
+    """Rook's own interpreter: the running Rook's, else the installer's environment, else this one."""
+    installed = settings.DATA / "rook/venv/bin/python"
+    return Path(ctx.get("python") or (installed if installed.exists() else sys.executable))
+
+
+def voice_python(ctx):
+    """The small voice's interpreter, wherever Rook finds it."""
+    found = ctx.get("voice") or settings.voice_python()
+    return Path(found) if found else settings.DATA / "rook/voice-phonon/bin/python"
+
+
+def mac_app():
+    """Rook.app where the installer put it, as Rook's launchd agent runs it."""
+    return desk.mac_app()
+
+
+def turns_rows(since=0, newer_than=None):
+    """Rook's log rows from byte offset since, and the offset at the end. When Rook trimmed the log below since, it
+    reads from the start again and keeps only rows at or after newer_than (an ISO time)."""
+    path = desk.state_dir() / "rook/turns.jsonl"
+    try:
+        with open(path, "rb") as log:
+            trimmed = log.seek(0, os.SEEK_END) < since
+            log.seek(0 if trimmed else since)
+            data = log.read()
+            data = data[:data.rfind(b"\n") + 1]  # A line Rook is still writing waits for the next read.
+            since = 0 if trimmed else since
+    except OSError:
+        return [], since
+    rows = []
+    for line in data.decode(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and not (trimmed and newer_than and str(row.get("at", "")) < newer_than):
+            rows.append(row)
+    return rows, since + len(data)
+
+
+def rows_before(end, newer_than):
+    """The log rows in the last 512 KB before byte offset end whose time is at or after newer_than (an ISO time)."""
+    path = desk.state_dir() / "rook/turns.jsonl"
+    try:
+        with open(path, "rb") as log:
+            start = max(0, end - 512 * 1024)
+            log.seek(start)
+            data = log.read(end - start)
+    except OSError:
+        return []
+    rows = []
+    for line in data.decode(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # Includes the line the 512 KB start cut in half.
+        if isinstance(row, dict) and str(row.get("at", "")) >= newer_than:
+            rows.append(row)
+    return rows
+
+
+def this_start_rows():
+    """The log rows of Rook's current start: every row with the session of the newest service_started row."""
+    rows = turns_rows()[0]
+    session = next((row.get("session") for row in reversed(rows) if row.get("event") == "service_started"), None)
+    return [row for row in rows if session and row.get("session") == session]
+
+
+def bounded(argv, timeout, env=None):
+    """(exit code, output) of argv with no input, or (None, why) when it could not run in time."""
+    try:
+        done = subprocess.run([str(a) for a in argv], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return None, f"did not finish in {timeout} s"
+    except OSError as error:
+        return None, error.strerror or str(error)
+    return done.returncode, (done.stdout + done.stderr).strip()
+
+
+def install_again():
+    return "Run the install command again: curl -fsSL https://raw.githubusercontent.com/topmass/rook/main/install/get.sh | sh"
+
+
+def row_python(ctx):
+    python = rook_python(ctx)
+    if not python.exists():
+        return False, f"Rook's Python environment is missing at {python}.", install_again()
+    modules = "airtype, sounddevice, soundfile" + ("" if desk.IS_MAC else ", evdev")
+    code, out = bounded([python, "-c", f"import {modules}"], 60)
+    if code != 0:
+        return False, f"Rook's Python cannot load its packages: {out.splitlines()[-1] if out else 'no answer'}.", install_again()
+    uv = shutil.which("uv")
+    version = bounded([uv, "--version"], 10)[1] if uv else "missing"
+    return True, f"Rook's Python loads its packages (uv: {version}).", None
+
+
+def row_models(ctx):
+    saved = ctx["saved"]
+    missing = []
+    recogniser = settings.RECOGNISER_MODELS.get(saved.get("recogniser_model") or "en")
+    code, out = bounded([rook_python(ctx), "-c", "import sys, airtype.asr as a, airtype.registry as r; "
+                         "print('yes' if a.model_exists(r.get_model_spec(sys.argv[1])) else 'no')", recogniser], 30)
+    if code != 0 or out.splitlines()[-1:] != ["yes"]:
+        missing.append(f"the speech recogniser ({recogniser})")
+    # The cache the running Rook reads, which may differ from this shell's.
+    if ctx.get("running") and ctx.get("cache"):
+        hub = Path(ctx.get("hf_home") or Path(ctx["cache"]) / "huggingface") / "hub"
+    else:
+        hub = Path(os.environ.get("HF_HOME") or desk.cache_dir() / "huggingface") / "hub"
+    for repo in ("models--gradium--phonon-31m-en", "models--gradium--phonon-voices"):
+        if not any((hub / repo / "snapshots").glob("*/*")):
+            missing.append(f"the small voice ({repo.split('--')[-1]})")
+    if saved.get("voice_engine") == "medium" and desk.IS_LINUX:
+        if not any((settings.DATA / "rook/medium-voice/models").glob("*.gguf")):
+            missing.append("the medium voice")
+    if saved.get("voice_engine") == "medium" and desk.IS_MAC and os.environ.get("ROOK_MEDIUM_QUANT", "8bit") == "8bit":
+        # The 8-bit model's files at their pinned sizes; the install checked their SHA-256 when it fetched them.
+        pinned = json.loads((ROOK_ROOT / "install/medium-voice-model-8bit.json").read_text())
+        snapshot = (settings.DATA / "rook/medium-voice/models" / ("models--" + pinned["repo"].replace("/", "--"))
+                    / "snapshots" / pinned["revision"])
+        wrong = [name for name, (size, _sha) in pinned["files"].items()
+                 if not (snapshot / name).is_file() or (snapshot / name).stat().st_size != size]
+        if wrong:
+            missing.append(f"the medium voice ({wrong[0]})")
+    if missing:
+        return False, "Missing on disk: " + ", ".join(missing) + ".", install_again()
+    return True, "Every model is on disk.", None
+
+
+def row_speech(ctx):
+    """A round trip with no sound and no microphone: the small voice writes a sentence to a file, and the recogniser
+    must read the same words back. It proves both models load and work."""
+    import tempfile
+    if not row_models(ctx)[0]:  # Never a download: the recogniser's loader fetches a missing model by itself.
+        return False, "The speech round trip needs every model on disk first.", install_again()
+    if not voice_python(ctx).exists():
+        return False, f"The small voice's environment is missing at {voice_python(ctx)}.", install_again()
+    env = {**os.environ, "HF_HUB_OFFLINE": "1"}
+    if desk.IS_MAC:  # The Mac's runtime folder (~/.cache/rook/run) exists only once Rook has started.
+        desk.ensure_dir(desk.runtime_dir())
+    with tempfile.TemporaryDirectory(prefix="rook-verify-", dir=desk.runtime_dir()) as folder:
+        wav = Path(folder) / "speech.wav"
+        code, out = bounded([voice_python(ctx), "-c", (
+            "import sys, wave, numpy as np, ptts\n"
+            "ptts.set_num_threads(2)\n"
+            "m = ptts.TTS(None, quant='q8', lang='en')\n"
+            "with m.stream(sys.argv[2], voice=sys.argv[3]) as audio:\n"
+            "    data = np.concatenate([np.asarray(c, dtype=np.float32).ravel() for c in audio])\n"
+            "with wave.open(sys.argv[1], 'wb') as w:\n"
+            "    w.setnchannels(1); w.setsampwidth(2); w.setframerate(m.sample_rate)\n"
+            "    w.writeframes((np.clip(data, -1, 1) * 32767).astype(np.int16).tobytes())\n"),
+            wav, TALK_SENTENCE, ctx["saved"].get("voice") or "Miles"], 120, env)
+        if code != 0 or not wav.exists():
+            return False, f"The small voice could not speak: {out.splitlines()[-1] if out else 'no answer'}.", install_again()
+        recogniser = settings.RECOGNISER_MODELS.get(ctx["saved"].get("recogniser_model") or "en")
+        code, heard = bounded([rook_python(ctx), "-c", (
+            "import sys, airtype.asr as a, airtype.registry as r\n"
+            "a.active_model_spec = lambda: r.get_model_spec(sys.argv[2])\n"
+            "model = a.load_model()\n"
+            "model = model[0] if isinstance(model, tuple) else model\n"
+            "print(a.transcribe_file(model, sys.argv[1]))\n"), wav, recogniser], 120, env)
+    words = set(re.findall(r"[a-z]+", heard.splitlines()[-1].lower())) if code == 0 and heard else set()
+    wanted = set(re.findall(r"[a-z]+", TALK_SENTENCE.lower()))
+    if len(words & wanted) < 3:
+        return False, f"The recogniser heard {heard.splitlines()[-1] if heard else 'nothing'!r} for the test sentence.", install_again()
+    return True, "The small voice spoke a test sentence to a file, and the recogniser read it back.", None
+
+
+def row_service(ctx):
+    state = desk.PLATFORM.service_health()
+    running = ctx["running"]
+    start = ("launchctl kickstart -k gui/$(id -u)/com.rook.companion" if desk.IS_MAC else
+             "systemctl --user start rook.service")
+    if state is None:
+        return (True if running else False), ("Rook runs, with no login service." if running else
+                                              "Rook is not running, and no login service is installed."), (
+            None if running else install_again())
+    if not state["active"]:
+        return False, "Rook's service is not running.", f"Start it: {start}"
+    time.sleep(ctx["settle"])
+    later = desk.PLATFORM.service_health() or {}
+    if not later.get("active") or later.get("restarts") != state["restarts"]:
+        return False, "Rook keeps restarting.", ("Read why: tail -n 40 ~/Library/Logs/rook.err.log" if desk.IS_MAC else
+                                                 "Read why: journalctl --user -u rook.service -o cat --since -5min")
+    if not running:
+        return False, "Rook's service runs, but Rook does not answer on its socket.", \
+            ("Restart it: " + MAC_KICK if desk.IS_MAC else "Restart it: systemctl --user restart rook.service")
+    return True, f"Rook's service is up and stayed up for {ctx['settle']} s.", None
+
+
+def row_desktop(ctx):
+    if desk.IS_MAC:
+        if not ctx["running"]:
+            return None, "Needs Rook running.", None
+        if (ask_rook("probe desktop") or {}).get("panel"):
+            return True, "Rook's panel runs, at the top centre of the screen.", None
+        return False, "Rook's panel is not running.", f"Restart Rook: {MAC_KICK}"
+    if not ctx["running"]:
+        return None, "Needs Rook running.", None
+    probe = ask_rook("probe desktop") or {}
+    if probe.get("overlay"):
+        return True, "Rook's overlay is up" + (" in a Hyprland session." if probe.get("hyprland") else "."), None
+    if not probe.get("hyprland"):
+        return False, "Rook found no Hyprland desktop session in its service.", \
+            "Log out and in once, so the session starts Rook. Then run relay.py verify again."
+    return False, "Rook's overlay is not running.", "Restart Rook: systemctl --user restart rook.service"
+
+
+def row_agent(ctx):
+    if ctx["running"]:
+        probe = ask_rook("probe agent") or {}
+        if not probe.get("ok"):
+            return None, "Rook did not answer the sign-in probe.", None
+        if probe.get("fallback"):
+            return False, f"Rook runs on Claude Code for now: {probe['fallback']}", \
+                "Fix the chosen agent, or set agent to claude, then restart Rook."
+        name, state, sentence, where = probe.get("agent"), probe.get("state"), probe.get("sentence"), "in Rook's own session"
+    else:
+        import harness
+        chosen, problem = harness.pick(ctx["saved"])
+        if problem:
+            return False, problem, "Install the chosen agent, then run relay.py verify again."
+        name, (state, sentence), where = chosen.name, chosen.signin_status(), "in this shell, since Rook is not running"
+    if state == "out":
+        return False, sentence, "When that is done, run relay.py verify --only agent again."
+    if state == "in":
+        return True, f"{name} is signed in, checked {where}.", None
+    return None, (f"{name}'s status command gave no plain answer." if name in ("Claude Code", "Codex") else
+                  f"{name} has no sign-in status to check."), "Step 10's relay.py verify --talk proves it with one real turn."
+
+
+def row_output(ctx):
+    device = desk.audio_device("output")
+    if device["kind"] == "virtual":
+        return False, f"Rook's voice goes to {device['name']}, which is not a speaker.", \
+            f"Pick your speakers or headphones in {desk.PLATFORM.sound_settings}."
+    if device["kind"] == "none":
+        return False, "This computer has no sound output.", "Plug in speakers or headphones."
+    if device.get("muted"):
+        return False, f"{device['name'] or 'The default output'} is muted.", \
+            f"Unmute it in {desk.PLATFORM.sound_settings}, then run relay.py verify again."
+    return (True if device["kind"] == "real" else None), \
+        f"Sound goes to {device['name'] or 'the default output'}" + ("." if device["kind"] == "real" else
+                                                                   ", which cannot be told apart from a virtual one."), None
+
+
+def row_input(ctx):
+    device = desk.audio_device("input")
+    problem = desk.input_problem(device)
+    if problem:
+        return False, problem, (f"Plug in a microphone, or pick it in {desk.PLATFORM.sound_settings}. Then run "
+                                "relay.py verify again.")
+    if device.get("muted"):
+        return False, f"{device['name'] or 'The default input'} is muted.", \
+            f"Unmute it in {desk.PLATFORM.sound_settings}, then run relay.py verify again."
+    return (True if device["kind"] == "real" else None), \
+        f"The microphone is {device['name'] or 'the default input'}" + ("." if device["kind"] == "real" else
+                                                                        ", which cannot be told apart from a virtual one."), None
+
+
+MAC_KICK = "launchctl kickstart -k gui/$(id -u)/com.rook.companion"
+
+
+def row_mic_mac(ctx):
+    """The microphone permission for this Rook.app, asked inside Rook: from the agent's shell, macOS would answer for
+    that shell instead."""
+    if not ctx["running"]:
+        return None, "Needs Rook running: only Rook itself can ask macOS about its own microphone permission.", None
+    access = (ask_rook("probe mic") or {}).get("access")
+    if access is None:  # A timed-out probe, or a Rook from before this check.
+        return None, *NO_ANSWER
+    if not access:
+        return False, "Rook may not use the microphone.", (
+            f"Run open -W -n {mac_app()} --args --request-access microphone, and have the person click Allow. If no "
+            "dialog appears, they turn on Rook in System Settings, Privacy & Security, Microphone.")
+    return True, "Rook may use the microphone.", None
+
+
+def row_keys_mac(ctx):
+    """Input Monitoring in force for this build, and the helper's key tap live, both from inside Rook. A switch that
+    shows on for an older, differently signed Rook.app reads false here, which is the truth: the key stays deaf."""
+    if not ctx["running"]:
+        return None, "Needs Rook running.", None
+    probe = ask_rook("probe keys") or {}
+    access, ready = probe.get("access"), probe.get("ready")
+    if access is None:  # A timed-out probe, or a Rook from before this check.
+        return None, *NO_ANSWER
+    if not access:
+        return False, "Input Monitoring is not on for this Rook, so it cannot hear Right Option.", (
+            f"Run relay.py mac-access open input, then open -R {mac_app()}, and tell the person: \"Turn on Rook in "
+            "Input Monitoring. If Rook is not in the list, drag it in from the Finder window I opened, or click + "
+            "and pick it.\" And: \"If Rook already shows on there, remove that entry with -, then add this one.\" "
+            f"Then restart Rook: {MAC_KICK}")
+    if ready is None:  # The helper never said whether its key listener started.
+        return False, "Rook's key listener is not running.", f"Restart Rook: {MAC_KICK}"
+    if not ready:
+        if "not granted" in str(probe.get("reason") or ""):
+            return False, "Input Monitoring is on, but Rook's key listener started before it.", f"Restart Rook: {MAC_KICK}"
+        return False, f"Rook's key listener could not start: {str(probe.get('reason') or 'no reason given').rstrip('.')}.", \
+            f"Restart Rook: {MAC_KICK}"
+    return True, "Input Monitoring is on for this Rook, and it listens for Right Option.", None
+
+
+NO_ANSWER = ("Rook did not answer this check.",  # A probe that timed out, or a Rook too old to know it.
+             "It may be an older Rook: run relay.py update, then run relay.py verify again.")
+
+
+def row_mic(ctx):
+    if desk.IS_MAC:
+        return row_mic_mac(ctx)
+    access = (ask_rook("probe mic") or {}).get("access") if ctx["running"] else desk.PLATFORM.mic_access()
+    if access is None:
+        return None, *NO_ANSWER
+    if not access:
+        return False, "Rook may not use the microphone.", "Allow it for Rook in your system's privacy settings."
+    return True, "Rook may use the microphone.", None
+
+
+def row_keys(ctx):
+    if desk.IS_MAC:
+        return row_keys_mac(ctx)
+    if not ctx["running"]:
+        return None, "Needs Rook running.", None
+    access = (ask_rook("probe keys") or {}).get("access")
+    if access is None:
+        return None, *NO_ANSWER
+    if not access:
+        return False, "Rook's service is not in the input group, so the talk key cannot reach it.", \
+            "Run sudo usermod -aG input \"$USER\" in your own terminal, then log out and in again."
+    if "no_keyboard" in [row.get("event") for row in this_start_rows()]:
+        if not any(INPUT_DIR.glob("event*")):  # No device at all, as in a container or a remote session.
+            return False, "This computer shows Rook no keyboard at all: there is no device under /dev/input.", \
+                ("Plug a keyboard into this computer. In a virtual machine or a container, pass the input devices "
+                 "through. Until then the talk key cannot work on this computer: tell the person, and if they agree, go on "
+                 "with the other steps.")
+        return False, "Rook is in the input group but opened no keyboard.", \
+            "Check that a keyboard is plugged in, then restart Rook: systemctl --user restart rook.service"
+    return True, "Rook reads the keyboards for the talk key.", None
+
+
+def early_turns(rows):
+    """The spoken turns in rows from before the command: (whether one was answered with no failure and spoken, the
+    turns still waiting for their answer, the last failure Rook said for one). A failed turn never counts."""
+    turns, failure = set(), None
+    for row in rows:
+        event = row.get("event")
+        if event == "request" and row.get("source") == "spoken":
+            turns.add(row.get("turn"))
+        elif event == "response" and turns.intersection(row.get("turns") or []):
+            if row.get("failure"):
+                turns.difference_update(row["turns"])
+                failure = row["failure"]
+            else:
+                turns.update(row["turns"])
+        elif event == "speech" and row.get("turn") in turns and not row.get("error"):
+            return True, turns, failure
+    return False, turns, failure
+
+
+def row_talk(ctx):
+    """One real first turn: the person holds the talk key and speaks; Rook's own log shows each link of the chain."""
+    key = settings.talk_keys_in_force(ctx["saved"], settings.HOLD_KEYS)[0]
+    name = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", key[0]).replace("Ctrl", "Control") if key else "the talk key"
+    if desk.IS_MAC:
+        name = name.replace("Alt", "Option").replace("Meta", "Command")
+    if not ctx["running"]:  # Without Rook nothing can answer: say so now, not after the wait.
+        return False, "Rook is not running, so no spoken turn can reach it.", \
+            "Run relay.py verify --only service, fix what it says, then run relay.py verify --only talk again."
+    since = ctx.get("since", turns_rows()[1])
+    ctx["say"](f"Waiting for one spoken turn: hold {name}, say hello, and let go. Rook answers out loud.")
+    passed = True, "Rook heard you, its agent answered, and its voice spoke.", None
+    ok, turns, failure = early_turns(ctx.get("early") or ())  # A hello said a moment before the command started.
+    if ok:
+        return passed
+    deadline, empty = time.monotonic() + ctx["talk_seconds"], False
+    while time.monotonic() < deadline:
+        rows, since = turns_rows(since, ctx.get("started_at"))
+        for row in rows:
+            event = row.get("event")
+            if event == "mic_silent" and not turns:  # Pure digital silence, as the turn path measures it.
+                return False, desk.silence_sentence(), "Pick a real microphone, then run relay.py verify --talk again."
+            if event == "empty_transcript":
+                empty = True  # A press with no words: a short or quiet press. Keep waiting for a real one.
+            if event == "request" and row.get("source") == "spoken":
+                turns.add(row.get("turn"))
+            if event == "response" and turns.intersection(row.get("turns") or []):
+                if row.get("failure"):
+                    return False, f"Rook heard you, but its agent failed, and Rook said: {row['failure']}", \
+                        "Fix what Rook said, then run relay.py verify --only talk again."
+                turns.update(row["turns"])  # A second press joins the first: its answer speaks for either.
+            if event == "speech" and row.get("turn") in turns:
+                if row.get("error"):
+                    return False, f"Rook answered, but its voice failed: {row['error']}", install_again()
+                return passed
+        time.sleep(0.3)
+    if not turns and empty:
+        return False, "Rook got the key press but heard no words, or no sound.", \
+            "Hold the key the whole time you speak. If you did, run relay.py verify --only input."
+    if not turns and failure:  # Rook heard the earlier try: say what happened to it.
+        return False, f"Rook heard your earlier try, but its agent failed, and Rook said: {failure}", \
+            "Fix what Rook said, then run relay.py verify --only talk again and say hello once more."
+    if not turns:
+        return False, "Nothing reached Rook from the talk key.", "Run relay.py verify --only keys,mic,input."
+    return False, "Rook heard you, but no answer was spoken in time.", "Run relay.py verify --only agent."
+
+
+ROW_CHECKS = {"python": row_python, "models": row_models, "speech": row_speech, "service": row_service,
+              "desktop": row_desktop, "agent": row_agent, "input": row_input, "output": row_output, "mic": row_mic,
+              "keys": row_keys, "talk": row_talk}
+
+
+def verify(rows, say=print, settle=VERIFY_SETTLE, talk_seconds=TALK_SECONDS):
+    """Run the named rows in order: [{"id", "ok": True | False | None, "seconds", "detail", "fix"}]. ok None means
+    not checked or cannot tell, which never fails the run."""
+    from datetime import timedelta, timezone
+    now = datetime.now(timezone.utc)
+    since = turns_rows()[1]  # First of all: a hello said as the command starts is never missed.
+    # The talk window opens TALK_EARLY seconds before the command. A trimmed log is reread from the command on, since
+    # the early rows were read here already.
+    early = rows_before(since, (now - timedelta(seconds=TALK_EARLY)).isoformat())
+    started_at = now.isoformat()
+    answer = ask_rook("get", wait=5)
+    ctx = {"saved": read_settings()[0], "running": bool(answer and answer.get("ok")), "settle": settle, "say": say,
+           "talk_seconds": talk_seconds, "since": since, "started_at": started_at, "early": early}
+    if ctx["running"]:
+        found = ask_rook("probe python", wait=5) or {}
+        ctx.update(python=found.get("python"), voice=found.get("voice"), hf_home=found.get("hf_home"),
+                   cache=found.get("cache"))
+    # Nothing in verify downloads: the speech row runs only after the models row found every model on disk.
+    needs = {"models": ("python",), "speech": ("python", "models"), "desktop": ("service",), "keys": ("service",),
+             "talk": ("service",)}
+    results, failed = [], set()
+    for name in rows:
+        blocked = next((need for need in needs.get(name, ()) if need in failed), None)
+        if blocked:
+            results.append({"id": name, "ok": None, "seconds": 0.0, "fix": None,
+                            "detail": f"Skipped: the {blocked} row must pass first."})
+            failed.add(name)
+            continue
+        started = time.monotonic()
+        try:
+            ok, detail, fix = ROW_CHECKS[name](ctx)
+        except Exception as error:  # noqa: BLE001 - a broken check is one failed row, never a traceback.
+            ok, detail, fix = False, f"The check itself failed ({type(error).__name__}: {error}).", None
+        if ok is False:
+            failed.add(name)
+        results.append({"id": name, "ok": ok, "seconds": round(time.monotonic() - started, 1), "detail": detail,
+                        "fix": fix})
+    return results
+
+
+def verify_command(argv):
+    """relay.py verify [--json] [--only ROW[,ROW]] [--talk]"""
+    usage = f"Usage: relay.py verify [--json] [--only ROW[,ROW]] [--talk]. Rows: {', '.join(VERIFY_ROWS)}, talk."
+    args, as_json, only, talk = list(argv), False, None, False
+    while args:
+        arg = args.pop(0)
+        if arg == "--json":
+            as_json = True
+        elif arg == "--talk":
+            talk = True
+        elif arg == "--only" and args:
+            only = [name.strip() for name in args.pop(0).split(",") if name.strip()]
+            if any(name not in ROW_CHECKS for name in only):
+                sys.exit(usage)
+        else:
+            sys.exit(usage)
+    rows = (only or list(VERIFY_ROWS)) + (["talk"] if talk and "talk" not in (only or ()) else [])
+    results = verify(rows, say=(lambda text: print(text, file=sys.stderr, flush=True)) if as_json else print)
+    failed = any(row["ok"] is False for row in results)
+    if as_json:
+        print(json.dumps({"ok": not failed, "rows": results}))
+    else:
+        for row in results:
+            mark = {True: "ok   ", False: "FIX  ", None: "--   "}[row["ok"]]
+            print(f"{mark} {row['id']}: {row['detail']} ({row['seconds']} s)")
+            if row["ok"] is False and row["fix"]:
+                print(f"      Fix: {row['fix']}")
+            elif row["ok"] is None and row["fix"]:
+                print(f"      By hand: {row['fix']}")
+        print("Every checked piece works." if not failed else "Fix the rows marked FIX, then run relay.py verify again.")
+    sys.exit(1 if failed else 0)
+
+
+def check_verify():
+    """relay.py verify, first through the real small voice and recogniser, read-only and offline, when the release
+    runner linked their models into this check's scratch folders as it does for rook-speech (else it says it
+    skipped); then against stand-ins: Rook's environments, systemctl, pactl and Claude Code are scripts in a scratch
+    folder, Rook's socket is a stand-in server, and its log a scratch file. It runs no service, agent or sound, and
+    writes no real state."""
+    import socket
+    import tempfile
+    import threading
+    real = {"saved": {"voice": "Miles", "recogniser_model": "en"}, "python": sys.executable,
+            "voice": settings.voice_python()}
+    try:
+        import airtype  # noqa: F401 - only Rook's own Python has it.
+        has_models = row_models(real)[0]
+    except ImportError:
+        has_models = False
+    if real["voice"] and has_models:
+        ok, detail, _ = row_speech(real)
+        assert ok, detail
+        print("relay.py verify: the real small voice and recogniser passed the round trip.")
+    else:
+        print("relay.py verify: the real round trip was skipped: this machine lacks Rook's Python, the small voice or "
+              "the recogniser model.")
+    saved_env = dict(os.environ)
+    saved_paths = (relay.INBOX, settings.DATA, settings.CONFIG)
+    with tempfile.TemporaryDirectory(prefix="rv-", dir="/tmp") as scratch:
+        base = Path(scratch)
+        bin_dir, data, run_dir = base / "bin", base / "data/rook", base / "run"  # data: Rook's own folder.
+        for folder in (bin_dir, data / "venv/bin", data / "voice-phonon/bin", run_dir, base / "state/rook",
+                       base / "config/rook", base / "cache/huggingface/hub"):
+            folder.mkdir(parents=True, exist_ok=True)
+        run_dir.chmod(0o700)
+
+        def script(path, body):
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o755)
+        script(data / "venv/bin/python", 'case "$2" in *model_exists*) echo yes ;; '
+               '*transcribe_file*) echo "Rook is ready to talk." ;; esac')
+        script(data / "voice-phonon/bin/python", ': > "$3"')
+        for repo in ("models--gradium--phonon-31m-en", "models--gradium--phonon-voices"):
+            (base / "cache/huggingface/hub" / repo / "snapshots/abc").mkdir(parents=True)
+            (base / "cache/huggingface/hub" / repo / "snapshots/abc/model.bin").write_text("x")
+        service = base / "service.txt"
+        script(bin_dir / "systemctl", f'cat "{service}"')
+        script(bin_dir / "uv", "echo uv 0.13.10")
+        script(bin_dir / "claude", 'echo \'{"loggedIn": false}\'; exit 1')
+        rows = json.dumps([{"name": "mic", "description": "USB Mic", "properties": {"device.api": "alsa"}},
+                           {"name": "spk", "description": "Speakers", "properties": {"device.api": "alsa"}}])
+        script(bin_dir / "pactl", f'case "$1" in get-default-source) echo mic ;; get-default-sink) echo spk ;; '
+               f"*) echo '{rows}' ;; esac")
+        (base / "config/rook/settings.json").write_text('{"agent": "claude", "talk_keys": ["RightAlt"]}\n')
+        os.environ.update(PATH=f"{bin_dir}:/usr/bin:/bin", XDG_STATE_HOME=str(base / "state"),
+                          XDG_CONFIG_HOME=str(base / "config"), XDG_CACHE_HOME=str(base / "cache"),
+                          XDG_DATA_HOME=str(base / "data"), XDG_RUNTIME_DIR=str(run_dir))
+        os.environ.pop("HF_HOME", None)
+        relay.INBOX, settings.DATA, settings.CONFIG = run_dir / "rook.sock", data.parent, base / "config/rook/settings.json"
+        log = base / "state/rook/turns.jsonl"
+        log.write_text(json.dumps({"session": "s1", "event": "no_keyboard"}) + "\n"
+                       + json.dumps({"session": "s2", "event": "service_started"}) + "\n")  # An earlier start's row.
+        said = []
+        try:
+            def by_id(results):
+                return {row["id"]: row for row in results}
+
+            # 1. Rook is not running: the service row says so, and the agent is checked in this shell.
+            service.write_text("LoadState=loaded\nActiveState=inactive\nNRestarts=0\n")
+            got = by_id(verify(list(VERIFY_ROWS), say=said.append, settle=0))
+            assert [got[name]["ok"] for name in ("python", "models", "speech", "input", "output", "mic")] == [True] * 6, got
+            assert got["service"]["ok"] is False and "systemctl --user start rook.service" in (got["service"]["fix"] or ""), got
+            assert got["desktop"]["ok"] is None and got["keys"]["ok"] is None, got  # Skipped: no service.
+            assert got["agent"]["ok"] is False and f"{bin_dir}/claude auth login" in got["agent"]["detail"], got
+            assert "in a terminal on this computer" in got["agent"]["detail"], got
+            assert got["agent"]["fix"] == "When that is done, run relay.py verify --only agent again.", got
+
+            # 2. Rook runs: its own process answers the probes, and the service stays up.
+            answers = {"get": {"ok": True, "settings": {}},
+                       "probe agent": {"ok": True, "agent": "Claude Code", "state": "in", "sentence": None,
+                                       "fallback": None},
+                       "probe keys": {"ok": True, "access": True}, "probe mic": {"ok": True, "access": True},
+                       "probe desktop": {"ok": True, "overlay": True, "hyprland": True},
+                       "probe python": {"ok": True, "python": str(base / "alt/python"), "voice": str(base / "alt/voice")}}
+            (base / "alt").mkdir()
+            script(base / "alt/python", f': > "{base}/alt/used-python"; case "$2" in *model_exists*) echo yes ;; '
+                   '*transcribe_file*) echo "Rook is ready to talk." ;; esac')
+            script(base / "alt/voice", f': > "{base}/alt/used-voice"; : > "$3"')
+            asked = []
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(relay.INBOX))
+            server.listen()
+
+            def serve():
+                while True:
+                    try:
+                        conn, _ = server.accept()
+                    except OSError:
+                        return
+                    with conn:
+                        data_in = b""
+                        while chunk := conn.recv(65536):
+                            data_in += chunk
+                        command = data_in.decode()[len(relay.REQUEST):].partition("\n")[0].strip()
+                        asked.append(command)
+                        conn.sendall(json.dumps(answers.get(command, {"ok": False, "error": "no"})).encode())
+            threading.Thread(target=serve, daemon=True).start()
+            service.write_text("LoadState=loaded\nActiveState=active\nNRestarts=0\n")
+            got = by_id(verify(list(VERIFY_ROWS), say=said.append, settle=0))
+            assert all(row["ok"] is True for row in got.values()), got
+            assert {"probe agent", "probe keys", "probe mic", "probe desktop", "probe python"} <= set(asked), asked
+            assert (base / "alt/used-python").exists() and (base / "alt/used-voice").exists(), "verify did not use Rook's own"
+            answers["probe agent"] = {**answers["probe agent"], "state": "out",
+                                      "sentence": "Claude Code's sign-in has ended. Run /x/claude auth login in a "
+                                                  "terminal on this computer, then ask again."}
+            answers["probe keys"] = {"ok": True, "access": False}
+            answers["probe desktop"] = {"ok": True, "overlay": False, "hyprland": False}
+            got = by_id(verify(["agent", "keys", "desktop"], say=said.append, settle=0))
+            assert got["agent"]["ok"] is False and "sign-in has ended" in got["agent"]["detail"], got
+            assert got["keys"]["ok"] is False and "usermod -aG input" in got["keys"]["fix"], got
+            assert got["desktop"]["ok"] is False and "no Hyprland desktop session" in got["desktop"]["detail"], got
+            answers["probe keys"] = {"ok": True, "access": True}
+            with open(log, "a") as out:  # This start's own no_keyboard row, before its service_started row.
+                out.write(json.dumps({"session": "s3", "event": "no_keyboard"}) + "\n"
+                          + json.dumps({"session": "s3", "event": "service_started"}) + "\n")
+            got = by_id(verify(["keys"], say=said.append, settle=0))
+            assert got["keys"]["ok"] is False and "opened no keyboard" in got["keys"]["detail"], got
+            global INPUT_DIR
+            real_input, INPUT_DIR = INPUT_DIR, base / "no-input"  # A machine with no input devices at all.
+            got = by_id(verify(["keys"], say=said.append, settle=0))
+            INPUT_DIR = real_input
+            assert got["keys"]["ok"] is False and "no device under /dev/input" in got["keys"]["detail"] \
+                and "go on with the other steps" in got["keys"]["fix"], got
+
+            # A missing model: nothing downloads, the speech row never runs the loader.
+            model_file = base / "cache/huggingface/hub/models--gradium--phonon-31m-en/snapshots/abc/model.bin"
+            model_file.unlink()
+            got = by_id(verify(["python", "models", "speech"], say=said.append, settle=0))
+            assert got["models"]["ok"] is False and got["speech"]["ok"] is None, got
+            got = by_id(verify(["speech"], say=said.append, settle=0))
+            assert got["speech"]["ok"] is False and "needs every model on disk" in got["speech"]["detail"], got
+            model_file.write_text("x")
+            muted = json.dumps([{"name": "mic", "description": "USB Mic", "mute": True, "properties": {"device.api": "alsa"}},
+                                {"name": "spk", "description": "Speakers", "mute": True, "properties": {"device.api": "alsa"}}])
+            script(bin_dir / "pactl", f'case "$1" in get-default-source) echo mic ;; get-default-sink) echo spk ;; '
+                   f"*) echo '{muted}' ;; esac")
+            got = by_id(verify(["input", "output"], say=said.append, settle=0))
+            assert got["input"]["ok"] is False and got["input"]["detail"] == "USB Mic is muted." \
+                and got["output"]["ok"] is False and got["output"]["detail"] == "Speakers is muted.", got
+            script(bin_dir / "pactl", f'case "$1" in get-default-source) echo mic ;; get-default-sink) echo spk ;; '
+                   f"*) echo '{rows}' ;; esac")
+
+            # 3. --talk reads Rook's own log: each link, or the first that broke.
+            def speak_later(new_rows):
+                def write():
+                    time.sleep(0.8)
+                    with open(log, "a") as out:
+                        out.write("".join(json.dumps(row) + "\n" for row in new_rows))
+                threading.Thread(target=write, daemon=True).start()
+            speak_later([{"event": "request", "turn": "t1", "source": "spoken", "text": "testing one two three"},
+                         {"event": "response", "turns": ["t1"], "status": "completed"},
+                         {"event": "speech", "turn": "t1", "error": None}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got
+            assert said[-1].startswith("Waiting for one spoken turn: hold Right Alt, say hello"), said
+            speak_later([{"event": "empty_transcript"}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=2))
+            assert got["talk"]["ok"] is False and got["talk"]["detail"].startswith("Rook got the key press but heard no"), got
+            speak_later([{"event": "empty_transcript"}, {"event": "mic_silent", "peak": 0.0}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is False and got["talk"]["detail"].startswith("I heard only silence from USB Mic"), got
+            # The turn path's own decision counts, not the status: a failed turn whose tool still said "success".
+            speak_later([{"event": "request", "turn": "t2", "source": "spoken", "text": "hi"},
+                         {"event": "response", "turns": ["t2"], "status": "success",
+                          "failure": "I couldn't reach Claude Code: its sign-in expired."}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is False and "its sign-in expired" in got["talk"]["detail"], got
+            speak_later([{"event": "request", "turn": "t4", "source": "spoken", "text": "hi"},
+                         {"event": "response", "turns": ["t4"], "status": "api_error", "failure": None},
+                         {"event": "speech", "turn": "t4", "error": None}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got  # An answer was spoken: the status alone never fails it.
+            # A second press before the answer: one answer, spoken for the second turn, covers both.
+            speak_later([{"event": "request", "turn": "t7", "source": "spoken", "text": "hi"},
+                         {"event": "request", "turn": "t8", "source": "spoken", "text": "are you there"},
+                         {"event": "response", "turns": ["t8"], "status": "completed"},
+                         {"event": "speech", "turn": "t8", "error": None}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got
+            # A hello said as the command starts, while an earlier row still runs, is still caught.
+            def hello_at_once():
+                time.sleep(0.2)
+                with open(log, "a") as out:
+                    out.write("".join(json.dumps(row) + "\n" for row in (
+                        {"event": "request", "turn": "t5", "source": "spoken", "text": "hello"},
+                        {"event": "response", "turns": ["t5"], "status": "completed"},
+                        {"event": "speech", "turn": "t5", "error": None})))
+            threading.Thread(target=hello_at_once, daemon=True).start()
+            got = by_id(verify(["service", "talk"], say=said.append, settle=1, talk_seconds=3))
+            assert got["talk"]["ok"] is True, got
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=1))
+            assert got["talk"]["ok"] is False and got["talk"]["detail"] == "Nothing reached Rook from the talk key.", got
+            # Rook trims its log during the wait: the rows after the trim, newer than the command, still count.
+            def trim_then_hello():
+                from datetime import timezone
+                time.sleep(0.5)
+                now = datetime.now(timezone.utc).isoformat()
+                log.write_text("".join(json.dumps({"at": now, **row}) + "\n" for row in (
+                    {"event": "request", "turn": "t6", "source": "spoken", "text": "hello"},
+                    {"event": "response", "turns": ["t6"], "status": "completed"},
+                    {"event": "speech", "turn": "t6", "error": None})))
+            with open(log, "a") as out:  # Make the log long, so the trim leaves it shorter than the saved offset.
+                out.write(json.dumps({"event": "padding", "text": "x" * 4000}) + "\n")
+            threading.Thread(target=trim_then_hello, daemon=True).start()
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got
+            from datetime import timedelta, timezone
+
+            def said_at(seconds_ago, turn):  # Each case alone: the log holds only its own turn.
+                at = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+                with open(log, "w") as out:
+                    out.write("".join(json.dumps({"at": at, **row}) + "\n" for row in (
+                        {"event": "request", "turn": turn, "source": "spoken", "text": "hello"},
+                        {"event": "response", "turns": [turn], "status": "completed"},
+                        {"event": "speech", "turn": turn, "error": None})))
+            said_at(60, "early")  # A hello a minute before the command: it counts.
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=2))
+            assert got["talk"]["ok"] is True, got
+            at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+            with open(log, "w") as out:  # An early turn that failed, and an early silent press: neither counts.
+                out.write("".join(json.dumps({"at": at, **row}) + "\n" for row in (
+                    {"event": "mic_silent", "peak": 0.0},
+                    {"event": "request", "turn": "bad", "source": "spoken", "text": "hello"},
+                    {"event": "response", "turns": ["bad"], "status": "error", "failure": "Its sign-in expired."},
+                    {"event": "speech", "turn": "bad", "error": None})))
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=1))
+            assert got["talk"]["ok"] is False and got["talk"]["detail"].startswith("Rook heard your earlier try") \
+                and "Its sign-in expired." in got["talk"]["detail"], got
+            speak_later([{"event": "request", "turn": "good", "source": "spoken", "text": "hello again"},
+                         {"event": "response", "turns": ["good"], "status": "completed"},
+                         {"event": "speech", "turn": "good", "error": None}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got  # The person tried again after the fix.
+            with open(log, "w") as out:  # A hello said before the command, whose answer lands after it starts.
+                out.write(json.dumps({"at": at, "event": "request", "turn": "slow", "source": "spoken",
+                                      "text": "hello"}) + "\n")
+            speak_later([{"event": "response", "turns": ["slow"], "status": "completed"},
+                         {"event": "speech", "turn": "slow", "error": None}])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got
+
+            def trim_later():  # Rook trims its log during the wait: the early failed turn must not come back.
+                time.sleep(0.5)
+                log.write_text("".join(json.dumps({"at": at, **row}) + "\n" for row in (
+                    {"event": "request", "turn": "bad", "source": "spoken", "text": "hello"},
+                    {"event": "response", "turns": ["bad"], "status": "error", "failure": "Its sign-in expired."})))
+            with open(log, "w") as out:
+                out.write("".join(json.dumps({"at": at, **row}) + "\n" for row in (
+                    {"event": "request", "turn": "bad", "source": "spoken", "text": "hello"},
+                    {"event": "response", "turns": ["bad"], "status": "error", "failure": "Its sign-in expired."},
+                    {"event": "padding", "text": "x" * 4000})))
+            threading.Thread(target=trim_later, daemon=True).start()
+            later = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()  # Written after the command starts.
+            speak_later([{"at": later, **row} for row in (
+                {"event": "request", "turn": "retry", "source": "spoken", "text": "hello"},
+                {"event": "response", "turns": ["retry"], "status": "completed"},
+                {"event": "speech", "turn": "retry", "error": None})])
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=5))
+            assert got["talk"]["ok"] is True, got
+            said_at(200, "old")  # Older than the window: it never counts.
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=1))
+            assert got["talk"]["ok"] is False and got["talk"]["detail"] == "Nothing reached Rook from the talk key.", got
+            at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+            with open(log, "w") as out:  # A typed turn a moment ago, answered aloud: never the spoken test.
+                out.write("".join(json.dumps({"at": at, **row}) + "\n" for row in (
+                    {"event": "request", "turn": "typed", "source": "typed", "text": "hello"},
+                    {"event": "response", "turns": ["typed"], "status": "completed"},
+                    {"event": "speech", "turn": "typed", "error": None})))
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=1))
+            assert got["talk"]["ok"] is False, got
+            server.close()
+            relay.INBOX.unlink()  # A thread blocked in accept keeps the socket open: remove its name too.
+            # Without a running Rook, --only talk says so at once instead of waiting.
+            got = by_id(verify(["talk"], say=said.append, settle=0, talk_seconds=30))
+            assert got["talk"]["ok"] is False and "Rook is not running" in got["talk"]["detail"] \
+                and got["talk"]["seconds"] < 5, got
+
+            # 4. The command line: JSON, --only, and a refused row name.
+            env = {**os.environ}
+            done = subprocess.run([sys.executable, str(SCRIPT), "verify", "--json", "--only", "input,output"],
+                                  capture_output=True, text=True, env=env, timeout=60)
+            assert done.returncode == 0 and [row["id"] for row in json.loads(done.stdout)["rows"]] == ["input", "output"], \
+                done.stdout + done.stderr
+            done = subprocess.run([sys.executable, str(SCRIPT), "verify", "--only", "nonsense"], capture_output=True,
+                                  text=True, env=env, timeout=60)
+            assert done.returncode != 0 and "Usage: relay.py verify" in done.stderr, done.stderr
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+            relay.INBOX, settings.DATA, settings.CONFIG = saved_paths
+    print("relay.py verify: all checks passed.")

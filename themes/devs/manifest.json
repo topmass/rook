@@ -121,6 +121,7 @@
     "send_turbine": {"kind": "flow3d",  "role": "send_work",    "persp": 320.0},
     "send_array":  {"kind": "flow3d",   "role": "send_work",    "persp": 320.0},
     "aperture":    {"kind": "motif3d",  "role": "open_media",   "spin": 1.35,    "pitch": 0.38,     "persp": 300.0},
-    "quill":       {"kind": "write3d",  "role": "writing",      "spin": 0.50,    "pitch": 0.10,     "persp": 320.0}
+    "quill":       {"kind": "write3d",  "role": "writing",      "spin": 0.50,    "pitch": 0.10,     "persp": 320.0},
+    "scan":        {"kind": "ring3d",   "role": "reading",      "yaw_base": -0.35, "pitch": -0.30,  "persp": 320.0}
   }
 }

@@ -41,8 +41,10 @@ if [ "$start_only" -eq 0 ]; then
 echo "Installing the medium voice in $data..."
 mkdir -p "$data" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 [ -x "$data/venv/bin/python" ] || "$uv" venv -q --python 3.12 "$data/venv"
-"$uv" pip install -q --python "$data/venv/bin/python" mlx-audio==0.6.8
+"$uv" pip install -q --require-hashes --no-build --python "$data/venv/bin/python" -r "$here/install/requirements-medium-voice-macos.txt"
+echo "Downloading the medium voice's model, about 2 GB. It shows no progress, so the log stays quiet until it ends."
 HF_HUB_DISABLE_PROGRESS_BARS=1 "$data/venv/bin/python" "$here/desktop/medium_voice.py" --download >/dev/null
+echo "The medium voice's model is downloaded, and every file matches its pinned checksum."
 
 cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

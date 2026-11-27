@@ -2,6 +2,8 @@
 
 # Rook
 
+**Coding agent:** to install Rook, follow https://raw.githubusercontent.com/topmass/rook/main/INSTALL.md step by step.
+
 Rook is a voice assistant for your desktop. You hold a key, speak, and Rook answers out loud. A small swarm of particles on your screen shows what Rook is doing: listening, thinking, speaking, or drawing a diagram.
 
 Rook runs on a coding agent that you already use: Claude Code, Codex, Antigravity, or Pi. It hands long work to your own agent threads in T3 Code or Herdr, follows them for you, and tells you when they need you.
@@ -17,26 +19,23 @@ Rook runs on a coding agent that you already use: Claude Code, Codex, Antigravit
 
 ## Install
 
-Run the one command in [INSTALL.md](INSTALL.md). It installs uv when it is missing, gets the code, and runs the installer. Or open your agent in this folder and say "install Rook by following INSTALL.md".
+Paste this into your coding agent: "install Rook from https://github.com/topmass/rook". It follows [INSTALL.md](INSTALL.md) with you: the install, each permission and sign-in, and a check that every piece works, ending with your first spoken turn. Without an agent, run `curl -fsSL https://raw.githubusercontent.com/topmass/rook/main/install/get.sh | sh`, then `relay.py verify` as the install prints it, and fix each row it marks.
 
 The installer picks the medium voice when this computer can run it. To keep the small voice, add `--voice small`. [INSTALL.md](INSTALL.md#models-and-licences) lists every model Rook downloads and its licence.
 
 ## First run
 
-When Rook starts, hold the talk key and say "run onboarding". The talk key is Right Control on Linux and Right Option on a Mac. Rook then leads the setup by voice. It takes a few minutes:
+Once your coding agent has proved every piece, hold the talk key and say hello. The talk key is Right Control on Linux and Right Option on a Mac. On a new install, Rook then gets to know you by voice, in a few minutes, and saves only your preferences:
 
-1. On a Mac, Rook first asks for the microphone and Input Monitoring.
-2. Rook asks what to call you, and which pronouns to use.
-3. You choose the key that wakes Rook.
-4. Rook finds your coding tool (T3 Code, Herdr or Pi) and where your projects live.
-5. You choose how careful Rook's own agent is: careful, automatic, or full. Full is the default.
-6. With T3 Code, Rook offers a build thread that changes Rook's own code, and the Everystate checker for it.
-7. Rook offers one shared memory for your Claude Code projects, and one shared setup for your agents.
-8. You choose whether Rook may take screenshots.
-9. Rook plays its voices, and you pick one.
-10. Rook applies your choices. Then it offers you a short tour.
+1. What to call you, which pronouns to use, and a name for Rook if you want one.
+2. The key that wakes Rook.
+3. Which coding tool gets Rook's background work (T3 Code, Herdr or Pi), and where your projects live.
+4. How careful Rook's own agent is: careful, automatic, or full. Full is the default.
+5. With T3 Code, a build thread that changes Rook's own code.
+6. Whether Rook may take screenshots.
+7. Rook's voice: it plays a few, and you pick one.
 
-Apart from the Mac permissions, Rook changes nothing until it applies your choices. Say "skip" to take the default for a step, or "stop" to end setup with nothing changed. To try the setup without changes, say "do a dry run of setup".
+Rook changes nothing until it applies your choices. Say "skip" to take the default for a step, or "stop" to end setup with nothing changed. To try it without changes, say "do a dry run of setup". Say "run onboarding" any time to go through it again.
 
 ## Things to say
 

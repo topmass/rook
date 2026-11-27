@@ -216,13 +216,42 @@ MIC_SILENT_REPEAT = 600  # The microphone line is said at most once in this many
 def failure_line(agent, name, error):
     """The one sentence Rook says for a failed turn: how to sign in again, or a plain line. Never the raw error."""
     if SIGNIN_ERROR.search(error or ""):
-        return f"I couldn't reach {name}: its sign-in expired. {SIGNIN_FIX.get(agent, 'Sign in to it again.')}"
+        # A spoken line holds no paths: the plain command. relay.py verify prints the full path.
+        fix = (f"Run {' '.join(harness.LOGIN[agent])} in a terminal on this computer to sign in again."
+               if agent in harness.LOGIN else SIGNIN_FIX.get(agent, "Sign in to it again."))
+        return f"I couldn't reach {name}: its sign-in expired. {fix}"
     return f"{name} hit an error, so I couldn't finish that. Please try again."
 
 
+INPUT_DEVICE = {"name": None, "kind": "unknown"}  # The default input, looked up in a thread, never on the loop.
+INPUT_LOOKED = []  # On a Mac, set by the one lookup of this start.
+
+
+def look_up_input():
+    """Refresh INPUT_DEVICE in a thread of its own. pactl and system_profiler each have their own time limit. No
+    cheap signal tells when the default input changes, so each silence line looks again for the next one. On a Mac,
+    system_profiler takes seconds, so it runs once per start at most."""
+    if _desk.IS_MAC:
+        if INPUT_LOOKED:
+            return
+        INPUT_LOOKED.append(True)
+
+    def work():
+        try:
+            found = _desk.audio_device("input")
+        except Exception:  # noqa: BLE001 - the last good answer stays.
+            return
+        if found.get("name") or found.get("kind") == "none":  # A lookup that could not tell keeps the last answer.
+            INPUT_DEVICE.update(found)
+    threading.Thread(target=work, daemon=True, name="input-lookup").start()
+
+
 def mic_silent_line():
-    """The sentence for a recording that is pure digital silence."""
-    return "I'm not getting any sound from your microphone. Check which input your computer is using."
+    """The sentence for a recording that is pure digital silence, in relay.py verify's words. It names the input once
+    a lookup has finished, and never waits for one; each call starts a fresh lookup for the next time."""
+    line = _desk.silence_sentence(dict(INPUT_DEVICE))
+    look_up_input()
+    return line
 # The owner's stop words: a spoken request that opens with one cuts the running turn at once. stop_intent reads them, in
 # this order. Longer phrases come first.
 STOP_FILLER = ("hold on", "hang on", "all right", "alright", "hey", "okay", "ok", "rook", "wait", "please", "um", "uh",
@@ -1118,6 +1147,36 @@ def log_tail():
             return log.read().decode(errors="replace").splitlines()
     except OSError:
         return []
+
+
+# One prompt line for a Rook that was never set up, so the first press leads into the onboarding skill.
+FIRST_RUN = ("\n\nThis Rook was never set up. On the person's first request, whatever it is, load the onboarding skill and "
+             "follow it, then come back to that request. If they say not now, help with the request, and do not start "
+             "setup again in this session.")
+
+
+def never_onboarded():
+    """A new install: no onboarding record, a readable settings file with no owner name, and no spoken or typed request
+    in the log or a rotated copy of it. A person who already uses Rook never matches, and an unreadable settings file
+    counts as set up: setup never starts on a guess."""
+    if (PERSONALITY.parent / "onboarding.json").exists():
+        return False
+    try:
+        if relay.settings.read_settings(strict=True)[0].get("owner_name"):
+            return False
+    except (OSError, ValueError):
+        return False
+    for path in [STATE / "turns.jsonl", *sorted(STATE.glob("turns.jsonl.*"))]:
+        try:
+            with open(path, "rb") as log:
+                log.seek(max(0, log.seek(0, os.SEEK_END) - REPLAY_TAIL))
+                text = log.read().decode(errors="replace")
+        except OSError:
+            continue
+        if any('"event": "request"' in line and ('"source": "spoken"' in line or '"source": "typed"' in line)
+               for line in text.splitlines()):
+            return False
+    return True
 
 
 def recent_exchanges(limit=25, full=6):
@@ -2258,6 +2317,7 @@ class Companion:
     turn_detector = None  # Lazy SmartTurnDetector for listen_after(), created only when smart_turn is on.
     tail_text_lock = threading.Lock()  # One transcript check at a time, never beside a final transcription.
     _turn_download_task = None  # Background ensure_model() task when smart_turn is enabled before weights exist.
+    mac_keys = None  # On a Mac, RookHelper's last keys_ready or keys_unavailable line: whether its key tap is live.
     _turn_download_failed = False  # Stops repeated model download attempts after an error in this run.
     desktop_clock = staticmethod(time.monotonic)
     overlay_explicit = None
@@ -2854,6 +2914,8 @@ class Companion:
                   "there.\n"))
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
+        if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
+            prompt += FIRST_RUN
         uv = shutil.which("uv")
         servers = {}
         if self.game and uv:  # --wow: the game-data tools.
@@ -3282,10 +3344,13 @@ class Companion:
                         error = message.get("result") or "\n".join(message.get("errors") or [])
                         if (message.get("is_error") and SIGNIN_ERROR.search(error)
                                 and self.latest_turn in self.pending_turns and self.capture_finished.is_set()):
+                            failed = failure_line(getattr(self, "agent_name", None), self.harness.name, error)
+                            self.log("response", turns=sorted(self.pending_turns), status=message.get("subtype"),
+                                     text=error, spoken=None, spoken_cut=0,
+                                     seconds=round(time.monotonic() - self.turn_started, 1), tools=self.turn_tools,
+                                     first_speech=self.first_speech, failure=failed)
                             self.stop_turn()  # The setup turn failed its sign-in: the owner's turn would fail the same.
-                            self.last_reply = {"spoken": failure_line(getattr(self, "agent_name", None),
-                                                                         self.harness.name, error),
-                                               "details": error}
+                            self.last_reply = {"spoken": failed, "details": error}
                             self.speak()
                         continue
                 self.pending_turns.difference_update(completed)
@@ -3320,7 +3385,7 @@ class Companion:
                          spoken=spoken_lead(answer) if answer and not message.get("is_error") else None,
                          spoken_cut=max(0, len(lead_sentences(answer)) - SPOKEN_SENTENCES) if answer else 0,
                          seconds=round(time.monotonic() - self.turn_started, 1), tools=self.turn_tools,
-                         first_speech=self.first_speech)
+                         first_speech=self.first_speech, failure=failed or None)
                 for turn in completed:  # A typed request waits for its own answer.
                     if (waiter := self.waiters.pop(turn, None)) and not waiter.done():
                         waiter.set_result({"ok": not message.get("is_error"), "answer": answer,
@@ -4687,6 +4752,30 @@ class Companion:
             return await self.reload_overlay(token)
         if verb == "render":
             return await self.render_request(body)
+        if verb == "probe":  # relay.py verify: checks that must run in Rook's own process. They read only.
+            if arg == "agent":
+                state, sentence = await asyncio.to_thread(self.harness.signin_status)
+                return {"ok": True, "agent": self.harness.name, "state": state, "sentence": sentence,
+                        "fallback": self.fallback}
+            if arg == "python":  # The interpreters this Rook really runs, wherever they live.
+                voice = relay.voice_python(DATA.parent)
+                return {"ok": True, "python": sys.executable, "voice": str(voice) if voice else None,
+                        "hf_home": os.environ.get("HF_HOME"), "cache": str(_desk.cache_dir())}
+            if arg in ("keys", "mic"):
+                found = {"ok": True, "access": await asyncio.to_thread(
+                    _desk.PLATFORM.talk_key_access if arg == "keys" else _desk.PLATFORM.mic_access)}
+                if arg == "keys" and _desk.IS_MAC:  # Whether the helper's key tap is live, from its own line.
+                    found["ready"] = None if self.mac_keys is None else self.mac_keys.get("type") == "keys_ready"
+                    found["reason"] = (self.mac_keys or {}).get("reason")
+                return found
+            if arg == "desktop" and _desk.IS_MAC:  # The panel is RookHelper's window.
+                helper = getattr(self, "mac_helper", None)
+                return {"ok": True, "panel": bool(helper and helper.returncode is None)}
+            if arg == "desktop":
+                return {"ok": True, "overlay": bool(self.overlay and self.overlay.returncode is None),
+                        "hyprland": bool(_desk.PLATFORM.supports_hyprland and await asyncio.to_thread(
+                            _desk.PLATFORM.hyprland_session, 0.5))}
+            return {"ok": False, "error": "Probe agent, python, keys, mic or desktop."}
         if verb == "guide":
             try:
                 value = json.loads(body or "null")
@@ -5819,7 +5908,8 @@ class Companion:
                     >= MIC_SILENT_REPEAT:
                 self.mic_told_at = now
                 self.log("mic_silent", peak=peak)
-                self.last_reply = {"spoken": mic_silent_line(), "details": mic_silent_line()}
+                line = mic_silent_line()
+                self.last_reply = {"spoken": line, "details": line}
                 self.speak()
             else:
                 self.show_resting()
@@ -7501,6 +7591,8 @@ class Companion:
                 event = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
+            if isinstance(event, dict) and event.get("type") in ("keys_ready", "keys_unavailable"):
+                self.mac_keys = event  # relay.py verify's keys row reads it through probe keys.
             if isinstance(event, dict) and event.get("type") == "talk_key":
                 self.last_key = time.monotonic()
                 self.save_presence()
@@ -7544,6 +7636,7 @@ class Companion:
         else:
             hint = "Send requests through relay.py ask or the phone app."
         self._ready_hint = hint
+        look_up_input()  # In a thread: the silence line can name the input without waiting.
         # A service without the session's variables finds them now, or later in the desktop start task. Set once, at
         # start only: when that session ends, the overlay stop below ends Rook, so the next start finds the next one.
         self.found_session = bool(_desk.find_session())
@@ -10395,7 +10488,7 @@ def check_speech():
 
         # 9. A failed turn says one plain sentence, never the raw error, and the panel leaves thinking.
         async def fail_turn(error, agent="claude", name="Claude Code", warm=False):
-            c, sent, _, states, _, _, _ = make_companion()
+            c, sent, rows, states, _, _, _ = make_companion()
             c.agent_name, c.harness.name = agent, name
             await c.submit("Fail.", source="spoken")
             c.warming = warm  # The setup turn is still running, and its own result fails.
@@ -10407,12 +10500,20 @@ def check_speech():
             c.harness.read = errored
             await c.read_stream()
             panel = [state for state, _ in states if state is not None]
+            responses = [fields for event, fields in rows if event == "response"]
+            asked = [fields["turn"] for event, fields in rows if event == "request"]
+            assert len(responses) == 1 and responses[0]["turns"] == asked \
+                and responses[0]["failure"] == ([m["text"] for _, m in sent if m["type"] == "speak"] or [None])[-1], rows
             return [m["text"] for _, m in sent if m["type"] == "speak"], panel, c
 
         said, panel, _ = await fail_turn("Quota exceeded.")
         assert said == ["Claude Code hit an error, so I couldn't finish that. Please try again."], said
         assert panel[-1] == "speaking", panel
-        signin = f"I couldn't reach Claude Code: its sign-in expired. {SIGNIN_FIX['claude']}"
+        def fix(agent):  # Spoken: the plain command, never a path.
+            return (f"Run {' '.join(harness.LOGIN[agent])} in a terminal on this computer to sign in again."
+                    if agent in harness.LOGIN else SIGNIN_FIX[agent])
+        assert "/" not in fix("claude") and "claude auth login" in fix("claude")
+        signin = f"I couldn't reach Claude Code: its sign-in expired. {fix('claude')}"
         for error in ("Failed to authenticate: OAuth session expired and could not be refreshed",  # The Mac's.
                       "Not logged in · Please run /login", "OAuth token revoked · Please run /login",
                       'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}'):
@@ -10425,7 +10526,7 @@ def check_speech():
                 ("antigravity", "Antigravity", "Antigravity refused the request: You are not logged into Antigravity."),
                 ("pi", "Pi", 'Authentication failed for "anthropic". Credentials may have expired.')):
             said, _, _ = await fail_turn(error, agent, name)
-            assert said == [f"I couldn't reach {name}: its sign-in expired. {SIGNIN_FIX[agent]}"], (agent, said)
+            assert said == [f"I couldn't reach {name}: its sign-in expired. {fix(agent)}"], (agent, said)
         # The setup turn fails its sign-in while the owner's turn waits: the turn ends, and the line is said at once.
         said, panel, c = await fail_turn("Failed to authenticate: OAuth session expired and could not be refreshed",
                                          warm=True)
@@ -11241,7 +11342,8 @@ def check_timing():
             req_keys = set(dict(rows)["request"].keys())
             res_keys = set(dict(rows)["response"].keys())
             assert req_keys == {"turn", "text", "screenshots", "source"}, req_keys
-            assert res_keys == {"turns", "status", "text", "spoken", "spoken_cut", "seconds", "tools", "first_speech"}, res_keys
+            assert res_keys == {"turns", "status", "text", "spoken", "spoken_cut", "seconds", "tools", "first_speech",
+                                "failure"}, res_keys
 
             # Case 2: short spoken turn where speech starts after result arrives.
             err.truncate(0); err.seek(0)
@@ -19250,6 +19352,25 @@ def check_start(tree=ROOT):
     and a trap on the phone port. Every folder is scratch. Run it with Rook's Python:
     ~/.local/share/rook/venv/bin/python desktop/rook.py --check-start [TREE]"""
     scratch = Path(CHECK_SCRATCH.name)
+    # A new install leads into setup; any sign of an earlier one never does.
+    STATE.mkdir(parents=True, exist_ok=True)
+    PERSONALITY.parent.mkdir(parents=True, exist_ok=True)
+    assert never_onboarded()
+    (PERSONALITY.parent / "onboarding.json").write_text("{}\n")
+    assert not never_onboarded()
+    (PERSONALITY.parent / "onboarding.json").unlink()
+    relay.settings.CONFIG.write_text('{"owner_name": "Sam"}\n')
+    assert not never_onboarded()
+    relay.settings.CONFIG.unlink()
+    (STATE / "turns.jsonl").write_text(json.dumps({"event": "request", "turn": "t", "source": "typed"}) + "\n")
+    assert not never_onboarded()
+    (STATE / "turns.jsonl").rename(STATE / "turns.jsonl.1")  # Rotated: the request is in the older file.
+    assert not never_onboarded()
+    (STATE / "turns.jsonl.1").unlink()  # Deleted: only the settings and the record are left to tell.
+    assert never_onboarded()
+    relay.settings.CONFIG.write_text('{"owner_name": ')  # Unreadable: never a guess into setup.
+    assert not never_onboarded()
+    relay.settings.CONFIG.unlink()
     home, stubs, site = scratch / "home", scratch / "bin", scratch / "site"
     for folder in (home, stubs, site, Path(os.environ["XDG_STATE_HOME"]), Path(os.environ["XDG_CONFIG_HOME"])):
         folder.mkdir(parents=True, exist_ok=True)
@@ -19282,7 +19403,7 @@ def check_start(tree=ROOT):
                 ready = time.monotonic() - started
                 break
             time.sleep(0.1)
-        second = None
+        second, probes = None, {}
         if ready is not None:  # A second start beside the first must say so and step aside. It also gives the tasks
             # that fail at once time to fail.
             try:
@@ -19291,6 +19412,9 @@ def check_start(tree=ROOT):
                                         text=True, timeout=20)
             except subprocess.TimeoutExpired as running:  # It ran on as a second Rook: run() killed it.
                 second = subprocess.CompletedProcess(running.cmd, None, str(running.stdout or ""), "")
+            # relay.py verify's probes, answered by this real Rook from its own process.
+            probes = {row: relay.ask_rook(f"probe {row}", wait=20) for row in ("agent", "keys", "mic", "desktop",
+                                                                              "python")}
             time.sleep(max(0.0, 3 - (time.monotonic() - started - ready)))
         alive = child.poll() is None
         if alive:
@@ -19306,11 +19430,17 @@ def check_start(tree=ROOT):
     events = [row.get("event") for row in rows]
     calls = (stubs / "calls.log").read_text() if (stubs / "calls.log").exists() else ""
     # Reads that a start makes on any machine (gh, hyprctl, t3) are refused and allowed. These must never run at start.
-    calls = "; ".join(line for line in calls.splitlines() if line.split(" ", 1)[0] not in ("gh", "hyprctl", "t3"))
+    calls = "; ".join(line for line in calls.splitlines()
+                      if line.split(" ", 1)[0] not in ("gh", "hyprctl", "t3", "pactl"))
     trap = (site / "trap.log").read_text() if (site / "trap.log").exists() else ""
     problems = [problem for problem, bad in (
         (f"no \"Rook is ready\" within 60 s (exit {child.returncode})", ready is None),
         ("Rook stopped before its SIGTERM", ready is not None and not alive),
+        (f"a verify probe did not answer: {probes}", ready is not None and not (
+            all((probes.get(row) or {}).get("ok") for row in ("agent", "keys", "mic", "desktop"))
+            and probes["agent"].get("state") in ("in", "out", "unknown") and probes["agent"].get("agent") == "Claude Code"
+            and probes["mic"].get("access") in (True, None) and probes["desktop"].get("overlay") is False
+            and (probes.get("python") or {}).get("python") == sys.executable)),
         (f"a second start did not step aside: exit {second and second.returncode}, "
          f"{(second.stdout + second.stderr)[-300:] if second else ''!r}",
          second is not None and (second.returncode != 0 or second.stdout.strip() != "Rook is already running.")),

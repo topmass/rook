@@ -1141,7 +1141,14 @@ else
   say "Rook Linux installer"
 fi
 say "  Agent:      $AGENT"
-say "  Voice:      $VOICE"
+# A run with no --voice (relay.py update) keeps the saved voice, so it shows that one, not the default.
+VOICE_SHOWN="$VOICE"
+if [ "$VOICE_SET" -eq 0 ] && [ -f "$CONFIG_DIR/settings.json" ]; then
+  SAVED_VOICE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("voice_engine") or "")' \
+    "$CONFIG_DIR/settings.json" 2>/dev/null || true)"
+  [ -z "$SAVED_VOICE" ] || VOICE_SHOWN="$SAVED_VOICE (kept from your settings)"
+fi
+say "  Voice:      $VOICE_SHOWN"
 say "  Prefix:     $PREFIX"
 say "  Source:     $SOURCE"
 say "  Recogniser: $AIRTYPE_SPEC ($ASR_NAME)"
@@ -2080,7 +2087,7 @@ else:
         tmp.unlink(missing_ok=True)
         raise
 PY
-  say "  OK: Settings ready at $SETTINGS_FILE (agent=$AGENT, voice_engine=$VOICE, recogniser_model=$RECOGNISER_MODEL)."
+  say "  OK: Settings ready at $SETTINGS_FILE (agent=$AGENT, voice_engine=${VOICE_SHOWN%% *}, recogniser_model=$RECOGNISER_MODEL)."
   # The starter personality is the user's own file from now on: copied once, never overwritten, and not in the
   # manifest, so uninstall keeps it.
   PERSONALITY_FILE="$CONFIG_DIR/personality.md"
@@ -2220,7 +2227,7 @@ elif [ "$AGENT" = "antigravity" ]; then
   fi
 elif [ "$AGENT" = "pi" ]; then
   if command -v pi >/dev/null 2>&1; then
-    say "  OK: pi CLI found at $(command -v pi). Set up a model in Pi by hand. For T3, see INSTALL.md step 1."
+    say "  OK: pi CLI found at $(command -v pi). Set up a model in Pi by hand. For T3, see INSTALL.md step 5."
   else
     say "  Note: pi CLI is not on PATH yet. Install Pi and set up a model in it by hand."
   fi
@@ -2449,7 +2456,28 @@ TIMER_IS_USERS=0
 KEPT_DAILY_FOR_USER_TIMER=0
 
 # On a Mac, launchd runs the signed Rook.app, which runs Rook's Python, so every macOS permission belongs to the app.
+# It goes where an earlier run recorded it, so a rerun or an update never moves its identity; else to /Applications
+# when this user can write there and no other Rook.app is there; else to ~/Applications. ROOK_APP names it outright.
 MAC_APP="${ROOK_APP:-$HOME/Applications/Rook.app}"
+if [ "$IS_MAC" -eq 1 ] && [ -z "${ROOK_APP:-}" ]; then
+  SYSTEM_APPS="${ROOK_SYSTEM_APPS:-/Applications}"  # Tests point this at a scratch folder.
+  if MAC_APP_RECORDED="$(python3 - "$MANIFEST_PATH" <<'PY' 2>/dev/null
+import json, sys
+for entry in json.load(open(sys.argv[1])).get("entries") or []:
+    if isinstance(entry, dict) and entry.get("role") == "mac_app" and entry.get("created") is True:
+        print(entry["path"])
+        sys.exit(0)
+sys.exit(1)
+PY
+)"; then
+    MAC_APP="$MAC_APP_RECORDED"
+  # A Rook.app already in ~/Applications (kept, or from before the manifest) keeps the identity there: a second app
+  # in /Applications would carry the same bundle id while the grants stay with the first.
+  elif [ -d "$SYSTEM_APPS" ] && [ -w "$SYSTEM_APPS" ] && [ ! -e "$SYSTEM_APPS/Rook.app" ] && [ ! -L "$SYSTEM_APPS/Rook.app" ] \
+      && [ ! -e "$HOME/Applications/Rook.app" ] && [ ! -L "$HOME/Applications/Rook.app" ]; then
+    MAC_APP="$SYSTEM_APPS/Rook.app"
+  fi
+fi
 LAUNCHD_LABEL="${ROOK_LAUNCHD_LABEL:-com.rook.companion}"
 MAC_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
 MAC_DAILY_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.daily.plist"
@@ -2462,6 +2490,7 @@ if [ "$IS_MAC" -eq 1 ]; then
     if [ -L "$MAC_APP" ] || { [ -e "$MAC_APP" ] && ! prior_manifest_created "$MAC_APP"; }; then
       manifest_record_kept "$MAC_APP" "mac_app" "pre-existing Rook.app kept untouched"
       say "  Kept $MAC_APP as it is (not created by this installer). The launchd agent runs it."
+      say "  That app is not rebuilt, so it may be older than this Rook. To have the installer build it, move it to the Trash and run the install again."
     else
       # Rebuilt on every run from the installed checkout. The signing certificate stays the same, so grants survive.
       mkdir -p "$(dirname "$MAC_APP")"
