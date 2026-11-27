@@ -268,7 +268,7 @@ def t3_thread_command(command):
 # The proof lines a brief asks a thread to end its report with, in their order, and one such line.
 PROOF = ("Tested", "Not tested", "Links", "Deployed to", "Show", "Decision needed")
 PROOF_LINE = re.compile(r"^[\s>*_-]*(" + "|".join(PROOF) + r")[*_]*\s*:[*_]*[ \t]*(.*?)[\s*_]*$", re.I | re.M)
-SUMMARY_LIMIT = 6000  # About 1,000 words: enough for full thread summaries and terminal tails without flooding context.
+SUMMARY_LIMIT = settings.READBACK_LIMIT  # About 1,000 words: the readback limit every delegated agent shares.
 # The first words of news that needs the owner, which a batch puts first.
 DECISION = "A decision is needed: "
 ANSWER = f"An answer from {OWNER} is needed."

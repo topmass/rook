@@ -2011,7 +2011,7 @@ def pi_command(argv):
         print(f"Pi session {sid[:8]}, {name or 'untitled'}, in {herdr.short_path(cwd)}.")
         for role, text in messages[-count:]:
             text = " ".join(text.split())
-            print(f"{'User' if role == 'user' else 'Pi'}: {text if len(text) <= 600 else text[:600] + '...'}")
+            print(f"{'User' if role == 'user' else 'Pi'}: {text if len(text) <= settings.READBACK_LIMIT else text[:settings.READBACK_LIMIT] + '...'}")
         return
     if verb == "t3-login" and not args:
         # Pi's sign-in belongs to the server's name and address, so a short-lived t3 entry in Pi's own file carries it.

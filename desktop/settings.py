@@ -91,6 +91,9 @@ SMART_TURN = "off"
 # finishes. Off by default, so Rook stays quiet until a thread finishes. The watcher reads it at each look.
 THREAD_MILESTONES_MODES = ("off", "on")
 THREAD_MILESTONES = "off"
+# How much of an agent's words Rook reads back, from a T3 thread, a Herdr pane or a Pi session: one limit for all,
+# about 1,000 words, so a fix to one is a fix to all.
+READBACK_LIMIT = 6000
 # The video-recording debug replay (Shift+right-click on the resting loop). A private developer tool: off for everyone,
 # turned on only by the owner, and named in no shipped skill.
 DEBUG_REPLAY_MODES = ("off", "on")
