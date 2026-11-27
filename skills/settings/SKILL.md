@@ -1,6 +1,6 @@
 ---
 name: settings
-description: "Change Rook's basic settings by voice: the voice and its engine, speed, volume, expressiveness, the caption font, the light-theme dust, how diagrams enter and dance, listening after Rook talks, Smart Turn, recording length, talk keys, screenshots, the main agent and its model, the names Rook uses, update checks, and how Rook talks. Use when ⟦owner⟧ asks to change, compare, revert or check one of these, such as \"change your voice\", a voice by its name, such as \"use Jarvis\" or \"try Velvet Wit\", \"use your medium voice\", \"talk a bit slower\", \"quieter\", \"change the temperature\", \"try the mono font\", \"change the particles in light mode\", \"use the fly-in for diagrams\", \"listen after you ask me something\", \"turn on smart turn\", \"go back to the previous one\", \"use Gemini\", \"say X like Y\", \"which model are you on\", \"be more friendly when you talk\", \"call yourself Nova\", \"stop checking for updates\" or \"install the update\". Rook's colours, layout and behaviour go to the build thread."
+description: "Change Rook's basic settings by voice: the voice and its engine, speed, volume, expressiveness, the caption font, the light-theme dust, listening after Rook talks, Smart Turn, recording length, talk keys, screenshots, the main agent and its model, the names Rook uses, update checks, and how Rook talks. Use when ⟦owner⟧ asks to change, compare, revert or check one of these, such as \"change your voice\", a voice by its name, such as \"use Jarvis\" or \"try Velvet Wit\", \"use your medium voice\", \"talk a bit slower\", \"quieter\", \"change the temperature\", \"try the mono font\", \"change the particles in light mode\", \"listen after you ask me something\", \"turn on smart turn\", \"go back to the previous one\", \"use Gemini\", \"say X like Y\", \"which model are you on\", \"be more friendly when you talk\", \"call yourself Nova\", \"stop checking for updates\" or \"install the update\". Rook's colours, layout and behaviour go to the build thread."
 allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py get*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py voices*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py fonts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py dusts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py set *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py pronounce *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py update --install), Read(~/.config/rook/personality.md), Edit(~/.config/rook/personality.md)
 ---
 
@@ -18,8 +18,6 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `expressiveness` | How freely the voice varies. Higher is more expressive | 1 to 100. Default is 80 |
 | `font` | The font of Rook's captions and labels on screen | One of the fonts `relay.py fonts` lists |
 | `light_dust` | The look of the dust Rook draws in the light theme. The dark theme's gold dust never changes | One of the looks `relay.py dusts` lists |
-| `diagram_entrance` | How a new diagram appears on screen | `draw` (draws lines on behind sparks, the default) or `fly` (grains fly in from the orb) |
-| `diagram_dance` | How lively a diagram's dust dances while on screen | `subtle`, `medium` (the default), or `lively` |
 | `listen_after` | When you listen for 5 seconds after you talk, so ⟦owner⟧ can reply without a key | `off` (the default), `passive` (after updates ⟦he⟧ did not ask for), `questions` (after you ask ⟦him⟧ something), or `both` |
 | `smart_turn` | Smart Turn v3.2 mid-thought pause detection during `listen_after`. It can send only a request shorter than 15 seconds; a longer one sends after 4.5 seconds of quiet | `off` (the default) or `on` |
 | `smart_turn_threshold` | How sure Smart Turn must be before ending a turn; higher waits longer | `0.1` to `0.95`. Default is `0.75` |
@@ -69,8 +67,6 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 - `relay.py set font previous` goes back to the font before the last change.
 - `relay.py dusts` lists every look of the light theme's dust with a short description. The current one is marked.
 - `relay.py set light_dust <name>` switches the look, and `relay.py set light_dust previous` goes back.
-- `relay.py set diagram_entrance draw|fly` switches how new diagrams enter, and `relay.py set diagram_entrance previous` goes back.
-- `relay.py set diagram_dance subtle|medium|lively` changes how lively diagram dust dances, and `relay.py set diagram_dance previous` goes back.
 - `relay.py set listen_after off|passive|questions|both` changes when you listen after you talk. It applies to your next answer.
 - `relay.py set smart_turn off|on` turns Smart Turn v3.2 mid-thought pause detection off or on, and `relay.py set smart_turn_threshold <0.1-0.95>` sets its threshold; both accept `previous` and apply to the next listen window.
 - `relay.py set speak_thoughts off|beats|thoughts|both` toggles the thinking debug mode: live thought narration and between-tool beats (off by default); accepts `previous`. Live thought narration takes effect on the next turn; the between-tool beats prompt rule takes effect at Rook's next start.
@@ -127,14 +123,6 @@ When ⟦owner⟧ asks to change the dust, the grains, or the particles in light 
 | "brown" | `umber` | Warm brown ink grains |
 
 The swarm redraws at once in the light theme. In the dark theme the choice is saved and shows when the theme turns light. The command says which. "Go back" means `relay.py set light_dust previous`.
-
-## Diagram entrance
-
-When ⟦owner⟧ asks to change how diagrams appear, switch between `draw` (lines draw on behind moving sparks, the default) and `fly` (grains fly in from the orb). The change applies to the next diagram without a restart. "Go back" means `relay.py set diagram_entrance previous`.
-
-## Diagram dance
-
-When ⟦owner⟧ asks to change how lively diagram dust feels, switch between `subtle` (quieter shimmer and gentle drift), `medium` (balanced living dance, the default), and `lively` (stronger orbit, loose wisps, and more sparks). The change applies to the next diagram without a restart. "Go back" means `relay.py set diagram_dance previous`.
 
 ## Listen after you talk
 

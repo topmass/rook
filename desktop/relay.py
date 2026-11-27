@@ -239,13 +239,13 @@ import desk
 import memory
 import settings
 from settings import (
-    AGENTS, AGENT_SETTINGS, CONFIG, CONFIG_SETTINGS, DATA, DEFAULT_THEME_PACK, DIAGRAM_DANCE, DIAGRAM_DANCES,
-    DIAGRAM_ENTRANCE, DIAGRAM_ENTRANCES, DISPLAY_SETTINGS, EFFORTS, FONTS, LISTEN_AFTER,
+    AGENTS, AGENT_SETTINGS, CONFIG, CONFIG_SETTINGS, DATA, DEFAULT_THEME_PACK,
+    DISPLAY_SETTINGS, EFFORTS, FONTS, LISTEN_AFTER,
     LISTEN_AFTERS, MEDIUM_VOICES, MEDIUM_VOICE_URL, OVERLAY, POINT_ALIASES, POINT_SETTINGS,
     RANGES, RECORDING_MINUTES, RECORDING_MINUTES_RANGE, SETTINGS, SMART_TURN, SMART_TURNS,
     SMART_TURN_THRESHOLD, SPEAK_THOUGHTS, SPEAK_THOUGHTS_MODES, STAGES, THEMES_DIR, VOICE_ENGINES,
     _LIGHT_DUSTS_CACHE, atomic_write_text,
-    build_threads, diagram_dance_in_force, diagram_entrance_in_force, engine_to_points, fold,
+    build_threads, engine_to_points, fold,
     font_in_force, fonts, light_dust_in_force, light_dusts, listen_after_in_force, match_voice,
     medium_voice, medium_voice_url, points_to_engine, read_settings, recording_minutes_in_force,
     smart_turn_in_force, smart_turn_threshold_in_force, speak_thoughts_in_force, stage_in_force,
@@ -422,10 +422,6 @@ def settings_command(argv):
             values["light_dust"] = {"value": dust, "source": source}
             theme_pack, source = theme_pack_in_force(saved_file)
             values["theme"] = {"value": theme_pack, "source": source}
-            entrance, source = diagram_entrance_in_force(saved_file)
-            values["diagram_entrance"] = {"value": entrance, "source": source}
-            dance, source = diagram_dance_in_force(saved_file)
-            values["diagram_dance"] = {"value": dance, "source": source}
             stage, source = stage_in_force(saved_file)
             values["stage"] = {"value": stage, "source": source}
             listen, source = listen_after_in_force(saved_file)
@@ -757,14 +753,6 @@ def settings_command(argv):
         value, error = match_voice(str(value), packs, kind="theme")
         if error:
             leave(error)
-    elif key == "diagram_entrance":
-        value = value.lower()
-        if value not in DIAGRAM_ENTRANCES:
-            leave(f"diagram_entrance must be {' or '.join(DIAGRAM_ENTRANCES)}. {value} is not one of them.")
-    elif key == "diagram_dance":
-        value = value.lower()
-        if value not in DIAGRAM_DANCES:
-            leave(f"diagram_dance must be {', '.join(DIAGRAM_DANCES[:-1])} or {DIAGRAM_DANCES[-1]}. {value} is not one of them.")
     elif key == "stage":
         value = value.lower()
         if value not in STAGES:
@@ -857,15 +845,6 @@ def settings_command(argv):
     if key == "font":
         utter(f"Rook's text now shows in the {applied.get('font')} font."
               + (" It spoke the line, and its caption shows the new font." if answer.get("said") else "") + left_note)
-        return
-    if key == "diagram_entrance":
-        mode = applied.get("diagram_entrance")
-        how = "draw on" if mode == "draw" else "fly in"
-        utter(f"Diagrams now {how} ({mode}) starting from the next diagram.{left_note}")
-        return
-    if key == "diagram_dance":
-        preset = applied.get("diagram_dance")
-        utter(f"Diagram dust dance is now {preset} starting from the next diagram.{left_note}")
         return
     if key == "stage":
         where = "the stage, beside the presence" if applied.get("stage") == "on" else "the overlay"
@@ -1159,6 +1138,20 @@ def check_settings():
         assert st_prev.returncode == 0 and "Saved smart_turn = off." in st_prev.stdout, (st_prev.stdout, st_prev.stderr)
         saved = json.loads(settings_path.read_text())
         assert saved["smart_turn"] == "off" and saved["previous"]["smart_turn"] == "on", saved
+
+        # The old diagram_entrance and diagram_dance keys load cleanly and are ignored. get and set treat them as
+        # unknown settings, and a save of another setting keeps them in the file.
+        settings_path.write_text(json.dumps({**saved, "diagram_entrance": "fly", "diagram_dance": "lively",
+                                             "previous": {**saved["previous"], "diagram_dance": "subtle"}}))
+        assert "diagram_entrance" not in valid(json.loads(settings_path.read_text())) and run_cli("get").returncode == 0
+        for key in ("diagram_entrance", "diagram_dance"):
+            for args in (("get", key), ("set", key, "draw")):
+                gone = run_cli(*args)
+                assert gone.returncode != 0 and f"{key} is not a setting Rook can change" in gone.stderr, (args, gone)
+        assert run_cli("set", "smart_turn", "on").returncode == 0 and run_cli("set", "smart_turn", "previous").returncode == 0
+        saved = json.loads(settings_path.read_text())
+        assert (saved["diagram_entrance"], saved["diagram_dance"], saved["previous"]["diagram_dance"]) == (
+            "fly", "lively", "subtle") and saved["smart_turn"] == "off", saved
 
         # speak_thoughts: default off, set all valid modes, refusal, and previous.
         assert "speak_thoughts: off (default)" in run_cli("get", "speak_thoughts").stdout

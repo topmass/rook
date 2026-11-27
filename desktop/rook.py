@@ -4713,20 +4713,16 @@ class Companion:
         send(self.overlay, {"answers": answers[-10:]})
 
     def send_font(self):
-        """Tell the overlay which font to show Rook's text in, which dust its light theme draws, how diagrams enter and
-        dance, and that Rook is dark when it is. With no fonts.json it keeps its usual font."""
+        """Tell the overlay which font to show Rook's text in, which dust its light theme draws, and that Rook is dark
+        when it is. With no fonts.json it keeps its usual font."""
         saved = relay.read_settings()[0]
         font, dust = relay.font_in_force(saved)[0], relay.light_dust_in_force(saved)[0]
         theme_pack = relay.theme_pack_in_force(saved)[0]
-        entrance = relay.diagram_entrance_in_force(saved)[0]
-        dance = relay.diagram_dance_in_force(saved)[0]
         stage = relay.stage_in_force(saved)[0]
-        if self.overlay and self.overlay.returncode is None and (font or dust or theme_pack or entrance or dance or self.dark or self.held_waiting):
+        if self.overlay and self.overlay.returncode is None and (font or dust or theme_pack or self.dark or self.held_waiting):
             waiting = ("TIMER WAITING" if self.held_waiting["kind"] == "timer" else "WAITING") if self.held_waiting else ""
             send(self.overlay, {**({"font": font} if font else {}), **({"light_dust": dust} if dust else {}),
                                 **({"pack": theme_pack} if theme_pack else {}),
-                                **({"diagram_entrance": entrance} if entrance else {}),
-                                **({"diagram_dance": dance} if dance else {}),
                                 "stage": stage == "on",
                                 **({"dark": True} if self.dark else {}),
                                 **({"waiting": waiting} if waiting else {})})
@@ -4766,8 +4762,6 @@ class Companion:
             font, source = relay.font_in_force(saved)
             dust, dust_source = relay.light_dust_in_force(saved)
             theme_pack, theme_source = relay.theme_pack_in_force(saved)
-            entrance, entrance_source = relay.diagram_entrance_in_force(saved)
-            dance, dance_source = relay.diagram_dance_in_force(saved)
             stage, stage_source = relay.stage_in_force(saved)
             listen, listen_source = relay.listen_after_in_force(saved)
             st_mode, st_source = relay.smart_turn_in_force(saved)
@@ -4798,8 +4792,6 @@ class Companion:
                                              "font": {"value": font, "source": source},
                                              "light_dust": {"value": dust, "source": dust_source},
                                              "theme": {"value": theme_pack, "source": theme_source},
-                                             "diagram_entrance": {"value": entrance, "source": entrance_source},
-                                             "diagram_dance": {"value": dance, "source": dance_source},
                                              "stage": {"value": stage, "source": stage_source},
                                              "listen_after": {"value": listen, "source": listen_source},
                                              "smart_turn": {"value": st_mode, "source": st_source},
@@ -4899,8 +4891,6 @@ class Companion:
             return {"ok": True, "settings": {**values, "font": relay.font_in_force(saved)[0],
                                              "light_dust": relay.light_dust_in_force(saved)[0],
                                              "theme": relay.theme_pack_in_force(saved)[0],
-                                             "diagram_entrance": relay.diagram_entrance_in_force(saved)[0],
-                                             "diagram_dance": relay.diagram_dance_in_force(saved)[0],
                                              "stage": relay.stage_in_force(saved)[0],
                                              "listen_after": relay.listen_after_in_force(saved)[0],
                                              "smart_turn": relay.smart_turn_in_force(saved)[0],

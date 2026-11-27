@@ -70,10 +70,6 @@ ORCHESTRATOR_WORDS = {"t3": "T3 Code", "herdr": "Herdr", "pi": "a Pi agent in He
                       "none": "neither, because no coding tool is chosen, so ask ⟦owner⟧ which one to use"}
 # Whether each request carries a screenshot of the focused window. On by default; read at each capture.
 SCREENSHOTS = ("on", "off")
-DIAGRAM_ENTRANCES = ("draw", "fly")
-DIAGRAM_ENTRANCE = "draw"
-DIAGRAM_DANCES = ("subtle", "medium", "lively")
-DIAGRAM_DANCE = "medium"
 # Where diagrams and the answer panel show: "off" draws them in the overlay, "on" in the stage host (stage/host.py),
 # which the overlay starts when one shows and falls back from if it cannot.
 # Shelved on the desktop (the owner, 2026-11-25: diagrams come from Rook's own particles, no web-style cards), so "on" is
@@ -119,8 +115,8 @@ MEDIUM_VOICES = ("late-night-architect", "velvet-wit", "jarvis-poe", "observator
 MACHINES_CONFIG = CONFIG.with_name("machines.json")
 DEFAULT_THEME_PACK = "devs"
 THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
-SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "diagram_entrance", "diagram_dance",
-            "stage", "listen_after", "smart_turn", "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
+SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "stage", "listen_after", "smart_turn",
+            "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
             "recogniser_model")
@@ -162,10 +158,6 @@ def valid(data):
             found[key] = value.strip()
         elif key == "voice_engine" and value in VOICE_ENGINES:
             found[key] = value
-        elif key == "diagram_entrance" and isinstance(value, str) and value.strip().lower() in DIAGRAM_ENTRANCES:
-            found[key] = value.strip().lower()
-        elif key == "diagram_dance" and isinstance(value, str) and value.strip().lower() in DIAGRAM_DANCES:
-            found[key] = value.strip().lower()
         elif key == "stage" and isinstance(value, str) and value.strip().lower() in STAGES:
             found[key] = value.strip().lower()
         elif key == "listen_after" and isinstance(value, str) and value.strip().lower() in LISTEN_AFTERS:
@@ -514,20 +506,6 @@ def theme_pack_in_force(saved):
     if saved.get("theme") in names:
         return saved["theme"], "settings file"
     return (DEFAULT_THEME_PACK if DEFAULT_THEME_PACK in names else (names[0] if names else DEFAULT_THEME_PACK)), "default"
-
-
-def diagram_entrance_in_force(saved):
-    """Return (entrance mode, source): the saved mode while valid, else the default."""
-    if saved.get("diagram_entrance") in DIAGRAM_ENTRANCES:
-        return saved["diagram_entrance"], "settings file"
-    return DIAGRAM_ENTRANCE, "default"
-
-
-def diagram_dance_in_force(saved):
-    """Return (dance preset, source): the saved preset while valid, else the default."""
-    if saved.get("diagram_dance") in DIAGRAM_DANCES:
-        return saved["diagram_dance"], "settings file"
-    return DIAGRAM_DANCE, "default"
 
 
 def stage_in_force(saved):

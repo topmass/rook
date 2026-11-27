@@ -4948,8 +4948,6 @@ class Scene:
         # began to end, and the grains past GRAINS a diagram adds (see render_command).
         self.render = None
         self.render_form = self.render_old = None
-        self.diagram_entrance = scenes.DIAGRAM_ENTRANCE
-        self.diagram_dance = scenes.DANCE
         self.render_since = self.render_end = None
         self.render_gone = -math.inf
         self.render_reach_px = 0
@@ -10349,13 +10347,10 @@ class Overlay(Gtk.Application):
         self.answer_open = False
         self.answer_mix = 0.0
         self.answer_win = None
-        # The stage host, when the stage setting is on: the scene it shows ({"id", "scene", "form", "at", "step"}),
-        # whether it shows the panel, and each staged or baking scene's own text, which the stage resolves itself.
+        # The stage host, when the stage setting is on, and whether it shows the panel.
         self.stage_on = False
         self.stage = stage_link.StageLink(self._from_stage)
-        self._stage_scene = None
         self._stage_panel = False
-        self._raw_scenes = {}
         self._answer_shown = None  # The answer the panel holds now.
         self._answer_size = None  # ((answer, width), content height), so dragging does not lay the answer out again.
         self._answer_xy = (0, 0)
@@ -11734,10 +11729,6 @@ class Overlay(Gtk.Application):
             self._set_font(msg["font"])
         if isinstance(msg.get("light_dust"), str):
             self._set_light_dust(msg["light_dust"])
-        if isinstance(msg.get("diagram_entrance"), str):
-            self._set_diagram_entrance(msg["diagram_entrance"])
-        if isinstance(msg.get("diagram_dance"), str):
-            self._set_diagram_dance(msg["diagram_dance"])
         if "show" in msg:
             self._show_media(msg["show"])
         if "render" in msg:
@@ -11837,19 +11828,8 @@ class Overlay(Gtk.Application):
                 self._emit({"event": "rendered", "id": req_id, **self.scene.render_said(scene, form)})
             else:
                 self._emit({"event": "rendered", "id": req_id,
-                            **self._commit_scene(req_id, scene, form, time.monotonic())})
+                            **self.scene.render_commit(scene, form, time.monotonic())})
                 self._apply_state()
-            return
-        if self._stage_scene is not None and isinstance(spec, dict) and (spec.get("clear") or "step" in spec):
-            if spec.get("clear"):
-                self._stage_hide()
-                self._emit({"event": "rendered", "id": req_id, "ok": True, "said": "Cleared."})
-                return
-            answer = _scene_step_answer(self._stage_scene["scene"]["steps"], spec["step"])
-            if answer["ok"]:
-                self._stage_scene["step"] = spec["step"]
-                self.stage.send({"step": spec["step"]})
-            self._emit({"event": "rendered", "id": req_id, **answer})
             return
         try:
             answer = self.scene.render_command(spec, time.monotonic())
@@ -11872,7 +11852,7 @@ class Overlay(Gtk.Application):
         self._staged = None
         now = time.monotonic()
         try:
-            self._commit_scene(req_id, scene, form, now)
+            self.scene.render_commit(scene, form, now)
             self._apply_state()
         except Exception as error:
             self._drop_bad_scene("reveal", error, now)
@@ -11891,62 +11871,27 @@ class Overlay(Gtk.Application):
                        mode=self._theme_now(), monitor=[geo.x, geo.y, geo.width, geo.height] if geo else None,
                        top=round((self.top or 0) + self.scene.lift + ORB_H + CAPTION_H - 24))
 
-    def _commit_scene(self, req_id, scene, form, now):
-        """Show a checked and baked scene: on the stage when it is on and can draw, else as the swarm. The answer is
-        the same either way."""
-        raw = self._raw_scenes.pop(req_id, None)
-        if self._staging() and raw is not None:
-            self._stage_context()
-            if self.stage.send({"scene": raw, "id": req_id}):
-                self.scene.end_render(now, at_once=True)  # The swarm stays Rook while the stage draws.
-                self._stage_scene, self._stage_panel = {"id": req_id, "scene": scene, "form": form, "at": now,
-                                                        "step": 0}, False
-                return self.scene.render_said(scene, form)
-        self._stage_scene = None
-        return self.scene.render_commit(scene, form, now)
-
     def _stage_panel_message(self):
         return {"panel": {"text": self.answer}, "index": len(self.answers) - 1 - self.answer_at,
                 "count": len(self.answers)}
 
     def _stage_hide(self):
-        self._stage_scene, self._stage_panel = None, False
+        self._stage_panel = False
         self.stage.hide()
-
-    def _stage_tick(self, now):
-        """A scene on the stage ends when the swarm's would: the user talks, the viewer opens, or a while after the
-        answer."""
-        shown = self._stage_scene
-        if shown is not None and (self.scene.state == "listening" or self.scene.view is not None or (
-                self.scene.state not in READING_STATES + ("permission", "speaking")
-                and now - max(shown["at"], self.scene.state_at) > scenes.SCENE_SECONDS)):
-            self._stage_hide()
 
     def _stage_fall_back(self, why):
-        """The stage cannot draw: what it showed goes back to the overlay at once, as the overlay draws it."""
-        shown, panel = self._stage_scene, self._stage_panel
-        self._stage_scene, self._stage_panel = None, False
+        """The stage cannot draw: the panel it showed goes back to the overlay at once."""
+        panel, self._stage_panel = self._stage_panel, False
         self.stage.hide()
-        if shown is not None:
-            now = time.monotonic()
-            try:
-                self.scene.render_commit(shown["scene"], shown["form"], now)
-                if shown["step"]:
-                    self.scene.render_command({"step": shown["step"]}, now)
-                self._apply_state()
-            except Exception as error:
-                self._drop_bad_scene("stage fallback", error, now)
         if panel:
             self._open_answer()
-        if shown is not None or panel:
             print(f"stage: {why}; the overlay draws it", file=sys.stderr, flush=True)
 
     def _from_stage(self, data):
         """Events from the stage host: the user's picks, copies, links and closes, and its failures."""
         event = data.get("event")
-        late = event == "shown" and (self._stage_scene is None or data.get("id") != self._stage_scene["id"])
-        if event == "failed" or event == "shown" and not data.get("ok") and not late:  # Never for an earlier scene.
-            self._stage_fall_back(data.get("error") or "the stage could not show the scene")
+        if event == "failed":
+            self._stage_fall_back(data.get("error") or "the stage failed")
         elif event == "pick" and isinstance(data.get("data"), int) and self.answers:
             self.answer_at = max(0, min(len(self.answers) - 1, len(self.answers) - 1 - data["data"]))
             self.answer = self.answers[self.answer_at]
@@ -11991,20 +11936,6 @@ class Overlay(Gtk.Application):
         """Switch the active presence theme pack (e.g. 'devs' or 'nova')."""
         self.scene.set_pack(name, time.monotonic())
         self.area.queue_draw()
-
-    def _set_diagram_entrance(self, name):
-        """Set how the next diagram enters: draw on behind sparks, or fly in from the orb."""
-        if name not in scenes.DIAGRAM_ENTRANCES:
-            print(f"diagram_entrance: no mode named {name!r}", file=sys.stderr, flush=True)
-            return
-        self.scene.diagram_entrance = name
-
-    def _set_diagram_dance(self, name):
-        """Set how lively the next diagram's dust dances: subtle, medium, or lively."""
-        if name not in scenes.DIAGRAM_DANCES:
-            print(f"diagram_dance: no preset named {name!r}", file=sys.stderr, flush=True)
-            return
-        self.scene.diagram_dance = name
 
     def _apply_state(self):
         s = self.scene.state
@@ -12276,7 +12207,7 @@ class Overlay(Gtk.Application):
         if self._staging():
             self._stage_context()
             if self.stage.send(self._stage_panel_message()):
-                self._stage_scene, self._stage_panel = None, True
+                self._stage_panel = True
                 return
         self.answer_open = True
         self._answer_keyboard()
@@ -12631,7 +12562,6 @@ class Overlay(Gtk.Application):
             self._apply_state()
         dt = 1 / self._clock_fps() if clocked else self._tick_ms / 1000
         self._step_answer(dt)
-        self._stage_tick(time.monotonic())
         media = self.media
         self.scene.view_video = media is not None and media.kind == "video" and media.playing
         self.scene.dust_gl = self._dust_on_gpu()
