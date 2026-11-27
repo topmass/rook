@@ -2483,7 +2483,7 @@ class Companion:
             import perf
             try:
                 self.perf_log = perf.PerfLog(self.perf_log_path, self.session, self.perf_workers,
-                                            lambda error: self.log("perf_write_failed", error=error))
+                                            lambda error: self.log("perf_write_failed", error=error), self.perf_event)
             except (OSError, AttributeError) as error:
                 self.log("perf_init_failed", error=str(error))
         self.agent_choice = {key: value for key, value in saved_settings.items() if key in relay.AGENT_SETTINGS}
@@ -2627,7 +2627,25 @@ class Companion:
                     self.speech_gap_handle = self.loop.call_later(0.15, self.keep_speaking_level)
             send(self.overlay, payload)
 
+    def perf_event(self, trace, event, status=None, audio_status=None):
+        failed = status in ("agent_error", "agent_closed", "dispatch_failed", "recognition_failed", "capture_failed",
+                            "not_dispatched", "queue_timeout", "timed_out", "capacity") or audio_status in ("error", "worker_closed")
+        fields = {"request_id": trace.request_id, "turn": trace.turn}
+        if status:
+            fields.update(status=status, audio_status=audio_status, level="error" if failed else "info")
+        self.log(event, **fields)
+        if failed:
+            print(f"rook: request_id={trace.request_id} event={event} status={status} audio={audio_status}",
+                  file=sys.stderr)
+
     def log(self, event, **fields):
+        if self.perf_log is not None and "request_id" not in fields:
+            if turns := fields.get("turns"):
+                ids = [self.perf_log.turns[turn].request_id for turn in turns if turn in self.perf_log.turns]
+                if ids:
+                    fields["request_id" if len(ids) == 1 else "request_ids"] = ids[0] if len(ids) == 1 else ids
+            elif trace := self.perf_log.turns.get(fields.get("turn")):
+                fields["request_id"] = trace.request_id
         level = ("error" if fields.get("error") or event.endswith("_error") else
                  "warning" if event.endswith(("_failed", "_stalled", "_dropped", "_late")) else "info")
         row = {"at": datetime.now(timezone.utc).isoformat(), "session": self.session,
@@ -3127,7 +3145,7 @@ class Companion:
             self.prefs_stamp, prefs_update = await asyncio.to_thread(read_preferences, updated=True)
         if self.cut_at > asked and source in ("spoken", "typed") and not client:  # A stop came while it waited.
             self.prefs_stamp = prefs_before if prefs_update else self.prefs_stamp
-            self.log("stop_dropped", source=source)
+            self.log("stop_dropped", source=source, **({"request_id": trace.request_id} if trace else {}))
             if trace:
                 trace.finish("stopped")
             return "stopped"
@@ -3152,7 +3170,12 @@ class Companion:
         self.finish_deferred(heard=False)
         turn = turn or str(uuid4())
         inbox_ids = self.inbox.ids_for(inbox_entries) if inbox_entries else ()
+        if trace:
+            self.perf_log.bind(trace, turn)
+            trace.begin("journal")
         journal_ms = self.accept_request(turn, source, text, inbox_ids=inbox_ids, client=client)  # Durable first.
+        if trace:
+            trace.end("journal")
         if client:
             self.phone_turns.add(turn)
         if inbox_entries:
@@ -3246,8 +3269,16 @@ class Companion:
         # such as a thread's message, a mailbox line, the preferences file, a window title or game data, is never rendered.
         if trace:
             self.perf_log.dispatch(trace, self.latest_turn)
-        self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
-                          steer)
+            trace.begin("dispatch")
+        try:
+            self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
+                              steer)
+        except Exception:
+            if trace:
+                trace.finish("dispatch_failed")
+            raise
+        if trace:
+            trace.end("dispatch")
         silent = (self.latest_turn, given, label, shots, source, once, client, report, time.monotonic())
         if not steer:
             self.silent_turns = [silent]
@@ -3552,7 +3583,8 @@ class Companion:
         try:
             await self.read_stream()
         except Exception as exc:
-            self.log("agent_read_failed", error=repr(exc))
+            self.log("agent_read_failed", error=repr(exc),
+                     **({"turns": list(self.pending_turns)} if self.perf_log is not None else {}))
             if agent.returncode is None:
                 try:
                     agent.kill()
@@ -3565,7 +3597,8 @@ class Companion:
             self.journal_write("close", list(self.pending_turns), "interrupted",
                                "stop" if stopped else "stalled" if stall else "agent")
         if self.perf_log is not None:
-            self.perf_log.finish_turns(tuple(self.pending_turns), "agent_closed")
+            retrying = {entry[0] for entry in stall[1]} if stall and not stopped else set()
+            self.perf_log.finish_turns(self.pending_turns - retrying, "agent_closed")
         self.pending_turns.clear()
         self.silent_turns = ()
         self.stream_text = None
@@ -3721,12 +3754,14 @@ class Companion:
 
     async def resubmit(self, stuck):
         """Give a stalled agent's silent requests to a new agent, through submit like any request, with a new turn."""
-        for _, text, label, shots, source, note, _, report, _ in stuck:
+        for prior_turn, text, label, shots, source, note, _, report, _ in stuck:
             turn = str(uuid4())
             self.redone = self.redone | {turn}
             if report is not None and self.held_note is None:  # The held report goes along as it did, not as words.
                 self.held_note = report
-            await self.submit(text, label, shots, source=source, note=note or None, turn=turn)
+            trace = self.perf_log.retry(prior_turn) if self.perf_log is not None else None
+            await self.submit(text, label, shots, source=source, note=note or None, turn=turn,
+                              **({"timing": {"perf": trace}} if trace else {}))
 
     def answer_permission(self, allowed, answers=None, card=None):
         """Answer the shown card. card is the id of the card the answer was given to, on every client: an answer
@@ -3740,6 +3775,8 @@ class Companion:
             return False
         message, self.permission = self.permission, None
         self.card_move(message.get("request_id") or "", Card.ANSWERED, "allowed" if allowed else "declined")
+        if self.perf_log is not None:
+            self.perf_log.approval_done(message.get("request_id"))
         self.harness.permit(self.agent, message, allowed, answers)
         self.journal_write("clear_wait", card, None, "card")
         self.next_card(thinking=True)
@@ -5491,18 +5528,27 @@ class Companion:
         A test from the build thread is labelled as one, so Claude and the replay never take it for the owner."""
         if not text:
             return {"ok": False, "error": "Give the request text."}
+        trace = self.perf_log.begin("test" if test else "typed", "relay") if self.perf_log is not None else None
+        if trace:
+            trace.begin("queue")
         deadline = time.monotonic() + ASK_SECONDS
         queue_seconds = 0.0
         lock_wait = time.monotonic()
         async with self.turn_lock:
             queue_seconds += time.monotonic() - lock_wait
             while True:
+                if trace:
+                    trace.begin("agent_ready")
                 await self.ensure_agent()
+                if trace:
+                    trace.end("agent_ready")
                 idle_wait = time.monotonic()
                 while time.monotonic() <= deadline and not self.idle():
                     await asyncio.sleep(0.25)
                 queue_seconds += time.monotonic() - idle_wait
                 if time.monotonic() > deadline:
+                    if trace:
+                        trace.finish("queue_timeout")
                     return {"ok": False, "error": "Rook stayed busy for five minutes, so the request was not sent."}
                 window = await self.hyprctl("activewindow") or {}
                 in_game = self.game and window.get("title", "").startswith("World of Warcraft")
@@ -5511,14 +5557,21 @@ class Companion:
                 elif not image:
                     label, shots = "Images: none. Typed with no image.", []
                 else:
+                    if trace:
+                        trace.begin("screenshot")
                     label, shots = await self.bounded_shots(
                         self.game_screenshots(window) if in_game else self.screenshot(window), in_game)
+                    if trace:
+                        trace.end("screenshot")
                 if self.idle():  # The owner may have spoken while the window was captured.
                     break
             if test:
                 label = f"{relay.settings.render(TEST_LABEL)}\n{label}"
+            timing = {"queue_ms": round(queue_seconds * 1000)}
+            if trace:
+                timing["perf"] = trace
             if await self.submit(text, label, shots, source="test" if test else "typed",
-                                 timing={"queue_ms": round(queue_seconds * 1000)}) == "stopped":
+                                 timing=timing) == "stopped":
                 return {"ok": False, "error": f"{OWNER_START} said stop before this request reached the agent, so Rook did not "
                                               "send it."}
             waiter = self.waiters[self.latest_turn] = self.loop.create_future()
@@ -5780,12 +5833,17 @@ class Companion:
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def record(self, released):
+        trace = self.perf_log.begin("spoken", "talk_key") if self.perf_log is not None else None
         if self.pipeline is None:
+            if trace:
+                trace.finish("capture_failed")
             self.log("capture_error", error="Speech recognition is not on this system yet.")
             return
         window = await self.hyprctl("activewindow") or {}
         in_game = bool(self.game and window.get("title", "").startswith("World of Warcraft"))
         if released.is_set():
+            if trace:
+                trace.finish("cancelled")
             return
         limit_seconds = self.recording_seconds()
         speaking = bool(self.voice_id or self.voice_texts or self.playing)
@@ -5798,10 +5856,12 @@ class Companion:
         self.recording = True
         self.recording_started.set()
         self.show("listening", level=0.0)
+        if trace:
+            trace.begin("capture")
+            trace.begin("screenshot")
         shots = self.loop.create_task(self.no_shots(in_game) if self.dark and not DARK_SCREENSHOTS else
                                       self.game_screenshots(window) if in_game else self.screenshot(window))
         result = None
-        trace = None
         record_ms = transcribe_ms = 0
         try:
             record_began = time.monotonic()
@@ -5816,6 +5876,8 @@ class Companion:
                             released.set()
                         record_ms = round((time.monotonic() - record_began) * 1000)
                         self.recording = False
+                        if trace:
+                            trace.end("capture")
                         if getattr(released, "cancelled", False):
                             capture, self.capture = self.capture, None
                             if capture is not None:
@@ -5824,13 +5886,16 @@ class Companion:
                             self.restore_media_duck()
                             shots.cancel()  # A chord means typing: no screenshot is taken or kept.
                             self.show_resting()
+                            if trace:
+                                trace.finish("cancelled")
                             return
                         self.show("transcribing")
                         transcribe_began = time.monotonic()
-                        if self.perf_log is not None:
-                            trace = self.perf_log.begin("spoken", "talk_key")
-                            trace.began = getattr(released, "perf_at", transcribe_began)
-                            trace.begin("recognition", when=trace.began)
+                        if trace:
+                            trace.input_at = getattr(released, "perf_at", transcribe_began)
+                            if shots.done():
+                                trace.end("screenshot", complete=not shots.cancelled())
+                            trace.begin("recognition", when=trace.input_at)
                         if reservation is not None:
                             await reservation.wait()
                         capture, self.capture = self.capture, None
@@ -5866,7 +5931,10 @@ class Companion:
             # From here the reply's end resumes it, or at once below when the owner said nothing.
             self.hush_hold = False
         if result and result.text:
-            await self.submit(result.text, *await self.bounded_shots(shots, in_game), source="spoken", timing={
+            images = await self.bounded_shots(shots, in_game)
+            if trace:
+                trace.end("screenshot", complete=not shots.cancelled())
+            await self.submit(result.text, *images, source="spoken", timing={
                 "record_ms": record_ms, "transcribe_ms": transcribe_ms,
                 "asr_loaded": getattr(result, "loaded_now", None), "perf": trace,
             })

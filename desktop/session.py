@@ -397,7 +397,10 @@ class PhoneSession:
         worker = self.speech_workers.get(turn)
         if worker is None:
             q = asyncio.Queue()
+            logger = getattr(self.c, "perf_log", None)
             task = self.c.loop.create_task(self._render_speech_worker(turn, device_id, q))
+            if logger and logger.queue_audio(turn, task, stage="phone_audio"):
+                task.add_done_callback(logger.phone_audio_done)
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             worker = (device_id, q, task)
@@ -413,6 +416,8 @@ class PhoneSession:
             worker[1].put_nowait(None)
 
     async def _render_speech_worker(self, turn, device_id, q):
+        logger = getattr(self.c, "perf_log", None)
+        trace = logger.audio.get(asyncio.current_task()) if logger else None
         index = 0
         try:
             while True:
@@ -420,7 +425,13 @@ class PhoneSession:
                 if text is None:
                     return
                 has_voice = bool(self.c.voice and self.c.voice.returncode is None)
+                if trace:
+                    trace.begin("phone_render")
                 rendered = await self.c.render_speech(text)
+                if trace:
+                    trace.end("phone_render", complete=rendered is not None)
+                    if rendered is None:
+                        trace.audio_status = "error"
                 if rendered is None:
                     if not has_voice:
                         print("rook: speech render skipped: voice unavailable", file=sys.stderr)
@@ -701,7 +712,11 @@ class PhoneSession:
         """Give a phone's request to the agent. It waits its turn as a typed ask does: the turn lock, then an idle
         Rook. No screenshot: the desk is not the phone. A stop word cuts the running turn first, as at the desk."""
         timings = {}
+        logger = getattr(self.c, "perf_log", None)
+        if trace is None and logger:
+            trace = logger.begin(source, "phone")
         if trace:
+            logger.bind(trace, turn)
             trace.begin("queue")
             timings["timing"] = {"perf": trace}
         try:
@@ -714,7 +729,11 @@ class PhoneSession:
                 self.c.journal_write("command_done", device_id, command_id, "done")
                 return
             async with self.c.turn_lock:
+                if trace:
+                    trace.begin("agent_ready")
                 await self.c.ensure_agent()
+                if trace:
+                    trace.end("agent_ready")
                 while True:  # A turn that started inside submit sends this one back here, to wait again.
                     while not self.c.idle():
                         await asyncio.sleep(0.25)
