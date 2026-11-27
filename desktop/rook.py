@@ -101,7 +101,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "rook"
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rook"
 # relay.py tell writes messages from T3 threads, such as the build thread, to this socket.
-INBOX = _desk.runtime_dir() / "rook.sock"
+INBOX = _desk.rook_socket()
 # relay.py note leaves the reason for a restart here, and the next start reads it once.
 RESTART_NOTE = INBOX.with_name("rook-restart-note")
 # The owner's notes on how Rook talks, read into the system prompt at every launch. Rook edits it only when they ask.

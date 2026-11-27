@@ -86,7 +86,7 @@ def claude_runtime_dir():
 
 def claude_settings_data(claude_dir=None, host_skills=None):
     """Build per-session Claude Code settings that hide user skills except the active plugins' allowed host skills,
-    and disable user plugins."""
+    disable user plugins, and allow the local relay on macOS and an explicitly configured Herdr socket."""
     claude_dir = claude_config_dir() if claude_dir is None else Path(claude_dir)
     allowed = frozenset(plugin_loader.host_skills_allow() if host_skills is None else host_skills)
     overrides, plugins = {}, {}
@@ -135,7 +135,15 @@ def claude_settings_data(claude_dir=None, host_skills=None):
         if isinstance(enabled, dict):
             for key in enabled:
                 plugins[key] = False
-    return {"skillOverrides": overrides, "enabledPlugins": plugins, "syncClaudeAiSkills": False}
+    config = {"skillOverrides": overrides, "enabledPlugins": plugins, "syncClaudeAiSkills": False}
+    sockets = [str(desk.rook_socket())] if desk.IS_MAC else []
+    if os.environ.get("ROOK_ALLOW_HERDR_SOCKET") == "1":
+        socket_path = Path(os.environ.get("HERDR_SOCKET_PATH", ""))
+        if socket_path.is_absolute() and socket_path.is_socket() and str(socket_path) not in sockets:
+            sockets.append(str(socket_path))
+    if sockets:
+        config["sandbox"] = {"network": {"allowUnixSockets": sockets}}
+    return config
 
 
 def write_claude_files(runtime_dir=None, claude_dir=None, skills_dir=None, plugin_skills=None, host_skills=None):

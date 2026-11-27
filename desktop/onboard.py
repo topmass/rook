@@ -147,8 +147,10 @@ def audition_command(argv):
     if argv:
         sys.exit("Usage: relay.py audition")
     running = ask_rook("get")
-    if not running or not running.get("ok"):
+    if running is None:
         sys.exit("Rook is not running, so it cannot play the voices.")
+    if not running.get("ok"):
+        sys.exit(running.get("error") or "Could not read the running Rook's voice settings.")
     values = {key: (entry or {}).get("value") for key, entry in running["settings"].items()}
     engine = values.get("voice_engine")
     health = medium_voice("/health") if engine == "medium" else None

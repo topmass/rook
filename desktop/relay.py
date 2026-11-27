@@ -266,7 +266,7 @@ def active_build_threads():
     return build_threads() or dict(BUILD_THREADS)
 SCRIPT = Path(__file__).resolve()
 ROOT = SCRIPT.parent.parent
-INBOX = desk.runtime_dir() / "rook.sock"
+INBOX = desk.rook_socket()
 # Memory-backed, so the note never reaches the disk. Rook ignores a note older than ten minutes.
 RESTART_NOTE = INBOX.with_name("rook-restart-note")
 # The first line of a request on Rook's socket, such as a settings change, a watch, or a typed request.
@@ -306,9 +306,15 @@ def ask_rook(command, body="", wait=300):
     try:
         sock.settimeout(10)
         sock.connect(str(INBOX))
-    except OSError:
+    except (FileNotFoundError, ConnectionRefusedError):
         sock.close()
-        return None  # Only a connection that fails means Rook is not running.
+        return None  # No socket or no listener. Callers may queue work for the next start.
+    except PermissionError:
+        sock.close()
+        return {"ok": False, "error": f"Access to Rook's relay socket at {INBOX} was blocked by permissions."}
+    except OSError as error:
+        sock.close()
+        return {"ok": False, "error": f"Could not connect to Rook's relay socket at {INBOX}: {error}"}
     try:
         with sock:
             sock.sendall(data)
@@ -396,8 +402,10 @@ def settings_command(argv):
                         if key not in valid_get and not key.startswith("build_threads.")), None):
             leave(f"{bad} is not a setting Rook can change. Settings: {', '.join((*DISPLAY_SETTINGS, *CONFIG_SETTINGS))}.")
         running = ask_rook("get")
+        if running is not None and not running.get("ok"):
+            leave(running.get("error") or "Could not read the running Rook's settings.")
         saved_file = read_settings()[0]
-        if running and running.get("ok"):
+        if running is not None:
             values = dict(running["settings"])
         else:
             values = {key: {"value": saved_file[key], "source": "settings file"} if key in saved_file else
@@ -641,7 +649,9 @@ def settings_command(argv):
                  "--recogniser yes to download and check it first." if missing else ""))
         return
     running = ask_rook("get")
-    in_force = ({k: v["value"] for k, v in running["settings"].items()} if running and running.get("ok")
+    if running is not None and not running.get("ok"):
+        leave(running.get("error") or "Could not read the running Rook's settings.")
+    in_force = ({k: v["value"] for k, v in running["settings"].items()} if running is not None
                 else {"voice_engine": VOICE_ENGINES[0], "voice_medium": MEDIUM_VOICES[0], **saved,
                       "listen_after": listen_after_in_force(saved)[0],
                       "smart_turn": smart_turn_in_force(saved)[0],
@@ -1715,8 +1725,7 @@ def no_machine_error(name):
 
 
 def ask_watch(thread, machine, title):
-    """Ask the running Rook to watch a thread. Return its answer, or None when Rook is not running, or is too old to
-    take it: the list file then holds the watch for Rook's next start."""
+    """Ask the running Rook to watch a thread. If no service is listening, save the watch for the next start."""
     answer = ask_rook("watch", json.dumps({"thread": thread, "machine": machine, "title": title}))
     if answer is None:
         entries = watch.load()
@@ -1728,7 +1737,9 @@ def ask_watch(thread, machine, title):
 def watch_command(argv):
     if argv[0] == "watching":
         answer = ask_rook("watching")
-        listing = answer["watching"] if answer and answer.get("ok") else [
+        if answer is not None and not answer.get("ok"):
+            leave(answer.get("error") or "Could not read the running Rook's watches.")
+        listing = answer["watching"] if answer is not None else [
             {key: entry.get(key) for key in ("thread", "machine", "title", "quiet_since")}
             for entry in watch.load().values()]
         print("\n".join(f"{e['machine']} | {e.get('title') or '?'} | {e['thread']}"
@@ -3145,8 +3156,31 @@ err("unknown", "the fake herdr does not know " + " ".join(args))
 def check_herdr():
     """Self-check relay.py herdr and pi, and the watcher's Herdr kind, against a fake herdr and a Pi fixture."""
     import asyncio
+    import errno
     import tempfile
+    from unittest.mock import patch
     import herdr
+    with patch("socket.socket") as factory, patch.object(watch, "save") as save_watch:
+        connect = factory.return_value.connect
+        connect.side_effect = PermissionError(errno.EPERM, "Operation not permitted")
+        answer = herdr_watch(None, "denied-agent")
+        assert "blocked by permissions" in answer and str(INBOX) in answer, answer
+        save_watch.assert_not_called()
+        for error, message in (
+            (PermissionError(errno.EPERM, "Operation not permitted"), "blocked by permissions"),
+            (OSError(errno.ENOTSOCK, "Socket operation on non-socket"), "Could not connect"),
+            (FileNotFoundError(), "Rook is not running"),
+        ):
+            connect.side_effect = error
+            try:
+                _onboard().audition_command([])
+            except SystemExit as exc:
+                assert message in str(exc), exc
+            else:
+                raise AssertionError("Audition must stop when it cannot read the running voice settings.")
+        for error in (FileNotFoundError(), ConnectionRefusedError()):
+            connect.side_effect = error
+            assert ask_rook("watching") is None
     with tempfile.TemporaryDirectory() as folder:
         base = Path(folder)
         here = watch.local_machine()  # The watcher names this machine by the host name, as on any computer.

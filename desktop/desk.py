@@ -1216,6 +1216,10 @@ def runtime_dir():
     return PLATFORM.runtime_dir()
 
 
+def rook_socket():
+    return runtime_dir() / "rook.sock"
+
+
 def config_dir():
     return PLATFORM.config_dir()
 

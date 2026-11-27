@@ -8,6 +8,10 @@ Opening `Rook.app` by hand, or through System Settings' "Quit & Reopen", restart
 
 `RookHelper --check-access` prints each grant without a prompt. `RookHelper --request-access microphone|input|screen|accessibility` shows Apple's prompt. Run them through `relay.py mac-access`, so the answer is Rook.app's.
 
+## Herdr with the Claude sandbox
+
+Rook's Claude session allows its own local relay socket. To connect Rook to an existing Herdr instance, export `HERDR_SOCKET_PATH` with the absolute path of the running socket before generating the LaunchAgent with `launchd/install.sh`. Set `HERDR_CONFIG_PATH` to your Herdr config file to use its saved machines. Export `ROOK_ALLOW_HERDR_SOCKET=1` to let Rook's Claude session use the configured Herdr socket. This grants access to Herdr's control API, including writes. Reload the launch job after updating its plist.
+
 ## Helper build and dev signing
 
 Run `macos/RookHelper/build.sh` to compile and sign `~/Applications/Rook.app`. On first run, it creates a dedicated keychain at `~/Library/Keychains/rook-dev.keychain-db` (password stored with mode `0600` at `~/.config/rook/dev-keychain.pass`) and a self-signed `"Rook Dev"` code-signing certificate, without touching `login.keychain-db` or trust settings. Because the designated requirement binds to `com.rook.helper` and the certificate rather than a binary code hash, macOS keeps each grant across rebuilds.
