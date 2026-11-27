@@ -142,9 +142,6 @@ relay.py timer set DURATION|--at TIME [LABEL] [--task TEXT]
                             When it is due, Rook says so aloud by itself. With --task, Rook instead gets
                             TEXT as a turn when it is due, and carries it out as ⟦owner⟧'s request.
 relay.py timer list         List the timers Rook keeps.
-relay.py actions [list|all|cancel KEY]
-                            List the silent outbox's open actions, or its latest 25 with all, from the running
-                            Rook. cancel stops one: at once before it begins, or by interrupting it.
 relay.py daily-restart      Restart the running Rook once Rook is idle and the nightly dream is done. It tries
                             again every five minutes and gives up after two hours. rook-daily.service runs it.
                             In own-memory mode, it runs relay.py dream first instead of waiting for agent-dream.
@@ -475,7 +472,6 @@ def settings_command(argv):
         # The thread watcher reads this one from the file at each look, so the file is what is in force.
         values["thread_milestones"] = dict(zip(("value", "source"), settings.thread_milestones_in_force(saved_file)))
         values["debug_replay"] = dict(zip(("value", "source"), settings.debug_replay_in_force(saved_file)))
-        values["action_agent"] = dict(zip(("value", "source"), settings.action_agent_in_force(saved_file)))
         # The daily check reads the file at each look. A developer checkout never checks.
         check, source = update_check.mode(saved_file)
         why = update_check.developer()
@@ -634,20 +630,6 @@ def settings_command(argv):
             leave(f"debug_replay must be {' or '.join(settings.DEBUG_REPLAY_MODES)}. {value} is not one of them.")
         save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
         utter(f"Saved debug_replay = {value}. Shift and a right-click on the resting loop use it from now on.")
-        return
-    if key == "action_agent":  # Rook reads it at its start, so nothing is applied now.
-        value = value.strip().lower()
-        old = settings.action_agent_in_force(saved)[0]
-        if value == "previous":
-            if key not in previous:
-                leave(f"There is no previous {key} to go back to.")
-            value = previous[key]
-        if value not in settings.ACTION_AGENT_MODES:
-            leave(f"action_agent must be {' or '.join(settings.ACTION_AGENT_MODES)}. {value} is not one of them.")
-        save_checked({**saved, key: value}, {**previous, key: old}, updated={key})
-        utter(f"Saved action_agent = {value}. It takes effect at Rook's next start, not now. Rook never restarts "
-              f"itself. {OWNER_START} or the build thread restarts it with relay.py restart, or the daily restart at "
-              "04:30 does.")
         return
     if key == "update_check":  # The daily check reads the file at each look, so nothing is applied now.
         value = value.strip().lower()
@@ -1175,17 +1157,6 @@ def check_settings():
         assert st_prev.returncode == 0 and "Saved smart_turn = off." in st_prev.stdout, (st_prev.stdout, st_prev.stderr)
         saved = json.loads(settings_path.read_text())
         assert saved["smart_turn"] == "off" and saved["previous"]["smart_turn"] == "on", saved
-
-        # action_agent: default off, set on, refusal, and previous.
-        assert "action_agent: off (default)" in run_cli("get", "action_agent").stdout
-        aa_on = run_cli("set", "action_agent", "On")
-        assert aa_on.returncode == 0 and "Saved action_agent = on." in aa_on.stdout, (aa_on.stdout, aa_on.stderr)
-        assert json.loads(settings_path.read_text())["action_agent"] == "on"
-        assert "action_agent: on (settings file)" in run_cli("get", "action_agent").stdout
-        aa_bad = run_cli("set", "action_agent", "maybe")
-        assert aa_bad.returncode != 0 and "off or on" in aa_bad.stderr, (aa_bad.stdout, aa_bad.stderr)
-        aa_prev = run_cli("set", "action_agent", "previous")
-        assert aa_prev.returncode == 0 and "Saved action_agent = off." in aa_prev.stdout, (aa_prev.stdout, aa_prev.stderr)
 
         # speak_thoughts: default off, set all valid modes, refusal, and previous.
         assert "speak_thoughts: off (default)" in run_cli("get", "speak_thoughts").stdout
@@ -2822,28 +2793,6 @@ def timer_command(argv):
         print(f"Cancelled timer {timer['id']}" + (f" ({timer['label']})." if timer.get("label") else "."))
 
 
-def actions_command(argv):
-    """relay.py actions [list|all|cancel KEY]: the silent outbox's ledger, read through the running Rook."""
-    command, args = (argv[0] if argv else "list"), argv[1:]
-    if command in ("list", "all") and not args:
-        answer = ask_rook(f"actions {command}", wait=30)
-    elif command == "cancel" and len(args) == 1:
-        answer = ask_rook("actions cancel", args[0], wait=30)
-    else:
-        sys.exit("Usage: relay.py actions [list|all|cancel KEY]")
-    if answer is None:
-        sys.exit(f"Rook is not running, so its outbox cannot be read: nothing answers at {INBOX}.")
-    if not answer.get("ok"):
-        sys.exit(answer.get("error") or "Rook could not do that.")
-    rows = answer.get("actions") or []
-    if command == "cancel":
-        print(f"{rows[0]['key']} is {rows[0]['state']}.")
-        return
-    print("\n".join(f"{row['key']} {row['state']} at {time_of_day(row['updated'])}, by {row['actor']}: "
-                    f"{row['description']}" + (f" Result: {row['result']}" if row.get("result") else "")
-                    for row in rows) or ("No action is open." if command == "list" else "No action yet."))
-
-
 def dark_command(argv):
     command, args = (argv[0] if argv else ""), argv[1:]
     if command == "on":
@@ -4402,29 +4351,6 @@ def check():
             # the new Rook has not opened yet. tell and timer reach the record through Rook's socket, and the
             # mailbox commands through the mailbox's own checked open.
             assert "sqlite3." + "connect" not in Path(__file__).read_text()
-            # relay.py actions reads the outbox's ledger through Rook's socket, and prints one line per action.
-            import contextlib
-            import io
-            asked, real_ask = [], ask_rook
-            row = {"key": "act-1", "state": "confirmed", "updated": time.time(), "actor": "rook-agent",
-                   "description": "Turn off the desk lamp", "result": "The lamp is off."}
-            globals()["ask_rook"] = lambda command, body="", wait=300: (
-                asked.append((command, body)) or {"ok": True, "actions": [row] if command != "actions list" else []})
-            try:
-                for argv in (["all"], [], ["cancel", "act-1"]):
-                    with contextlib.redirect_stdout(io.StringIO()) as out:
-                        actions_command(argv)
-                    asked.append(out.getvalue().strip())
-                try:
-                    actions_command(["cancel"])
-                    raise AssertionError("actions cancel ran with no key")
-                except SystemExit as refused:
-                    assert "Usage: relay.py actions" in str(refused.code), refused.code
-            finally:
-                globals()["ask_rook"] = real_ask
-            assert asked == [("actions all", ""), f"act-1 confirmed at {time_of_day(row['updated'])}, by rook-agent: "
-                             "Turn off the desk lamp Result: The lamp is off.", ("actions list", ""),
-                             "No action is open.", ("actions cancel", "act-1"), "act-1 is confirmed."], asked
             # Old handoff --print without --work writes no work entry and prints only the framed brief.
             plain_state = Path(folder) / "plain"
             plain_res = run_cli(plain_state, ["handoff", "--print", "-"], numbered_brief, cfg_dir=test_cfg)
@@ -6208,8 +6134,6 @@ def main():
         return dark_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "timer":
         return timer_command(sys.argv[2:])
-    if len(sys.argv) >= 2 and sys.argv[1] == "actions":
-        return actions_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "project":
         return project_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] in ("set", "get", "voices", "fonts", "dusts", "themes"):

@@ -95,10 +95,6 @@ THREAD_MILESTONES = "off"
 # turned on only by the owner, and named in no shipped skill.
 DEBUG_REPLAY_MODES = ("off", "on")
 DEBUG_REPLAY = "off"
-# The silent outbox (desktop/actions.py): a second agent session that carries out Rook's {do: ...} orders in the
-# background. Off by default, so an install is unchanged until its owner turns it on. It applies at the next start.
-ACTION_AGENT_MODES = ("off", "on")
-ACTION_AGENT = "off"
 # Opt-in live thought and between-tool narration: off by default.
 # beats: prompt allows brief plain-English beats between later tool calls.
 # thoughts: narrates cleaned English agent_thought_chunk updates in real time.
@@ -121,7 +117,7 @@ MACHINES_CONFIG = CONFIG.with_name("machines.json")
 DEFAULT_THEME_PACK = "devs"
 THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
 SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "diagram_entrance", "diagram_dance",
-            "stage", "listen_after", "smart_turn", "thread_milestones", "debug_replay", "update_check", "action_agent", "speak_thoughts",
+            "stage", "listen_after", "smart_turn", "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
             "recogniser_model")
@@ -178,8 +174,6 @@ def valid(data):
         elif key == "debug_replay" and isinstance(value, str) and value.strip().lower() in DEBUG_REPLAY_MODES:
             found[key] = value.strip().lower()
         elif key == "update_check" and isinstance(value, str) and value.strip().lower() in ("on", "off"):
-            found[key] = value.strip().lower()
-        elif key == "action_agent" and isinstance(value, str) and value.strip().lower() in ACTION_AGENT_MODES:
             found[key] = value.strip().lower()
         elif key == "speak_thoughts" and isinstance(value, str) and value.strip().lower() in SPEAK_THOUGHTS_MODES:
             found[key] = value.strip().lower()
@@ -600,13 +594,6 @@ def debug_replay_in_force(saved):
     if saved.get("debug_replay") in DEBUG_REPLAY_MODES:
         return saved["debug_replay"], "settings file"
     return DEBUG_REPLAY, "default"
-
-
-def action_agent_in_force(saved):
-    """Return (action_agent mode, source): the saved mode while valid, else the default (off)."""
-    if saved.get("action_agent") in ACTION_AGENT_MODES:
-        return saved["action_agent"], "settings file"
-    return ACTION_AGENT, "default"
 
 
 def thread_milestones_in_force(saved):

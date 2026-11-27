@@ -152,7 +152,7 @@ RELAY_SKILLS = ("get", "voices", "fonts", "dusts", "set ", "show ", "dark ", "me
                 "watch ", "work ", "inbox", "threads", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ",
                 "herdr agents", "herdr read ", "pi ", "update --install")
 RELAY_CARD = ()
-RELAY_PROMPT = ("timer ", "remember ", "actions")
+RELAY_PROMPT = ("timer ", "remember ")
 # Phone pairing passes with no card, though no shipped skill offers it: the owner's own workspace skill does.
 RELAY_OWNER = ("device pair", "device list")
 # relay.py's guarded sends to Herdr agents pass with no card here, like a thread send (SENDS below). They stay out
@@ -407,8 +407,8 @@ def failure(folder, session):
     return "Antigravity stopped this turn because of an error."
 
 
-def clear(home):
-    shutil.rmtree(home / APP, ignore_errors=True)
+def clear():
+    shutil.rmtree(antigravity_home.HOME / APP, ignore_errors=True)
 
 
 def signed_in(url):
@@ -481,7 +481,6 @@ class Antigravity(Harness):
     def __init__(self, model=None, effort=None):
         super().__init__(model, effort)
         self.process, self.heard = None, 0
-        self.home = antigravity_home.HOME
 
     def ready(self):
         """None when agy is installed, else why not, in one sentence, which also goes to the journal. Rook starts no
@@ -507,10 +506,9 @@ class Antigravity(Harness):
         self.names, self.t3 = list(servers), "t3" in servers
         url = servers.get("t3", {}).get("url")
         self.t3_url = url if url and signed_in(url) else None
-        home = self.home = antigravity_home.build(
-            wow="wow" in self.servers, home=antigravity_home.home(self.runtime_tag) if self.runtime_tag else None)
+        home = antigravity_home.build(wow="wow" in self.servers)
         eager = {spec["name"]: spec["eager_tools"] for spec in plugin_loader.servers()}  # Active plugins' tool servers.
-        clear(home)
+        clear()
         # Rook's servers go in the private mcp_config.json, the one place where agy takes which tools it declares
         # up front (eager) and which it allows: in session/new, agy decides that itself.
         entries = {name: {"command": server["command"], "args": server.get("args", []),
@@ -535,9 +533,7 @@ class Antigravity(Harness):
             if own:
                 (home / APP).mkdir(parents=True, exist_ok=True)
                 (home / APP / "settings.json").write_text(json.dumps(own))
-        # The tag reaches the guard hook, which agy starts, so the hook reads this session's own folder.
-        tag = [f"{antigravity_home.TAG_VARIABLE}={self.runtime_tag}"] if self.runtime_tag else []
-        return [*ENV, *tag, "agy", "acp", "--gemini-dir", str(home), "--app-data-dir", APP,
+        return [*ENV, "agy", "acp", "--gemini-dir", str(home), "--app-data-dir", APP,
                 *(["--dangerously-skip-permissions"] if self.permission_mode == "full" else [])]
 
     def setup(self, start, later, wow):
@@ -684,7 +680,7 @@ class Antigravity(Harness):
             self.held, self.woke, self.held_reported = None, False, False
         uuids = self.folded + [self.calls[rpc][1] for rpc in self.open]
         if problem is UNSET:
-            problem = failure(self.home, self.session)  # A quota or API error should sound like one.
+            problem = failure(antigravity_home.HOME, self.session)  # A quota or API error should sound like one.
         wedged = bool(self.abandoned)  # An earlier stalled turn never got its answer: agy has stopped for good.
         print(f"antigravity: no word from agy for {self.quiet()} s with a turn open; the turn ends"
               + ("; agy is wedged, so it ends too" if wedged else ""), file=sys.stderr)
@@ -772,7 +768,7 @@ class Antigravity(Harness):
                 if not (await asyncio.wait({waiting}, timeout=limit))[0]:
                     if watching and time.monotonic() - self.heard >= self.quiet():
                         problem = (None if self.held and not self.tools or self.spoke_at and not self.held
-                                   else await asyncio.to_thread(failure, self.home, self.session))
+                                   else await asyncio.to_thread(failure, antigravity_home.HOME, self.session))
                         if self.open and not self.asks and not self.release_now and time.monotonic() - self.heard >= self.quiet():
                             for converted in (self.answered_open() if self.spoke_at and not self.held
                                               else self.stalled(problem=problem)):
@@ -803,7 +799,7 @@ class Antigravity(Harness):
             if self.process is process and not self.setup_done:
                 print(f"antigravity: setup ended unanswered {self.progress()}", file=sys.stderr)
             if self.process is process:  # Not the files of a newer launch.
-                clear(self.home)
+                clear()
 
     def trace(self, message):
         """Note the first time each setup stage happened."""
@@ -859,8 +855,7 @@ class Antigravity(Harness):
 
     def system_append(self):
         """Build the system prompt append, including project memory lines."""
-        return ((self.prompt if self.plain_prompt
-                 else antigravity_home.prompt(self.prompt, self.cwd, beats=self.narrate_beats))
+        return (antigravity_home.prompt(self.prompt, self.cwd, beats=self.narrate_beats)
                 + settings.render((T3_LOST if self.t3_url else "") + (render_guide() if "render" in self.servers else "")))
 
     def needs_recorded(self, update):
@@ -887,13 +882,13 @@ class Antigravity(Harness):
             update = (message.get("params") or {}).get("update") or {}
             if self.needs_recorded(update):
                 return {"recorded": await asyncio.to_thread(
-                    recorded_output, self.home, self.session, update["toolCallId"])}
+                    recorded_output, antigravity_home.HOME, self.session, update["toolCallId"])}
         elif not method and rpc in self.calls:
             kind = self.calls[rpc][0]
             if kind == "initialize" and not message.get("error"):
                 return {"append": await asyncio.to_thread(self.system_append)}
             if self.needs_failure(kind, rpc, message):
-                return {"problem": await asyncio.to_thread(failure, self.home, self.session)}
+                return {"problem": await asyncio.to_thread(failure, antigravity_home.HOME, self.session)}
         return {}
 
     def handle(self, message, prepared=None):
@@ -970,7 +965,7 @@ class Antigravity(Harness):
             problem = (f"Antigravity refused the request: {error.get('message')}" if error else
                        "You have reached your Antigravity quota for now." if stop == "refusal" else
                        (prepared["problem"] if "problem" in prepared
-                        else failure(self.home, self.session))
+                        else failure(antigravity_home.HOME, self.session))
                        if stop == "end_turn" else None)
             answer, self.answer, declined, self.declined = self.answer, "", self.declined, None
             self.turn_line(self.turn_began, self.first_words, (message.get("result") or {}).get("usage") or {})
@@ -1021,7 +1016,7 @@ class Antigravity(Harness):
             if (not output and update["status"] == "completed"
                     and self.tool_names.get(update["toolCallId"]) in RECORDED_TOOLS):
                 output = (prepared["recorded"] if "recorded" in prepared
-                          else recorded_output(self.home, self.session, update["toolCallId"]))
+                          else recorded_output(antigravity_home.HOME, self.session, update["toolCallId"]))
             yield {"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": update["toolCallId"], "content": output,
                  "is_error": update["status"] == "failed"}]}}
@@ -1071,8 +1066,7 @@ def check():
     saved_strict, machine.Machine.strict = machine.Machine.strict, True
     mode, PERMISSIONS = PERMISSIONS, "strict"  # The card tests below need the strict policy; full is checked last.
     home = antigravity_home.HOME = Path(tempfile.mkdtemp(prefix="rook-antigravity-check-"))  # Never a live Rook's.
-    antigravity_home.build = lambda wow=False, home=None, scratch=home: home or scratch
-    antigravity_home.prompt = lambda text, workspace, beats=False: text
+    antigravity_home.build, antigravity_home.prompt = lambda wow=False: home, lambda text, workspace, beats=False: text
     sent = []
     process = SimpleNamespace(pid=None, stdin=SimpleNamespace(write=lambda line: sent.append(json.loads(line))))
     # A failed handshake, such as a missing sign-in, ends agy, so the stream ends and Rook falls back.

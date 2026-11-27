@@ -31,15 +31,7 @@ if _HERE not in sys.path:
 import desk  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-TAG_VARIABLE = "ROOK_AGY_RUNTIME_TAG"  # A second session's tag, such as Hands' -hands, which agy passes to the hook.
-
-
-def home(tag=""):
-    """Rook's private agy folder for a session's runtime tag. Only a short tag such as -hands counts."""
-    return desk.runtime_dir() / ("rook-antigravity" + (tag if re.fullmatch(r"-[a-z]{1,16}", tag or "") else ""))
-
-
-HOME = home(os.environ.get(TAG_VARIABLE, ""))  # In the hook, the folder of the session that started it.
+HOME = desk.runtime_dir() / "rook-antigravity"
 AGENTS = Path.home() / ".agents"
 ROOK_SKILLS = desk.config_dir() / "rook/skills"
 GEMINI_SKILLS = Path.home() / ".gemini/config/skills"
@@ -476,8 +468,7 @@ ROOK_CODE = _rook_code_roots()
 # command guard DCG, SSH and GPG keys, the agents' settings and global instructions and skills (a thread changes those
 # through agents-sync), and user services and their environment. Those are the owner's to do, or a thread's.
 PROTECTED_ROOTS = tuple(dict.fromkeys(Path(os.path.realpath(path)) for path in (
-    home(), home("-hands"), DCG, shutil.which("dcg") or DCG, Path.home() / ".config/dcg", Path.home() / ".ssh",
-    Path.home() / ".gnupg",
+    HOME, DCG, shutil.which("dcg") or DCG, Path.home() / ".config/dcg", Path.home() / ".ssh", Path.home() / ".gnupg",
     Path.home() / ".claude", Path.home() / ".codex", Path.home() / ".gemini", Path.home() / ".agents",
     Path.home() / ".config/systemd", Path.home() / ".config/environment.d")))
 # agy 1.5 names them write_file and edit_file; the others are older agy's names, kept for an older install.
@@ -646,10 +637,9 @@ def skills_entries(rook_dir=None, shared_dirs=None, plugin_dirs=None, host_skill
     return entries
 
 
-def build(wow=False, home=None):
-    """Build home/config and return home, the folder for agy's --gemini-dir. home is HOME when None."""
-    home = HOME if home is None else Path(home)
-    config = home / "config"
+def build(wow=False):
+    """Build HOME/config and return HOME, the folder for agy's --gemini-dir."""
+    config = HOME / "config"
     plugin = config / "plugins/rook"
     if plugin.exists():
         shutil.rmtree(plugin)  # The render from Rook's last start.
@@ -682,10 +672,10 @@ def build(wow=False, home=None):
     if dcg_path() is None and dcg_configured():
         warn_once("dcg", f"antigravity: {DCG} is not installed, skipping DCG command guard.")
         try:
-            (home / ".dcg-warned").touch()
+            (HOME / ".dcg-warned").touch()
         except OSError:
             pass
-    return home
+    return HOME
 
 
 def memory(workspace):
@@ -1002,18 +992,14 @@ def check():
             scratch_rt = Path(scratch) / "runtime"
             (scratch_rt / "rook-antigravity").mkdir(parents=True)
             hook_env = {**os.environ, "XDG_RUNTIME_DIR": str(scratch_rt)}
-            hook_env.pop(TAG_VARIABLE, None)
-            # Hands' agy passes its tag on, and the hook then reads Hands' own folder: the same decisions.
-            for tag, payload, expected in ((tag, payload, expected) for tag in ("", "-hands") for payload, expected in (
+            for payload, expected in (
                 ({"toolCall": {"name": "view_file", "args": {"Path": "/tmp/x"}}}, "allow"),
-                ({"toolCall": {"name": "ls", "args": {}}}, "deny"),
                 ({"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}},
                   "workspacePaths": [scratch]}, "allow"),
                 ({"toolCall": {"name": "run_command", "args": {"CommandLine": "t3 project remove demo"}},
                   "workspacePaths": [scratch]}, "deny"),
-            )):
-                done = subprocess.run(hook_cmd, cwd=scratch, env={**hook_env, **({TAG_VARIABLE: tag} if tag else {})},
-                                      capture_output=True, text=True,
+            ):
+                done = subprocess.run(hook_cmd, cwd=scratch, env=hook_env, capture_output=True, text=True,
                                       input=json.dumps(payload))
                 assert done.returncode == 0, (hook_cmd, done.returncode, done.stderr)
                 answer = json.loads(done.stdout)

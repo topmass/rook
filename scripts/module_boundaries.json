@@ -13,7 +13,6 @@
       "desktop/settings.py",
       "desktop/plugin_loader.py",
       "desktop/journal.py",
-      "desktop/actions.py",
       "desktop/mailbox.py",
       "desktop/work.py",
       "desktop/machine.py",

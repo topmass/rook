@@ -118,7 +118,6 @@ run work "$SYS_PY" desktop/work.py
 run watch "$SYS_PY" desktop/watch.py
 run mailbox "$SYS_PY" desktop/mailbox.py
 run journal "$SYS_PY" desktop/journal.py
-run actions "$SYS_PY" desktop/actions.py --check
 run agent-inbox "$SYS_PY" desktop/agent_inbox.py --check
 run render "$SYS_PY" desktop/render.py --check
 run server "$PY" desktop/server.py --check
