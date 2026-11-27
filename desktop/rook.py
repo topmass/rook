@@ -1263,6 +1263,7 @@ def recent_exchanges(limit=25, full=6):
                         exchanges[turn].update(answer=row.get("text") or "", spoken=row["spoken"])
     answered = [exchange for exchange in exchanges.values() if "answer" in exchange]
     owner_turns = [at for at, exchange in enumerate(answered) if exchange["who"] in (SPEAKERS["spoken"], SPEAKERS["typed"])]
+    owner_set = set(owner_turns)
     first, recent = (owner_turns[-limit] if len(owner_turns) >= limit else 0), (owner_turns[-full] if len(owner_turns) >= full else 0)
     replay = []
     for at, exchange in enumerate(answered[first:], first):
@@ -1272,11 +1273,13 @@ def recent_exchanges(limit=25, full=6):
         except ValueError:
             when = "unknown time"
         text, answer = exchange["text"], exchange["answer"]
-        if at not in owner_turns:  # News, reports and restarts: one line, and what the owner heard.
-            text, answer = text.strip().split("\n", 1)[0][:200], exchange["spoken"]
+        if at not in owner_set:  # News, reports and restarts: one line, and what the owner heard.
+            text = text.strip().split("\n", 1)[0][:200]
+            answer = exchange["spoken"]
+            answer = answer if len(answer) <= 1200 else answer[:1200] + " (cut)"
         elif at < recent:
-            text, answer = text if len(text) <= 300 else text[:300] + " (cut)", exchange["spoken"]
-        if at not in owner_turns or at < recent:
+            text = text if len(text) <= 300 else text[:300] + " (cut)"
+            answer = exchange["spoken"]
             answer = answer if len(answer) <= 1200 else answer[:1200] + " (cut)"
         replay.append(f"[{when}] {exchange['who']}: {text}\nYou answered: {answer}")
     return replay

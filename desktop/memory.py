@@ -304,7 +304,7 @@ def new_turns_since(since_ts):
                     turns = row.get("turns") or ([row["turn"]] if row.get("turn") is not None else [])
                     if not any((session, turn_id) in user_turns for turn_id in turns):
                         continue
-                    text = str(row.get("text") or row.get("spoken") or "").strip()
+                    text = str(row.get("text") or "").strip() or str(row.get("spoken") or "").strip()
                     if text and text != "PASS":
                         found.append(f"[{at}] Rook: {_cut_block(text)}")
                         max_ts = max(max_ts, ts)
@@ -549,16 +549,39 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
         watchdog.start()
 
         deadline = time.monotonic() + timeout
+        in_fd = proc.stdin.fileno()
         out_fd = proc.stdout.fileno()
+        os.set_blocking(in_fd, False)
         buf = bytearray()
+        out_eof = False
         rpc_seq = 0
         all_text = []
         after_tool_text = []
 
         def send_rpc(message):
+            nonlocal out_eof
             payload = (json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode()
-            proc.stdin.write(payload)
-            proc.stdin.flush()
+            view = memoryview(payload)
+            sent = 0
+            while sent < len(view):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"timed out after {timeout}s")
+                rlist = [] if out_eof else [out_fd]
+                readable, writable, _ = select.select(rlist, [in_fd], [], remaining)
+                if not readable and not writable:
+                    raise TimeoutError(f"timed out after {timeout}s")
+                if readable:
+                    chunk = os.read(out_fd, 65536)
+                    if chunk:
+                        buf.extend(chunk)
+                    else:
+                        out_eof = True
+                if writable:
+                    try:
+                        sent += os.write(in_fd, view[sent:])
+                    except BlockingIOError:
+                        pass
 
         def call_rpc(method, params):
             nonlocal rpc_seq
@@ -567,12 +590,19 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
             return rpc_seq
 
         def read_line():
+            nonlocal out_eof
             while True:
                 nl = buf.find(b"\n")
                 if nl != -1:
                     line = bytes(buf[:nl])
                     del buf[:nl + 1]
                     return line.decode(errors="replace")
+                if out_eof:
+                    if buf:
+                        line = bytes(buf)
+                        buf.clear()
+                        return line.decode(errors="replace")
+                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"timed out after {timeout}s")
@@ -581,6 +611,7 @@ def _run_antigravity_dream(agy_exe, saved, mem_dir, prompt_text, timeout=DREAM_T
                     raise TimeoutError(f"timed out after {timeout}s")
                 chunk = os.read(out_fd, 65536)
                 if not chunk:
+                    out_eof = True
                     if buf:
                         line = bytes(buf)
                         buf.clear()
