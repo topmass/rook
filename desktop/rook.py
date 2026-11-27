@@ -4527,6 +4527,10 @@ class Companion:
 
     async def read_voice(self, voice):
         async for message in messages(voice.stdout):
+            if message.get("type") == "warm":  # A silent medium voice warm-up ended.
+                self.log("medium_warm", request=message.get("request"), seconds=message.get("seconds"),
+                         error=message.get("error"))
+                continue
             if message.get("id") in self.probes:
                 self.probes.pop(message["id"])[1].set_result(message)
                 continue
@@ -6129,6 +6133,8 @@ class Companion:
         self.recording_released = released
         self.hush_hold = True  # A video Rook paused stays paused while the owner talks, and through the reply.
         self.stop_voice()
+        if self.voice and self.voice.returncode is None:  # An idle medium voice server wakes while the owner talks.
+            send(self.voice, {"type": "warm"})
         self.capture_finished.clear()
         gen = self.recording_gen = self.recording_gen + 1
         self.level, self.level_peak = 0, None
@@ -18428,7 +18434,7 @@ def check_desktop():
             turn_lock=asyncio.Lock(), pending_lock=asyncio.Lock(),
             recording=False, recording_task=None, recording_started=asyncio.Event(),
             capture=None, capture_finished=asyncio.Event(), level=0.0,
-            talking=lambda: False, voice_id=None, voice_texts={},
+            talking=lambda: False, voice=None, voice_id=None, voice_texts={},
             voice_settings={"voice_volume": 0.5}, last_key=0.0, last_request=0.0,
             last_matt_wall=0.0, matt_turn_seq=0, restart_grant=None,
             restart_wait=None, restart_cancelled=set(), cut_at=0.0,
@@ -18586,12 +18592,23 @@ def check_desktop():
                 start_recording=lambda: "cap",
                 stop_recording=lambda cap: SimpleNamespace(text="Pull check.", loaded_now=False),
             )
+            to_voice = []
+            c_rec.voice = SimpleNamespace(returncode=None, stdin=SimpleNamespace(write=to_voice.append))
             rel = asyncio.Event()
             rec_task = asyncio.create_task(c_rec.record(rel))
             await asyncio.sleep(0.05)
             rel.set()
             await rec_task
             assert sent_rec and sent_rec[0][0].startswith("Mode: World of Warcraft."), sent_rec
+            # The mic open asks speech.py for one warm-up, and the warm-up's row reaches the turn log.
+            assert [json.loads(line) for line in to_voice] == [{"type": "warm"}], to_voice
+            warm_rows, warm_out = [], asyncio.StreamReader()
+            c_rec.probes, c_rec.renders = {}, {}
+            c_rec.log = lambda event, **fields: warm_rows.append((event, fields))
+            warm_out.feed_data(b'{"type": "warm", "request": "ab12cd34", "seconds": 1.84, "error": null}\n')
+            warm_out.feed_eof()
+            await c_rec.read_voice(SimpleNamespace(stdout=warm_out))
+            assert warm_rows == [("medium_warm", {"request": "ab12cd34", "seconds": 1.84, "error": None})], warm_rows
 
             # An empty press stays silent, except when the recording is pure digital silence: then the microphone line,
             # at most once in ten minutes.

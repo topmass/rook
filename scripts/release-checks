@@ -122,6 +122,7 @@ run agent-inbox "$SYS_PY" desktop/agent_inbox.py --check
 run render "$SYS_PY" desktop/render.py --check
 run server "$PY" desktop/server.py --check
 run speech-words "$PY" desktop/speech.py --check-words
+run speech-warm "$PY" desktop/speech.py --check-warm
 run turn-end "$PY" desktop/turn_end.py --check
 run desk "$SYS_PY" desktop/desk.py
 run start-limit "$SYS_PY" desktop/start_limit.py --check

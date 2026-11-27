@@ -30,6 +30,11 @@ FIRST_AUDIO_SECONDS = 2.5
 STALL_SECONDS = 10
 # A cold load of the medium voice model takes 8 to 11 seconds. It runs in the background.
 LOAD_SECONDS = 60
+# A mic open after this many seconds with no medium request sends one silent warm-up: an idle server wakes slowly.
+WARM_IDLE_SECONDS = 60
+# A warm-up gives up after this many seconds. Its failure is silent.
+WARM_SECONDS = 10
+WARM_TEXT = "Ready."
 # The medium voice server takes at most this many characters per request.
 TEXT_LIMIT = 2000
 # Pitch-preserving tempo filter for the medium voice when speed is not 50 (1.0x).
@@ -416,7 +421,7 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
         audition = bool(voices.get("first_audio"))
         first_audio = float(voices.get("first_audio") or FIRST_AUDIO_SECONDS)
         started, got_audio, connected, sock, connection, status = False, False, False, None, None, None
-        proc, feeder, feed_error, local_error = None, None, None, False
+        proc, feeder, feed_error, local_error, request = None, None, None, False, None
         deadline = time.monotonic() + first_audio
         done, abort = threading.Event(), threading.Event()
 
@@ -458,7 +463,7 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
             return data
 
         def raw_audio():
-            nonlocal connection, sock, connected, status, got_audio
+            nonlocal connection, sock, connected, status, got_audio, request
             for piece in pieces(respell(text, "medium")):
                 if stop.is_set() or abort.is_set():
                     return
@@ -468,8 +473,11 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
                     payload = {"text": piece, "voice": voices.get("voice_medium") or voice, "language": "English"}
                     if (limits := temp_range) is not None:
                         payload["temperature"] = medium_temperature(temperature, limits)
+                    rid, sent = os.urandom(4).hex(), time.monotonic()
+                    request, generate.last_request = rid, sent
+                    print(f"Medium voice request {rid}: sent", file=sys.stderr, flush=True)
                     connection.request("POST", "/tts", json.dumps(payload),
-                                       {"Content-Type": "application/json"})
+                                       {"Content-Type": "application/json", "X-Request-Id": rid})
                     sock = connection.sock  # A reply that closes the connection drops connection.sock, not its reads.
                     if sock is not None:
                         connected = True
@@ -500,9 +508,14 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
                         if len(audio) % 2:  # A sample may straddle two reads.
                             audio, odd = audio[:-1], audio[-1:]
                         if audio:
+                            if sent is not None:
+                                print(f"Medium voice request {rid}: first audio after {time.monotonic() - sent:.2f} s",
+                                      file=sys.stderr, flush=True)
+                                sent = None
                             got_audio = True
                             yield audio
                 finally:
+                    generate.last_request = time.monotonic()
                     conn, connection, sock = connection, None, None
                     if conn:
                         conn.close()
@@ -644,10 +657,47 @@ def medium(url, voice, sample_rate, small, pace=0.0, temperature=0.5, ffmpeg=FFM
             return
         fallbacks += 1
         generate.problem = f"The small voice spoke this item, because the medium voice failed: {reason}"
-        print(f"Medium voice fallback {fallbacks}: {reason}", file=sys.stderr, flush=True)
+        print(f"Medium voice fallback {fallbacks} (request {request}): {reason}", file=sys.stderr, flush=True)
         yield from small(text, stop, voices)
 
-    generate.problem = None
+    def warm(report):
+        """Send one short /tts when no medium request went out for WARM_IDLE_SECONDS, so a server gone cold wakes
+        while the owner talks. The audio is dropped at its first byte. report gets one row; a failure is silent."""
+        idle = generate.last_request is None or time.monotonic() - generate.last_request >= WARM_IDLE_SECONDS
+        if not (loaded.is_set() and idle and warming.acquire(blocking=False)):
+            return
+        rid, sent = os.urandom(4).hex(), time.monotonic()
+        generate.last_request = sent
+
+        def run():
+            error = None
+            connection = connect(server.hostname, port, timeout=WARM_SECONDS)
+            try:
+                payload = {"text": WARM_TEXT, "voice": voice, "language": "English"}
+                if (limits := temp_range) is not None:
+                    payload["temperature"] = medium_temperature(temperature, limits)
+                print(f"Medium voice warm-up {rid}: sent", file=sys.stderr, flush=True)
+                connection.request("POST", "/tts", json.dumps(payload),
+                                   {"Content-Type": "application/json", "X-Request-Id": rid})
+                answer = connection.getresponse()  # The server sends its headers with the first audio.
+                if answer.status != 200:
+                    raise ValueError(f"the server answered {answer.status}")
+                answer.read(45)  # The 44-byte WAV header and the first audio byte.
+            except Exception as exc:
+                error = str(exc) if isinstance(exc, (OSError, ValueError)) else type(exc).__name__
+            finally:
+                connection.close()
+                seconds = round(time.monotonic() - sent, 2)
+                generate.last_request = time.monotonic()
+                warming.release()
+            print(f"Medium voice warm-up {rid}: " + (f"failed after {seconds:g} s: {error}" if error
+                  else f"first audio after {seconds:g} s"), file=sys.stderr, flush=True)
+            report({"type": "warm", "request": rid, "seconds": seconds, "error": error})
+        threading.Thread(target=run, daemon=True).start()
+
+    warming = threading.Lock()  # At most one warm-up in flight.
+    generate.problem = generate.last_request = None  # last_request: when the last /tts went out or ended.
+    generate.warm = warm
     return generate
 
 
@@ -856,6 +906,149 @@ def check_words():
     print("Speech respelling: all checks passed.")
 
 
+def check_warm():
+    """Self-check the silent warm-up through main() and a stand-in medium voice server. Nothing plays."""
+    global load
+    import http.server
+    import io
+    seen, small_seen, plays, warm_cfg = [], [], [], {"delay": 0, "status": 200}
+    seen_changed, playing, lines, errors = threading.Condition(), threading.Event(), queue.Queue(), []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"loaded": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            text = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("text")
+            if self.path != "/tts":
+                return self.do_GET()
+            with seen_changed:
+                seen.append((text, self.headers.get("X-Request-Id")))
+                seen_changed.notify_all()
+            if text == WARM_TEXT:
+                time.sleep(warm_cfg["delay"])
+                if warm_cfg["status"] != 200:
+                    self.send_response(warm_cfg["status"])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"RIFF\xff\xff\xff\xffWAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 24000, 48000, 2, 16)
+                             + b"data\xff\xff\xff\xff" + b"\x00\x00" * 2400)
+
+    class Lines(io.TextIOBase):
+        def __init__(self, sink):
+            self.sink, self.part = sink, ""
+
+        def write(self, text):
+            self.part += text
+            *done, self.part = self.part.split("\n")
+            for line in done:
+                self.sink(line)
+            return len(text)
+
+    def small_standin(text, stop, voices=None):
+        small_seen.append(text)
+        yield b"\x00\x00" * 240
+
+    def fake_play(sample_rate, volume, generate, text, stop, voiced, on_start, on_length, played, levels=None):
+        b"".join(generate(text, stop))
+        on_start()
+        plays.append(text)
+        playing.set()
+        stop.wait(0.6)  # The item plays for a while. No sound reaches a device.
+
+    def row(match, seconds=5):
+        end = time.monotonic() + seconds
+        while (left := end - time.monotonic()) > 0:
+            try:
+                line = json.loads(lines.get(timeout=left))
+            except queue.Empty:
+                break
+            if match(line):
+                return line
+        raise AssertionError("no matching row from speech.py")
+
+    def wait_seen(count):
+        with seen_changed:
+            assert seen_changed.wait_for(lambda: len(seen) >= count, 5), seen
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    read_fd, write_fd = os.pipe()
+    saved = (load, desk.play_pcm, sys.argv, sys.stdin, sys.stdout, sys.stderr)
+    gen = medium(f"http://127.0.0.1:{srv.server_address[1]}", "jarvis-poe", 24000, small_standin)
+    assert gen.last_request is None
+    load, desk.play_pcm, sys.argv = (lambda args: (24000, gen)), fake_play, ["speech.py", "--engine", "qwen"]
+    sys.stdin, sys.stdout, sys.stderr = os.fdopen(read_fd), Lines(lines.put), Lines(errors.append)
+    runner = threading.Thread(target=main, daemon=True)
+    runner.start()
+    to_worker = os.fdopen(write_fd, "w")
+
+    def say(**message):
+        to_worker.write(json.dumps(message) + "\n")
+        to_worker.flush()
+    try:
+        # 1. A mic open after 60 s idle sends one warm-up; a second mic open right after sends none.
+        gen.last_request = time.monotonic() - WARM_IDLE_SECONDS - 1
+        say(type="warm")
+        say(type="warm")
+        warm = row(lambda r: r.get("type") == "warm")
+        assert warm["error"] is None and seen == [(WARM_TEXT, warm["request"])], (warm, seen)
+        # 2. A mic open after 10 s idle sends none.
+        gen.last_request = time.monotonic() - 10
+        say(type="warm")
+        time.sleep(0.3)
+        assert len(seen) == 1 and not plays, (seen, plays)
+        # 3. None while speech plays, even when the last request is old.
+        say(type="speak", id="s1", text="Playing now.")
+        assert playing.wait(5)
+        gen.last_request = time.monotonic() - WARM_IDLE_SECONDS - 1
+        say(type="warm")
+        assert row(lambda r: r.get("id") == "s1" and "event" not in r)["error"] is None
+        assert [text for text, _ in seen] == [WARM_TEXT, "Playing now."], seen
+        # 4. A slow warm-up never blocks a real request, and the real request's ID reaches the server and the log.
+        warm_cfg["delay"] = 1.5
+        gen.last_request = time.monotonic() - WARM_IDLE_SECONDS - 1
+        say(type="warm")
+        wait_seen(3)
+        began = time.monotonic()
+        say(type="speak", id="s2", text="Real line.")
+        spoke = row(lambda r: r.get("id") == "s2" and "event" not in r)
+        assert spoke["error"] is None and "medium_voice" not in spoke and time.monotonic() - began < 1.4, spoke
+        warm = row(lambda r: r.get("type") == "warm")
+        assert warm["error"] is None and warm["seconds"] >= 1.5, warm
+        (rid,) = [rid for text, rid in seen if text == "Real line."]
+        assert f"Medium voice request {rid}: sent" in errors and any(
+            line.startswith(f"Medium voice request {rid}: first audio after ") for line in errors), errors
+        assert f"Medium voice warm-up {warm['request']}: first audio after {warm['seconds']:g} s" in errors, errors
+        # 5. A failed warm-up is silent: no small voice, no fallback, and the next item still uses the medium voice.
+        warm_cfg.update(delay=0, status=500)
+        gen.last_request = time.monotonic() - WARM_IDLE_SECONDS - 1
+        say(type="warm")
+        assert row(lambda r: r.get("type") == "warm")["error"] == "the server answered 500"
+        say(type="speak", id="s3", text="Still medium.")
+        assert "medium_voice" not in row(lambda r: r.get("id") == "s3" and "event" not in r)
+        assert seen[-1][0] == "Still medium." and not small_seen and not [e for e in errors if "fallback" in e], errors
+        # Only the three spoken items played. No warm-up reached playback.
+        assert plays == ["Playing now.", "Real line.", "Still medium."], plays
+        to_worker.close()
+        runner.join(5)
+        assert not runner.is_alive()
+    finally:
+        load, desk.play_pcm, sys.argv, sys.stdin, sys.stdout, sys.stderr = saved
+        srv.shutdown()
+    print("Medium voice warm-up: all checks passed.")
+
+
 def encode_render(pcm, sample_rate, dest_path, stop):
     """Encode s16le mono PCM to Ogg Opus (32 kbps) when ffmpeg is on PATH, else WAV, writing mode 0600 to dest_path.
     Return (content_type, error). Never opens pw-play."""
@@ -911,6 +1104,7 @@ def encode_render(pcm, sample_rate, dest_path, stop):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check-words", action="store_true", help="Check speech respellings and exit.")
+    parser.add_argument("--check-warm", action="store_true", help="Check the medium voice warm-up and exit.")
     parser.add_argument("--engine", choices=("pocket", "phonon", "qwen"), default="pocket",
                         help="qwen speaks through the medium voice server, with Phonon and --voice as its fallback.")
     parser.add_argument("--url", help="qwen only. The medium voice server, such as https://voice.example:8090.")
@@ -926,6 +1120,8 @@ def main():
     args = parser.parse_args()
     if args.check_words:
         return check_words()
+    if args.check_warm:
+        return check_warm()
     sample_rate, generate = load(args)
     lock = threading.Condition()
     speaks = collections.deque()
@@ -934,6 +1130,7 @@ def main():
     active_render_id = None
     active_render_stop = None
     eof = False
+    busy = False  # The model loop is speaking or rendering an item.
     current = threading.Event()
     stdout_lock = threading.Lock()
     encoders = ThreadPoolExecutor(max_workers=2, thread_name_prefix="speech-encode")
@@ -958,6 +1155,9 @@ def main():
                     stop = threading.Event()
                     render_stops[message["id"]] = stop
                     renders.append((message, stop))
+                elif kind == "warm":  # The owner opened the mic. Only an idle medium voice warms up.
+                    if not (speaks or renders or busy) and hasattr(generate, "warm"):
+                        generate.warm(emit)
                 elif kind == "cancel_render":
                     rid = message.get("id")
                     if stop := render_stops.get(rid):
@@ -991,8 +1191,10 @@ def main():
     threading.Thread(target=commands, daemon=True).start()
     while True:
         with lock:
+            busy = False
             while not speaks and not renders and not eof:
                 lock.wait()
+            busy = True
             if speaks:
                 kind = "speak"
                 message, stop = speaks.popleft()
