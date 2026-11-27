@@ -253,9 +253,30 @@ fi
 if [ "$cmd" = "run" ]; then
   exit 0
 fi
+if [ "$cmd" = "python" ]; then  # python list PIN: an old uv (FAKE_UV_OLD=1) does not know the pinned Python.
+  [ -n "${FAKE_UV_OLD:-}" ] || echo "cpython-${2:-3.12.14}-linux-x86_64-gnu    <download available>"
+  exit 0
+fi
+if [ "$cmd" = "--version" ]; then
+  [ -z "${FAKE_UV_VERSION_FAILS:-}" ] || exit 2
+  [ -n "${FAKE_UV_OLD:-}" ] && echo "uv 0.5.8 (fake)" || echo "uv 0.13.10 (fake)"
+  exit 0
+fi
 exit 0
 SH
 chmod +x "$FAKE_BIN/uv"
+
+# Claude Code, signed out: the installer asks its status and must never reach the real one.
+cat >"$FAKE_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "auth status")
+    [ -z "${FAKE_CLAUDE_HANGS:-}" ] || exec sleep 60
+    [ -n "${FAKE_CLAUDE_SIGNED_IN:-}" ] && echo '{"loggedIn": true}' || echo '{"loggedIn": false}' ;;
+  *) echo "2.1.332 (fake Claude Code)" ;;
+esac
+SH
+chmod +x "$FAKE_BIN/claude"
 
 FAKE_WHEEL="$TEST_ROOT/airtype-2.1.2-py3-none-any.whl"
 echo "stub-wheel-v1" >"$FAKE_WHEEL"
@@ -1587,4 +1608,89 @@ for mode in active inactive; do
 done
 pass "The start target follows the session, and a symlinked unit stays untouched either way"
 
-echo "All install failure and recovery tests passed (34/34)."
+echo "=== Case 35: An old uv that cannot fetch the pinned Python stops the install with one plain sentence ==="
+SB35="$(new_sandbox uv-old)"
+set +e
+OUT35="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 bash "$INSTALL_SH" --voice-model no --recogniser no --service no \
+  --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC35=$?
+set -e
+[ "$RC35" -eq 1 ] || fail "35 an old uv did not stop the install ($RC35): $OUT35"
+printf '%s\n' "$OUT35" | grep -qF "Error: uv 0.5.8 is too old for Rook: it cannot fetch Python 3.12.14." || fail "35 missing the plain sentence: $OUT35"
+printf '%s\n' "$OUT35" | grep -qF "Fix: Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" || fail "35 missing the fix: $OUT35"
+[ ! -e "$SB35/.local/share/rook/venv" ] || fail "35 built an environment with the old uv"
+OUT35B="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 FAKE_UV_VERSION_FAILS=1 bash "$INSTALL_SH" --voice-model no --recogniser no \
+  --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT35B" | grep -qF "Error: The uv at $FAKE_BIN/uv is too old for Rook" || fail "35 a uv with no version was not named: $OUT35B"
+OUT35C="$(run_in_sb "$SB35" env FAKE_UV_OLD=1 UV_PYTHON_DOWNLOADS=never bash "$INSTALL_SH" --voice-model no --recogniser no \
+  --service no --recogniser-source "$FAKE_WHEEL" 2>&1 || true)"
+printf '%s\n' "$OUT35C" | grep -qF "Error: UV_PYTHON_DOWNLOADS=never stops uv from fetching Python 3.12.14, which Rook needs." \
+  || fail "35 the download setting was not named: $OUT35C"
+pass "Old uv: the install stops before the environments with 'uv 0.5.8 is too old', names a uv with no version, and names a setting that forbids downloads"
+
+echo "=== Case 36: get.sh replaces an old uv with uv's own installer, and says so plainly when that fails ==="
+GET_SH="$SCRIPT_DIR/get.sh"
+UVI_BIN="$TEST_ROOT/fake-uv-installer-bin"
+mkdir -p "$UVI_BIN"
+NEW_UV="$TEST_ROOT/new-uv"  # The uv that uv's installer puts in place: a current one.
+printf '%s\n' '#!/usr/bin/env bash' "FAKE_UV_OLD= exec \"$FAKE_BIN/uv\" \"\$@\"" >"$NEW_UV"
+chmod +x "$NEW_UV"
+cat >"$UVI_BIN/curl" <<SH
+#!/usr/bin/env bash
+# uv's installer, in its own folder order. It records whether it was told to leave the shell files alone.
+# FAKE_UV_INSTALL_FAILS makes the download fail.
+case "\$*" in *astral.sh/uv/install.sh*) ;; *) echo "ERROR: curl must never be called (\$*)" >&2; exit 99 ;; esac
+[ -z "\${FAKE_UV_INSTALL_FAILS:-}" ] || { echo "curl: (6) Could not resolve host: astral.sh" >&2; exit 6; }
+echo 'd="\${UV_INSTALL_DIR:-\${XDG_BIN_HOME:-\${XDG_DATA_HOME:+\$XDG_DATA_HOME/../bin}}}"; d="\${d:-\$HOME/.local/bin}"; mkdir -p "\$d" && cp "$NEW_UV" "\$d/uv"'
+echo 'echo "UV_NO_MODIFY_PATH=\${UV_NO_MODIFY_PATH:-unset}" >> "\$HOME/uv-installer.log"; echo "everything is installed!"'
+SH
+chmod +x "$UVI_BIN/curl"
+SB36="$(new_sandbox get-uv-old)"
+set +e
+OUT36="$(run_in_sb "$SB36" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 sh "$GET_SH" "$REPO_ROOT" --agent claude --voice small \
+  --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36=$?
+set -e
+# Exit 2, not 0: --voice-model no and --recogniser no leave the setup incomplete on purpose, which install.sh reports
+# with 2. It proves the install ran to its end with the new uv.
+[ "$RC36" -eq 2 ] || fail "36 get.sh did not finish the install after replacing uv ($RC36): $OUT36"
+printf '%s\n' "$OUT36" | grep -qF "uv 0.5.8 cannot fetch Python 3.12.14, which Rook needs, so uv's own installer puts a newer uv in $SB36/.local/bin, ahead of the one at $FAKE_BIN/uv, which stays as it is." \
+  || fail "36 missing the replacement line: $OUT36"
+grep -qx "UV_NO_MODIFY_PATH=1" "$SB36/uv-installer.log" || fail "36 uv's installer was allowed to edit the shell files"
+! printf '%s\n' "$OUT36" | grep -qF "too old for Rook" || fail "36 still called uv too old after replacing it: $OUT36"
+[ -x "$SB36/.local/bin/uv" ] && [ -d "$SB36/.local/share/rook/venv" ] || fail "36 the new uv did not build the environments"
+SB36B="$(new_sandbox get-uv-old-fails)"
+set +e
+OUT36B="$(run_in_sb "$SB36B" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 FAKE_UV_INSTALL_FAILS=1 sh "$GET_SH" "$REPO_ROOT" \
+  --agent claude --voice small --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36B=$?
+set -e
+[ "$RC36B" -eq 1 ] || fail "36 a failed uv install did not stop get.sh ($RC36B): $OUT36B"
+printf '%s\n' "$OUT36B" | grep -qF "Error: uv 0.5.8 is too old for Rook: it cannot fetch Python 3.12.14. Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" \
+  || fail "36 missing the plain sentence after a failed uv install: $OUT36B"
+[ ! -e "$SB36B/.local/share/rook" ] || fail "36 installed something with the old uv"
+SB36C="$(new_sandbox get-uv-xdg-bin)"
+set +e
+OUT36C="$(run_in_sb "$SB36C" env PATH="$UVI_BIN:$FAKE_BIN:$PATH" FAKE_UV_OLD=1 XDG_BIN_HOME="$SB36C/xbin" sh "$GET_SH" "$REPO_ROOT" \
+  --agent claude --voice small --voice-model no --recogniser no --service no --recogniser-source "$FAKE_WHEEL" 2>&1)"
+RC36C=$?
+set -e
+[ "$RC36C" -eq 2 ] || fail "36 with XDG_BIN_HOME the install did not finish ($RC36C): $OUT36C"
+printf '%s\n' "$OUT36C" | grep -qF "puts a newer uv in $SB36C/xbin, ahead of" || fail "36 named the wrong folder: $OUT36C"
+printf '%s\n' "$OUT36C" | grep -qF "To use that uv yourself later, add $SB36C/xbin to your shell's PATH." || fail "36 no PATH note: $OUT36C"
+pass "get.sh: an old uv was shadowed by uv's installer in its real folder, with no shell file changed, and the install went on; a failed replacement stopped with one plain sentence"
+
+echo "=== Case 37: 'Sign in by hand' only for an agent that reports it is signed out ==="
+SB37="$(new_sandbox sign-in-line)"
+OUT37_OUT="$(run_in_sb "$SB37" bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+OUT37_IN="$(run_in_sb "$SB37" env FAKE_CLAUDE_SIGNED_IN=1 bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+printf '%s\n' "$OUT37_OUT" | grep -qF "Sign in by hand with: claude auth login" || fail "37 signed out, but no sign-in line: $OUT37_OUT"
+printf '%s\n' "$OUT37_IN" | grep -qF ", and it is signed in." || fail "37 signed in, but not said: $OUT37_IN"
+! printf '%s\n' "$OUT37_IN" | grep -qF "Sign in by hand" || fail "37 told a signed-in person to sign in by hand: $OUT37_IN"
+OUT37_HANG="$(run_in_sb "$SB37" env FAKE_CLAUDE_HANGS=1 bash "$INSTALL_SH" --dry-run --agent claude --voice-model no --recogniser no --service no 2>&1 || true)"
+printf '%s\n' "$OUT37_HANG" | grep -qF "I could not check the sign-in. If it is not signed in, run: claude auth login" \
+  || fail "37 a status that hangs was not 'could not check': $OUT37_HANG"
+! printf '%s\n' "$OUT37_HANG" | grep -qF "Sign in by hand" || fail "37 a hung status was told as signed out: $OUT37_HANG"
+pass "Sign-in line: printed for a signed-out Claude Code only; a status that hangs is 'could not check'"
+
+echo "All install failure and recovery tests passed (37/37)."

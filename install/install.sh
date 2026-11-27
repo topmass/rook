@@ -165,6 +165,38 @@ die() {
   exit 1
 }
 
+# bounded_out SECONDS COMMAND...: print COMMAND's output, run with no input, for at most SECONDS. Its exit code, or
+# 124 at the limit. Bash 3.2 and the Mac's BSD tools have no timeout command.
+bounded_out() {
+  local secs="$1"
+  shift
+  "$@" </dev/null 2>/dev/null &
+  local pid=$!
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local killer=$!
+  local rc=0
+  wait "$pid" || rc=$?
+  kill "$killer" 2>/dev/null || true
+  wait "$killer" 2>/dev/null || true
+  if [ "$rc" -eq 143 ]; then
+    return 124
+  fi
+  return "$rc"
+}
+
+# The setting, if any, that stops uv from fetching a Python (then any uv looks too old): printed as written.
+uv_download_blocker() {
+  case "${UV_PYTHON_DOWNLOADS:-}" in never|manual) echo "UV_PYTHON_DOWNLOADS=$UV_PYTHON_DOWNLOADS"; return 0 ;; esac
+  if [ "${UV_PYTHON_PREFERENCE:-}" = only-system ]; then echo "UV_PYTHON_PREFERENCE=only-system"; return 0; fi
+  local f line
+  for f in "$XDG_CONFIG_HOME/uv/uv.toml" /etc/uv/uv.toml; do
+    [ -f "$f" ] || continue
+    line="$(grep -E '^[[:space:]]*python-(downloads|preference)[[:space:]]*=[[:space:]]*"(never|manual|only-system)"' "$f" | head -n 1 || true)"
+    if [ -n "$line" ]; then echo "$(printf '%s' "$line" | tr -d ' ') in $f"; return 0; fi
+  done
+  return 1
+}
+
 require_abs_path() {
   local label="$1"
   local val="$2"
@@ -1444,6 +1476,25 @@ UV_BIN="$(command -v uv || true)"
 UV_FIX="sudo pacman -S --needed uv"
 [ "$IS_MAC" -eq 0 ] || UV_FIX="curl -LsSf https://astral.sh/uv/install.sh | sh, then open a new terminal"
 [ -n "$UV_BIN" ] || [ "$DRY_RUN" -eq 1 ] || die "uv is not on PATH." "Install uv with: $UV_FIX"
+# An old uv cannot fetch the pinned Python, and would stop at the first environment with a message about interpreters.
+# A check that hangs proves nothing, so the environment step goes on and shows uv's own error if there is one.
+if [ -n "$UV_BIN" ] && [ "$DRY_RUN" -eq 0 ] && [ -z "$FROM_CACHE" ]; then
+  UV_RC=0
+  UV_PYTHONS="$(bounded_out 30 "$UV_BIN" python list "$PYTHON_PIN")" || UV_RC=$?
+  if [ "$UV_RC" -ne 124 ]; then
+    case "$UV_PYTHONS" in
+      *"cpython-$PYTHON_PIN-"*) ;;
+      *)
+        if UV_BLOCKER="$(uv_download_blocker)"; then
+          die "$UV_BLOCKER stops uv from fetching Python $PYTHON_PIN, which Rook needs." \
+              "Change that setting for this install, then run install/install.sh again."
+        fi
+        UV_NAME="$(bounded_out 10 "$UV_BIN" --version | cut -d' ' -f1,2 || true)"
+        die "${UV_NAME:-The uv at $UV_BIN} is too old for Rook: it cannot fetch Python $PYTHON_PIN." \
+            "Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh" ;;
+    esac
+  fi
+fi
 
 UV_COMMON_ARGS=()
 UV_VENV_ARGS=()
@@ -2143,7 +2194,15 @@ fi
 
 if [ "$AGENT" = "claude" ]; then
   if command -v claude >/dev/null 2>&1; then
-    say "  OK: claude CLI found at $(command -v claude). Sign in by hand with: claude auth login"
+    CLAUDE_RC=0
+    CLAUDE_STATUS="$(bounded_out 15 claude auth status)" || CLAUDE_RC=$?
+    [ "$CLAUDE_RC" -ne 124 ] || CLAUDE_STATUS=""  # A status that hangs proves nothing.
+    case "$CLAUDE_STATUS" in
+      *'"loggedIn": true'*|*'"loggedIn":true'*) say "  OK: claude CLI found at $(command -v claude), and it is signed in." ;;
+      *'"loggedIn": false'*|*'"loggedIn":false'*)
+        say "  OK: claude CLI found at $(command -v claude). Sign in by hand with: claude auth login" ;;
+      *) say "  OK: claude CLI found at $(command -v claude). I could not check the sign-in. If it is not signed in, run: claude auth login" ;;
+    esac
   else
     say "  Note: claude CLI is not on PATH yet. Install Claude Code and sign in with: claude auth login"
   fi

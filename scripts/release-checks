@@ -128,6 +128,10 @@ run boundaries "$SYS_PY" scripts/check_boundaries.py
 run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
 wait
 
+if [ ! -d "$X" ]; then
+    echo "release-checks: the scratch folder $X vanished during the run, so every result is lost. Another job deleted it." >&2
+    exit 2
+fi
 failed=0
 for name in $names; do
     read -r code secs < "$X/res-$name" 2>/dev/null || { code=99; secs=0; }

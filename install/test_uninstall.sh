@@ -54,6 +54,16 @@ exit 99
 SH
 chmod +x "$FAKE_BIN/uv"
 
+# Claude Code, signed out: the installer asks its status and must never reach the real one.
+cat >"$FAKE_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "auth status") echo '{"loggedIn": false}' ;;
+  *) echo "2.1.332 (fake Claude Code)" ;;
+esac
+SH
+chmod +x "$FAKE_BIN/claude"
+
 for forbidden in curl sudo loginctl; do
   cat >"$FAKE_BIN/$forbidden" <<SH
 #!/usr/bin/env bash

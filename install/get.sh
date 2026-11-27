@@ -33,6 +33,23 @@ bounded() {
   wait "$pid"
 }
 
+# Whether the uv on PATH knows Python $1 (installed, or a download it can fetch).
+uv_knows() {
+  bounded 30 "$work/uv-python.txt" uv python list "$1" && grep -q "^cpython-$1-" "$work/uv-python.txt"
+}
+
+# The setting, if any, that stops uv from fetching a Python (then any uv looks too old): printed as written.
+uv_download_blocker() {
+  case "${UV_PYTHON_DOWNLOADS:-}" in never|manual) echo "UV_PYTHON_DOWNLOADS=$UV_PYTHON_DOWNLOADS"; return 0 ;; esac
+  [ "${UV_PYTHON_PREFERENCE:-}" != only-system ] || { echo "UV_PYTHON_PREFERENCE=only-system"; return 0; }
+  for f in "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" /etc/uv/uv.toml; do
+    [ -f "$f" ] || continue
+    line=$(grep -E '^[[:space:]]*python-(downloads|preference)[[:space:]]*=[[:space:]]*"(never|manual|only-system)"' "$f" | head -n 1)
+    [ -z "$line" ] || { echo "$(echo "$line" | tr -d ' ') in $f"; return 0; }
+  done
+  return 1
+}
+
 # Everything runs inside main, so sh has read the whole script before any step can read stdin.
 main() {
   [ "$(id -u)" -ne 0 ] || die "Run this as your normal desktop user, not as root."
@@ -52,6 +69,7 @@ main() {
 
   # The agent Rook runs on: the one named with --agent, else the first that runs on PATH.
   # Checked first, so a missing agent stops the install before any download.
+  orig_path=$PATH  # The search path the person has, before this run adds ~/.local/bin.
   export PATH="$HOME/.local/bin:$PATH"
   dry=0
   case " $* " in *" --dry-run "*) dry=1 ;; esac
@@ -123,6 +141,38 @@ main() {
       fi ;;
   esac
   [ -f "$code/install/install.sh" ] || die "$source does not hold Rook (install/install.sh is missing)."
+
+  # 3. An old uv cannot fetch the Python Rook pins, and its self-update may refuse, so uv's own installer puts a
+  # current uv first on this run's PATH. A setting that forbids Python downloads is named instead.
+  pin=$(sed -n 's/^PYTHON_PIN="\(.*\)"$/\1/p' "$code/install/install.sh")
+  if [ "$dry" -eq 0 ] && [ -n "$pin" ] && command -v uv >/dev/null 2>&1 && ! uv_knows "$pin"; then
+    where=$(command -v uv)
+    old=$(uv --version 2>/dev/null | cut -d' ' -f1,2)
+    old=${old:-"the uv at $where"}
+    if blocker=$(uv_download_blocker); then
+      die "$blocker stops uv from fetching Python $pin, which Rook needs. Change that setting for this install, then run it again."
+    fi
+    # The folder uv's installer writes to, in its own order.
+    dest=${UV_INSTALL_DIR:-${XDG_BIN_HOME:-${XDG_DATA_HOME:+$XDG_DATA_HOME/../bin}}}
+    dest=${dest:-$HOME/.local/bin}
+    mkdir -p "$dest" 2>/dev/null || true  # uv's installer makes it too; made here, its real path can be named.
+    dest_real=$( (cd "$dest" 2>/dev/null && pwd -P) || printf '%s' "$dest")
+    if [ "$( (cd "$(dirname "$where")" && pwd -P) )" = "$dest_real" ]; then
+      what="replaces it in place in $dest_real"
+    else
+      what="puts a newer uv in $dest_real, ahead of the one at $where, which stays as it is"
+    fi
+    case ":$orig_path:" in
+      *":$dest:"*|*":$dest_real:"*) later="" ;;
+      *) later=" To use that uv yourself later, add $dest_real to your shell's PATH." ;;
+    esac
+    say "$old cannot fetch Python $pin, which Rook needs, so uv's own installer $what.$later"
+    curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh || true
+    PATH="$dest_real:$PATH"
+    export PATH
+    hash -r 2>/dev/null || true  # The shell must look uv up again.
+    uv_knows "$pin" || die "$old is too old for Rook: it cannot fetch Python $pin. Replace it with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  fi
 
   # 4. Install. The models download here: the small voice (about 65 MB) and AirType's recogniser (about 480 MB for English, 490 MB with --recogniser-model multi).
   # The medium voice (about 3.3 GB on disk, 2.5 GB on a Mac) too, when this computer can run it.
