@@ -11811,6 +11811,17 @@ def check_speech():
             sp, _, _, resp = await stream_answer(written, [written])
             assert [m["text"] for _, m in sp] == [written] and resp["spoken"] == written, (sp, resp)
             assert speech.respell(sp[0][1]["text"]) == spoken_want, speech.respell(sp[0][1]["text"])
+        # An entry of the owner's pronunciations file changes only the voice text, never the caption or the log.
+        assert str(speech.PRONUNCIATIONS).startswith(CHECK_SCRATCH.name), speech.PRONUNCIATIONS  # Never the owner's.
+        speech.PRONUNCIATIONS.parent.mkdir(parents=True, exist_ok=True)
+        speech.PRONUNCIATIONS.write_text('{"words": {"nginx": "engine x"}}')
+        try:
+            written = "Nginx is live."
+            sp, _, _, resp = await stream_answer(written, [written])
+            assert [m["text"] for _, m in sp] == [written] and resp["spoken"] == written, (sp, resp)
+            assert speech.respell(sp[0][1]["text"], "medium") == "Engine x is lighve."
+        finally:
+            speech.PRONUNCIATIONS.unlink()
         speech.check_words()
 
         # 18. Opt-in spoken thoughts and between-tool beats: sanitization, prompt rule, freshness backpressure, and isolation.

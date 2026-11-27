@@ -150,7 +150,7 @@ SCRIPTS = {ROOT / "desktop/relay.py", ROOT / "skills/delegate/scripts/t3_threads
 # commands. restart, reload and daily-restart are refused outright, by antigravity_home: Rook never restarts itself.
 RELAY_SKILLS = ("get", "voices", "fonts", "dusts", "set ", "show ", "dark ", "media", "forge ", "wow-note ", "wow-data ", "project new ",
                 "watch ", "work ", "inbox", "threads", "mailbox ", "handoff --print ", "clip ", "audition", "onboard ",
-                "herdr agents", "herdr read ", "pi ", "update --install")
+                "herdr agents", "herdr read ", "pi ", "update --install", "pronounce ")
 RELAY_CARD = ()
 RELAY_PROMPT = ("timer ", "remember ")
 # Phone pairing passes with no card, though no shipped skill offers it: the owner's own workspace skill does.

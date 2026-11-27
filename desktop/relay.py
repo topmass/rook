@@ -30,6 +30,9 @@ relay.py set KEY VALUE [--say TEXT]
                             With --say, Rook speaks TEXT as part of the change: a new voice says it, and a
                             new font shows it as a caption. agent, agent_model, and agent_effort only save:
                             they take effect at Rook's next start.
+relay.py pronounce list|add WORD SPELLING [--voice small|medium]|remove WORD [--voice small|medium]
+                            List, add or remove a word the voice says by another spelling, in
+                            ~/.config/rook/pronunciations.json. Captions keep the word. It applies from the next sentence.
 relay.py audition           Play two medium voices, Late-Night Architect then Velvet Wit, through the running
                             Rook. Without the medium voice it plays two small voices. It saves nothing.
 relay.py onboard --scan [--as t3|herdr|pi|none]
@@ -3063,6 +3066,53 @@ WL_COPY = "/usr/bin/wl-copy"
 WL_PASTE = "/usr/bin/wl-paste"
 CLIP_MAX = 2000
 CLIP_WAIT = 1.0
+
+
+def pronounce_command(argv):
+    """List, add or remove an entry of the pronunciations file. Other keys in the file are kept as they are."""
+    import speech
+    usage = "Usage: relay.py pronounce list|add WORD SPELLING [--voice small|medium]|remove WORD [--voice small|medium]"
+    path, argv, group = speech.PRONUNCIATIONS, list(argv), "words"
+    if "--voice" in argv:
+        at = argv.index("--voice")
+        group = (argv[at + 1:at + 2] or [""])[0]
+        del argv[at:at + 2]
+        if group not in ("small", "medium"):
+            sys.exit("--voice takes small or medium.")
+    if argv == ["list"]:
+        data = speech.read_pronunciations(path)
+        rows = [f'"{w}" is said like "{s}"' + ("" if g == "words" else f" on the {g} voice")
+                for g in ("words", "small", "medium") if group in ("words", g) for w, s in sorted(data.get(g, {}).items())]
+        print("\n".join(rows) or "No pronunciations yet.")
+        return
+    if not (argv[:1] == ["add"] and len(argv) == 3 or argv[:1] == ["remove"] and len(argv) == 2):
+        sys.exit(usage)
+    word = argv[1].strip()
+    if not word or "\n" in word or argv[0] == "add" and (not argv[2].strip() or "\n" in argv[2]):
+        sys.exit("Give a word and a spelling, each on one line.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError) as error:
+        sys.exit(f"{path} is not valid JSON, so nothing changed. Fix or delete it first: {error}")
+    if not isinstance(data, dict) or not all(isinstance(data.get(g, {}), dict) for g in ("words", "small", "medium")):
+        sys.exit(f"{path} is not a pronunciations file, so nothing changed. Fix or delete it first.")
+    on = "" if group == "words" else f" on the {group} voice"
+    if argv[0] == "add":
+        data.setdefault(group, {})[word] = argv[2].strip()
+        told = f'Rook now says "{word}" like "{argv[2].strip()}"{on}. Captions keep "{word}".'
+    else:
+        groups = [group] if group != "words" else ["words", "small", "medium"]
+        gone = [(g, w) for g in groups for w in list(data.get(g, {})) if w.lower() == word.lower()]
+        if not gone:
+            sys.exit(f'No pronunciation of "{word}"{on} to remove.')
+        for g, w in gone:
+            del data[g][w]
+        told = f'Rook says "{word}" as written again{on}.'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scratch = path.with_name(path.name + ".tmp")
+    scratch.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(scratch, path)
+    print(told + " It applies from the next sentence.")
 
 
 def clip_command(argv):
@@ -6233,6 +6283,8 @@ def main():
         return project_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] in ("set", "get", "voices", "fonts", "dusts", "themes"):
         return settings_command(sys.argv[1:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "pronounce":
+        return pronounce_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "audition":
         return _onboard().audition_command(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "shared-agents":
