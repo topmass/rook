@@ -66,6 +66,8 @@ Use `relay.py set perf_logging on|off` to control request measurements. The defa
 
 The default log is `$XDG_STATE_HOME/rook/perf.jsonl` (normally `~/.local/state/rook/perf.jsonl`). Rook retains one previous generation, `perf.jsonl.1`, with a 2 MiB limit per file. Rows contain stage times, local process CPU time, and sampled peak resident memory. Counters describe the measured processes, can overlap between stages, and cannot measure GPU work or remote tool resource use. On macOS, available system pressure, swap and compressor counters are shared across stages on a 250 ms sampling interval. General events are in `turns.jsonl` in the same state directory. Use the `request_id` to join these logs and request failures on stderr (the default macOS service captures stderr in `~/Library/Logs/rook.err.log`). The trace follows tool calls and approval waits visible to the agent harness. Phone rendering is timed on the service, and playback on the phone is outside its measurements. Rook records up to 128 stage intervals and 128 tool calls per request and counts omitted entries. Turning performance logging off leaves the ordinary event log available.
 
+Run `python3 scripts/benchmark_request_perf.py --sample` with Rook’s Python to compare logging on and off using scratch files and simulated requests. Add `--active-ms 220 --requests 12 --repeats 3` to exercise periodic sampling. The benchmark reports median process CPU time, elapsed time, and peak RSS, and can verify one example across all three logs.
+
 ## What is yours and what ships
 
 Rook ships the same base to everyone:
