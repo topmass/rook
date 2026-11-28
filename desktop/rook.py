@@ -718,14 +718,19 @@ def unmarked(text):
 
 
 def name_marks(spoken, names, seen):
-    """Step marks for a diagram's nodes: each sentence that names a node for the first time, as a whole word with or
-    without a plural s, starts with that node's {step N}. seen holds the nodes named so far, and grows."""
+    """Step marks for a diagram's nodes: where a sentence names a node for the first time, as a whole word with or
+    without a plural s, that node's {step N} goes just before the name, so a sentence that names several lights them
+    in the order it says them (voice_parts). seen holds the nodes named so far, and grows."""
     out = []
     for sentence in re.split(r"(?<=[.!?])\s+", spoken):
-        new = [k for k, name in enumerate(names) if k not in seen
-               and re.search(rf"(?<!\w){re.escape(name)}s?(?!\w)", sentence, re.IGNORECASE)]
-        seen.update(new)
-        out.append("".join(f"{{step {k + 1}}}" for k in new) + sentence)
+        found = []
+        for k, name in enumerate(names):
+            if k not in seen and (m := re.search(rf"(?<!\w){re.escape(name)}s?(?!\w)", sentence, re.IGNORECASE)):
+                found.append((m.start(), k))
+        seen.update(k for _, k in found)
+        for at, k in sorted(found, reverse=True):
+            sentence = f"{sentence[:at]}{{step {k + 1}}}{sentence[at:]}"
+        out.append(sentence)
     return " ".join(out)
 
 
@@ -1109,14 +1114,31 @@ def prepare_audio_chunks(path, max_bytes=TRANSCRIBE_MAX_BYTES, max_seconds=TRANS
 
 
 def voice_parts(spoken):
-    """Cut spoken text at each sentence that carries a step mark. Return (step or None, text) pairs, marks removed."""
+    """Cut spoken text at each sentence that carries a step mark. Return (step or None, text) pairs, marks removed.
+    Marks side by side light together (a list). Marks at different places in a sentence light in turn as it plays:
+    the step is then a tuple of (share of the text before the mark, step or list) pairs, for Companion.light_in_turn."""
     parts = []
     for sentence in re.split(r"(?<=[.!?])\s+", spoken):
-        marks = [int(m) for m in STEP_MARK.findall(sentence)]  # A sentence that names two nodes lights both.
-        if marks or not parts:
-            parts.append([(marks[0] if len(marks) == 1 else marks) if marks else None, ""])
+        groups, at = [], None  # Each place in the sentence that carries marks, and the marks there.
+        for m in STEP_MARK.finditer(sentence):
+            place = len(unmarked(sentence[:m.start()]).lstrip())
+            if place != at:
+                groups.append((place, []))
+                at = place
+            groups[-1][1].append(int(m.group(1)))
+        if groups or not parts:
+            parts.append([groups, ""])
         parts[-1][1] = (parts[-1][1] + " " + unmarked(sentence)).strip()
-    return [(step, text) for step, text in parts if text]
+    out = []
+    for groups, text in parts:
+        if not text:
+            continue
+        steps = [(place, marks[0] if len(marks) == 1 else marks) for place, marks in groups]
+        if len(steps) > 1:
+            out.append((tuple((min(1.0, place / len(text)), step) for place, step in steps), text))
+        else:
+            out.append((steps[0][1] if steps else None, text))
+    return out
 
 
 # Abbreviations whose full stop never ends a sentence. Title-case ones overlap with plain words.
@@ -2485,6 +2507,7 @@ class Companion:
         self.voice_steps = {}  # speech id: the step to light when it starts to play.
         self.step_loop = None  # (speech id, seconds a step): the steps take turns from when that speech starts.
         self.step_task = None  # The running loop of steps.
+        self.step_left = []  # (share, step) pairs of a playing sentence still to light (light_in_turn).
         self.step_lit = False  # A step lit during speech, so the whole scene shows again when the speech ends.
         self.scene_steps = 0  # The steps of a scene shown in this turn.
         # A new scene waits unseen in the overlay, staged, until the voice starts the speech queued after it.
@@ -4181,6 +4204,15 @@ class Companion:
         self.step_lit = step != 0
         self.show(None, render={"id": "voice", "step": step})  # The overlay drops a step its scene lacks.
 
+    async def light_in_turn(self, seconds):
+        """Light each (share, step) in step_left, of a sentence that just started playing, at its share of its seconds.
+        What is still waiting stays in step_left, so stop_loop lights it at once: no named node is ever skipped."""
+        done = 0.0  # step_left was set with the task: a stop before it runs leaves nothing to light twice.
+        while self.step_left:
+            await asyncio.sleep(max(0.0, self.step_left[0][0] * seconds - done))
+            done = self.step_left[0][0] * seconds
+            self.light_step(self.step_left.pop(0)[1])
+
     async def loop_steps(self, seconds):
         step = 0
         while self.scene_steps:  # A new turn or a clear ends it.
@@ -4190,6 +4222,9 @@ class Companion:
 
     def stop_loop(self):
         self.step_loop = None
+        for _, step in getattr(self, "step_left", ()):  # A sentence cut short by the next one: its names light now.
+            self.light_step(step)
+        self.step_left = []
         if self.step_task:
             self.step_task.cancel()
             self.step_task = None
@@ -4591,7 +4626,12 @@ class Companion:
                     self.reveal_scene(self.staged)
                 if (step := self.voice_steps.pop(message.get("id"), None)) is not None:
                     self.stop_loop()  # A mark wins over the loop.
-                    self.light_step(step)
+                    if isinstance(step, tuple):  # Several names in one sentence: each lights as the voice says it.
+                        self.step_left = list(step)
+                        self.step_task = self.loop.create_task(
+                            self.light_in_turn(len(text or "") * self.speech_rate))
+                    else:
+                        self.light_step(step)
                 elif self.step_loop and self.step_loop[0] == message.get("id"):
                     self.step_task = self.loop.create_task(self.loop_steps(self.step_loop[1]))
                     self.step_loop = None
@@ -8391,7 +8431,13 @@ def check_steps():
     assert unmarked("One. {diagram a > b") == "One. " and unmarked("{diagram a > b\nOne.") == "One."
     assert spoken_lead(unmarked("{diagram a > b, c\n\nOne.\n\nWritten.")) == "One."
     assert name_marks("The browsers ask. DNS answers the browser. Done.", ["browser", "dns"], set()) == \
-        "{step 1}The browsers ask. {step 2}DNS answers the browser. Done."
+        "The {step 1}browsers ask. {step 2}DNS answers the browser. Done."
+    # One sentence naming several nodes lights them in the order it says them, each at its place in the sentence.
+    one = name_marks("You draw your bow, mark the boar, and kill the boss.", ["boss", "bow", "boar"], set())
+    assert one == "You draw your {step 2}bow, mark the {step 3}boar, and kill the {step 1}boss.", one
+    (steps, text), = voice_parts(one)
+    assert [s for _, s in steps] == [2, 3, 1] and steps[0][0] < steps[1][0] < steps[2][0] < 1, steps
+    assert text == "You draw your bow, mark the boar, and kill the boss."
     assert name_marks("A browsing session.", ["browser"], set()) == "A browsing session."  # Whole words only.
     # Search commands and WoW waypoints show the overlay's find form.
     assert [bash_activity(c) for c in ("rg foo", "cd x && fd -e py", "sudo plocate rook", "ps aux | grep rook")] == [
@@ -8448,7 +8494,7 @@ def check_steps():
         await play(0)
         assert lit == [1, 2, 3, 1, 0], lit
         # A diagram mark split across chunks is held until it closes, staged, and never spoken. Each sentence lights
-        # the nodes it names first, both at once when it names two, and no loop runs.
+        # the nodes it names first, in the order it names them, and no loop runs.
         lit.clear(); sent.clear()
         STEP_LOOP_SECONDS = 3.0
         c.__dict__.update(warming=False, latest_turn="t", pending_turns={"t"}, render_count=0, scene_steps=0)
@@ -8466,7 +8512,7 @@ def check_steps():
         for item in range(2):
             await play(item, "start")
             await play(item)
-        assert lit == [None, "1", [1, 2], 3, 0], lit
+        assert lit == [None, "1", 1, 2, 3, 0], lit
         c.stream_text = "{diagram a > b\nHello there."  # A newline closes a mark left open.
         c.take_diagram()
         assert c.stream_text == "Hello there." and c.diagram_names == ["a", "b"]
@@ -11051,7 +11097,7 @@ def check_speech():
                 await asyncio.sleep(0)
             voice.feed_eof()
             await reader
-            assert lit == [None, "1", [1, 2], 3, 0], (shape, lit)
+            assert lit == [None, "1", 1, 2, 3, 0], (shape, lit)
             response = [fields for event, fields in rows if event == "response"][-1]
             assert "{" not in response["text"] and "diagram" not in response["spoken"], response
 
