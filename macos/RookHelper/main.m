@@ -472,16 +472,30 @@ static int runLauncher(int argc, const char *argv[], int first) {
     return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
 }
 
-// Opened by Finder or by System Settings' "Quit & Reopen": restart Rook through launchd, never a second Rook.
-static int kickLaunchd(void) {
-    NSString *label = NSProcessInfo.processInfo.environment[@"ROOK_LAUNCHD_LABEL"] ?: @"com.rook.companion";
-    NSString *target = [NSString stringWithFormat:@"gui/%u/%@", getuid(), label];
-    const char *args[] = {"/bin/launchctl", "kickstart", "-k", target.UTF8String, NULL};
+static int runLaunchctl(const char *args[]) {
     pid_t pid = 0;
     if (posix_spawn(&pid, args[0], NULL, NULL, (char *const *)args, environ) != 0) return 1;
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == pid && WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+// Finder and System Settings' "Quit & Reopen" use launchd for both first start and restart.
+static int kickLaunchd(void) {
+    NSString *label = NSProcessInfo.processInfo.environment[@"ROOK_LAUNCHD_LABEL"] ?: @"com.rook.companion";
+    if (label.length == 0 || [label containsString:@"/"]) return 1;
+    NSString *domain = [NSString stringWithFormat:@"gui/%u", getuid()];
+    NSString *target = [domain stringByAppendingPathComponent:label];
+    const char *kick[] = {"/bin/launchctl", "kickstart", "-k", target.UTF8String, NULL};
+    int status = runLaunchctl(kick);
+    if (status == 0) return 0;
+
+    NSString *agents = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/LaunchAgents"];
+    NSString *plist = [agents stringByAppendingPathComponent:[label stringByAppendingPathExtension:@"plist"]];
+    if (![NSFileManager.defaultManager isReadableFileAtPath:plist]) return status;
+    const char *bootstrap[] = {"/bin/launchctl", "bootstrap", domain.UTF8String, plist.fileSystemRepresentation, NULL};
+    return runLaunchctl(bootstrap);
 }
 
 // Read each permission without a prompt. Run from Rook (or under the launcher), the answer is Rook.app's.
