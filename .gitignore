@@ -1,6 +1,7 @@
 .agent-memory/
 __pycache__/
 *.pyc
+/dist/
 # Local-only: the owner's private game part, the shelved stage host, and this machine's build rules.
 /wow/
 /stage/
