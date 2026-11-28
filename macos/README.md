@@ -18,6 +18,12 @@ Export `ROOK_OBSIDIAN_VAULT="$HOME/obsidian"` (or your own absolute vault path) 
 
 Use your talk key and say “Save this to Obsidian” followed by the note. By default, Rook creates or appends to `rook/YYYY-MM-DD.md` inside the vault. Export `ROOK_OBSIDIAN_FOLDER` before generating the LaunchAgent to choose a different top-level folder name. The `daily` folder name is reserved.
 
+## Speech performance and focus
+
+Use `relay.py get tts_threads` to see the number of local synthesis threads used by Phonon, Pocket TTS, and the medium voice's fallback. The default is 2. Use `relay.py set tts_threads 1` to lower it to one thread at the next start. The setting accepts 1 to 16.
+
+When `perf_logging` is on, `turns.jsonl` records the frontmost app, presence window state and keyboard event tap status at playback start and end, plus focus changes during playback. It also records notifications when Quartz disables the event tap. Speech and request IDs are included when available. Window titles and keystrokes are omitted.
+
 ## Helper build and dev signing
 
 Run `macos/RookHelper/build.sh` to compile and sign `~/Applications/Rook.app`. On first run, it creates a dedicated keychain at `~/Library/Keychains/rook-dev.keychain-db` (password stored with mode `0600` at `~/.config/rook/dev-keychain.pass`) and a self-signed `"Rook Dev"` code-signing certificate, without touching `login.keychain-db` or trust settings. Because the designated requirement binds to `com.rook.helper` and the certificate rather than a binary code hash, macOS keeps each grant across rebuilds.

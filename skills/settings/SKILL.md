@@ -1,7 +1,7 @@
 ---
 name: settings
 description: "Change Rook's basic settings by voice: the voice and its engine, speed, volume, expressiveness, the caption font, the light-theme dust, how diagrams enter and dance, listening after Rook talks, Smart Turn, recording length, talk keys, screenshots, the main agent and its model, the names Rook uses, update checks, and how Rook talks. Use when ⟦owner⟧ asks to change, compare, revert or check one of these, such as \"change your voice\", a voice by its name, such as \"use Jarvis\" or \"try Velvet Wit\", \"use your medium voice\", \"talk a bit slower\", \"quieter\", \"change the temperature\", \"try the mono font\", \"change the particles in light mode\", \"use the fly-in for diagrams\", \"listen after you ask me something\", \"turn on smart turn\", \"go back to the previous one\", \"use Gemini\", \"say X like Y\", \"which model are you on\", \"be more friendly when you talk\", \"call yourself Nova\", \"stop checking for updates\" or \"install the update\". Rook's colours, layout and behaviour go to the build thread."
-allowed-tools: Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py get*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py voices*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py fonts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py dusts*), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py set *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py pronounce *), Bash(/usr/bin/python ${CLAUDE_SKILL_DIR}/../../desktop/relay.py update --install), Read(~/.config/rook/personality.md), Edit(~/.config/rook/personality.md)
+allowed-tools: Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" get*), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" voices*), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" fonts*), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" dusts*), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" set *), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" pronounce *), Bash("⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py" update --install), Read(~/.config/rook/personality.md), Edit(~/.config/rook/personality.md)
 ---
 
 # Rook's settings
@@ -37,6 +37,9 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `orchestrator` | The coding tool a hand-off goes to when it names none. It takes effect at your next start | `t3` (T3 Code, the default), `herdr`, `pi`, or `none` |
 | `projects_folder` | Where a new project starts on this machine | A folder path. Unset means the machine table's code folder |
 | `screenshots` | Whether each request carries a screenshot of the focused window | `on` (the default) or `off` |
+| `tts_threads` | CPU threads for local speech synthesis, including the medium voice fallback. Applies at the next start | 1 to 16. Default is 2 |
+| `smart_turn_threads` | CPU threads for Smart Turn inference. Applies at the next start | 1 to 16. Default is 2 |
+| `recogniser_threads` | CPU threads for speech recognition. Applies at the next start | 1 to 16. Default is 2 |
 | `recogniser_model` | Which speech-to-text model hears ⟦owner⟧. `en` is Parakeet English, `multi` is Parakeet in 25 European languages. It takes effect at the next start | `en` or `multi` |
 | `talk_keys` | The keys ⟦owner⟧ holds to talk. It applies at once | A comma list, such as `RightCtrl,F15,F14`, or `none`. `+F13` adds a key and `-F13` drops one. Right Alt waits a moment, so typing with it does not start you listening |
 
@@ -56,7 +59,7 @@ Change only what ⟦owner⟧ asks for. A new voice keeps the current speed, volu
 
 ## Commands
 
-The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/usr/bin/python`.
+Run the commands below as `"⟦python⟧" "${CLAUDE_SKILL_DIR}/../../desktop/relay.py"` followed by the command arguments.
 
 - `relay.py get` prints each setting, its value, and where the value comes from.
 - `relay.py voices` lists every voice with a short description. The current one is marked.

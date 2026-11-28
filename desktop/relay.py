@@ -65,11 +65,13 @@ relay.py threads [--json]   List Rook's thread roster: every open, unsettled or 
                             at once. It needs a running Rook.
 relay.py herdr agents       List every Herdr agent here and on the saved Herdr machines: name, kind, state
                             (working, blocked, done, idle or unknown), folder and machine.
-relay.py herdr read AGENT [--machine NAME] [--lines N]
+relay.py herdr read AGENT [--machine NAME] [--lines N] [--source visible|recent-unwrapped]
                             Print a Herdr agent's state and the last N lines of its screen, 40 by default.
 relay.py herdr send AGENT [--machine NAME] TEXT|-
                             Prompt a Herdr agent once, only when it is idle or done, and watch it. A send whose
                             outcome is unknown is recorded and never sent again.
+relay.py herdr configure AGENT [--machine NAME] [--model MODEL] [--effort LEVEL]
+                            Change the model or reasoning effort of an idle Codex session and verify the result.
 relay.py herdr start FOLDER --kind KIND [--model MODEL] [--effort LEVEL] [--name NAME] [--machine NAME] TEXT|-
                             Start a KIND agent (claude, codex, pi and others) without focus, in a new tab of the Herdr
                             workspace that holds FOLDER, else in a new workspace. Send it TEXT through the same guard,
@@ -466,13 +468,14 @@ def settings_command(argv):
                                "source": "settings file" if key in saved_file else "default"}
             values["recogniser_model"] = {"value": saved_file.get("recogniser_model"), "source": "settings file"
                                           if "recogniser_model" in saved_file else "not set; AirType's own model"}
-            values["perf_logging"] = {"value": saved_file.get("perf_logging", "on"),
+            values["perf_logging"] = {"value": saved_file.get("perf_logging", settings.PERF_LOGGING),
                                       "source": "settings file" if "perf_logging" in saved_file else "default"}
             perf_path, perf_source = settings.perf_log_path_in_force(saved_file)
             values["perf_log_path"] = {"value": str(perf_path), "source": perf_source}
-            values["recogniser_threads"] = {"value": saved_file.get("recogniser_threads", 2),
-                                             "source": "settings file" if "recogniser_threads" in saved_file
-                                             else "default"}
+            for key, default in (("recogniser_threads", 2), ("tts_threads", settings.TTS_THREADS),
+                                 ("smart_turn_threads", settings.SMART_TURN_THREADS)):
+                values[key] = {"value": saved_file.get(key, default),
+                               "source": "settings file" if key in saved_file else "default"}
             for key, default in (("voice_engine", VOICE_ENGINES[0]), ("voice_medium", MEDIUM_VOICES[0])):
                 if key not in saved_file:
                     values[key] = {"value": default, "source": "default"}
@@ -700,10 +703,10 @@ def settings_command(argv):
             value = path
         utter(f"Saved perf log path {value}. Rook uses it from its next start.")
         return
-    if key in ("perf_logging", "recogniser_threads"):
+    if key in ("perf_logging", "recogniser_threads", "tts_threads", "smart_turn_threads"):
         if value.lower() == "previous":
             value = previous.get(key)
-        elif key == "recogniser_threads":
+        elif key != "perf_logging":
             try:
                 value = int(value)
             except ValueError:
@@ -712,7 +715,7 @@ def settings_command(argv):
             value = value.lower()
         if not valid({key: value}):
             leave("perf_logging must be on or off." if key == "perf_logging" else
-                  "recogniser_threads must be an integer from 1 to 16.")
+                  f"{key} must be an integer from 1 to 16.")
         old = {key: saved[key]} if key in saved else {}
         save_checked({**saved, key: value}, {**previous, **old}, updated={key})
         utter(f"Saved {key} = {value}. Rook uses it from its next start.")
@@ -1972,16 +1975,28 @@ def herdr_command(argv):
         return
     if verb == "read" and args:
         lines = take_count(args, "--lines", 40)
-        if len(args) != 1:
-            leave("Usage: relay.py herdr read AGENT [--machine NAME] [--lines N]")
+        source = take_option(args, "--source")
+        if len(args) != 1 or source not in (None, "recent-unwrapped", "visible"):
+            leave("Usage: relay.py herdr read AGENT [--machine NAME] [--lines N] [--source visible|recent-unwrapped]")
         try:
             info = herdr.call(machine, "agent", "get", args[0])["agent"]
-            screen = herdr.read_screen(machine, args[0], lines)
+            screen = herdr.read_screen(machine, args[0], lines, source=source,
+                                       blocked=info.get("agent_status") == "blocked")
         except herdr.Failed as error:
             leave(f"Rook could not read {args[0]}: {error}")
         print(f"{herdr.target(info)} ({info.get('agent') or '?'}) is {info.get('agent_status') or 'unknown'} in "
               f"{herdr.short_path(info.get('foreground_cwd') or info.get('cwd'))}.")
         print(screen or "Its screen is empty.")  # A pane's words are data: never rendered.
+        return
+    if verb == "configure":
+        model = take_option(args, "--model")
+        effort = take_option(args, "--effort")
+        if len(args) != 1 or (model is None and effort is None):
+            leave("Usage: relay.py herdr configure AGENT [--machine NAME] [--model MODEL] [--effort LEVEL]")
+        try:
+            print(herdr.configure_codex(machine, args[0], model, effort))
+        except herdr.Failed as error:
+            leave(str(error))
         return
     if verb in ("send", "start") and args:
         kind = take_option(args, "--kind") if verb == "start" else None
@@ -2002,7 +2017,7 @@ def herdr_command(argv):
             except herdr.Failed as error:
                 if error.code == "agent_not_ready":
                     try:
-                        held = herdr.dialog(herdr.read_screen(machine, error.name, 15))
+                        held = herdr.dialog(herdr.read_screen(machine, error.name, 32, blocked=True))
                     except herdr.Failed:
                         held = None
                     leave(f"Herdr started {error.name}, but it " + ("asks whether its folder is trusted" if held ==
@@ -2024,7 +2039,8 @@ def herdr_command(argv):
         except herdr.Failed as error:
             leave(f"{error}.")
         return
-    leave("Usage: relay.py herdr agents | read AGENT | send AGENT TEXT | start FOLDER --kind KIND TEXT | install [--dry-run]")
+    leave("Usage: relay.py herdr agents | read AGENT | send AGENT TEXT | configure AGENT --model MODEL or --effort LEVEL "
+          "| start FOLDER --kind KIND TEXT | install [--dry-run]")
 
 
 def pi_command(argv):
@@ -3378,17 +3394,28 @@ if agents is None:
 verb = args[:2]
 if verb == ["agent", "list"]:
     out({"agents": list(agents.values()), "type": "agent_list"})
+if verb in (["agent", "get"], ["agent", "prompt"], ["agent", "read"]) and args[2] not in agents:
+    args[2] = next((name for name, agent in agents.items() if agent.get("pane_id") == args[2]), args[2])
 if verb in (["agent", "get"], ["agent", "prompt"]) and args[2] not in agents:
     err("agent_not_found", "agent target " + args[2] + " not found")
 if verb == ["agent", "get"]:
     out({"agent": agents[args[2]], "type": "agent_info"})
 if verb == ["agent", "read"]:  # Like Herdr, only the last --lines lines.
-    screen = state.get("screens", {}).get(args[2], state.get("screen", "")).split("\\n")
+    source = args[args.index("--source") + 1]
+    if source == "recent-unwrapped" and args[2] in state.get("blocked_reads", []):
+        err("agent_not_idle", "the pane is blocked")
+    default = state.get("screens", {}).get(args[2], state.get("screen", ""))
+    screen = (state.get("visible_screens", {}).get(args[2], default) if source == "visible" else default).split("\\n")
     print("\\n".join(screen[-int(args[args.index("--lines") + 1]):]))
     sys.exit(0)
 if verb == ["agent", "prompt"]:
     if state.get("prompt", "ok") != "ok":
         err(state["prompt"], "the connection dropped")
+    if args[3].startswith("/model "):
+        screen = state.setdefault("screens", {}).get(args[2], "")
+        state["screens"][args[2]] = screen + "\\n" + state.get("model_confirmation", "")
+        (base / "state.json").write_text(json.dumps(state))
+        out({"type": "agent_prompted"})
     agents[args[2]].update(agent_status="working", state_change_seq=agents[args[2]]["state_change_seq"] + 1)
     out({"type": "agent_prompted"})
 if verb == ["workspace", "list"]:
@@ -3561,10 +3588,18 @@ def check_herdr():
             assert key not in watcher.entries
             watcher.add("herdr:fake2", here, "fake2")
             assert poll(fake2=agent("fake2", "working", 7)) is None and watcher.entries[(here, "herdr:fake2")]["since"] == 7
+            fake(screens={"fake2": ""}, visible_screens={"fake2": ""})
             text, delivered, _ = poll(fake2=agent("fake2", "blocked", 8))
-            assert text.startswith(settings.render(watch.ANSWER)) and " it in Herdr" in text and "Never send it keys" in text, text
+            assert text.startswith(settings.render(watch.ANSWER)) and "nothing readable yet" in text, text
             delivered()
             assert poll(fake2=agent("fake2", "blocked", 8)) is None and (here, "herdr:fake2") in watcher.entries
+            modal = "Would you like to run the following command?\n  git status\n\n› 1. Yes\n  2. No"
+            fake(visible_screens={"fake2": modal + "\n" * 50})
+            text, delivered, source = poll(fake2=agent("fake2", "blocked", 8))
+            assert "git status" in text and "Never send it keys" in text and source["report"] == modal, text
+            delivered()
+            assert poll(fake2=agent("fake2", "blocked", 8)) is None
+            fake(screens={}, visible_screens={})
             text, delivered, _ = poll(fake2=agent("fake2", "done", 10))
             assert "finished its turn" in text
             delivered()
@@ -3636,6 +3671,25 @@ def check_herdr():
         code, out = run("herdr", "read", "cx", "--lines", "3")
         assert code == 0 and out.endswith("• The current branch is main.\n  Worked for 4s • 3:36 PM\n"), repr(out)
         assert "Yes, I trust this folder" in herdr.screen_tail(trust, 15)  # A dialog is kept whole.
+        fake(machines={"local": {"cl": agent("cl", "blocked", 4, "claude")}},
+             visible_screens={"cl": "Old history\n" + modal + pad}, blocked_reads=["cl"])
+        code, out = run("herdr", "read", "cl", "--lines", "3", "--source", "recent-unwrapped")
+        assert code == 0 and "git status" in out and "Old history" not in out, out
+        fake(visible_screens={"cl": ""}, screens={"cl": modal})
+        assert "git status" in run("herdr", "read", "cl", "--lines", "3")[1]
+        assert json.loads(calls.read_text().splitlines()[-1])[4] == "detection"
+        fake(machines={"local": {"cx": agent("cx", "done", 3, "codex")}}, blocked_reads=[],
+             screens={"cx": codex_idle}, visible_screens={"cx": "› draft in progress"})
+        assert "empty Codex composer" in run("herdr", "configure", "cx", "--effort", "low")[1]
+        assert prompts("w1:p1") == 0
+        fake(visible_screens={"cx": codex_idle}, model_confirmation="• Model changed to model-x low for this session only.")
+        assert run("herdr", "configure", "cx", "--effort", "low") == (0, "Codex in w1:p1 is using model-x at low effort.\n")
+        assert prompts("w1:p1") == 1
+        fake(model_confirmation="")
+        code, out = run("herdr", "configure", "cx", "--model", "model-x", "--effort", "low")
+        assert code == 1 and "did not confirm" in out and prompts("w1:p1") == 2, out
+        fake(machines={"local": {"cl": agent("cl", "idle", 3, "claude"), "cx": agent("cx", "done", 3, "codex")}},
+             screens={"cl": claude_idle, "cx": codex_idle}, visible_screens={})
         # Bugs 2 and 7: an idle agent at a dialog is blocked. A send types nothing into it and records no intent.
         rows = len(herdr.records(sends))
         for screen, words in ((trust, "asks whether its folder is trusted"), (auto_modal, "waits at a dialog")):

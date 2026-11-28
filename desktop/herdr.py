@@ -90,8 +90,12 @@ def agent_line(info, where):
 SCREEN_LINES = 200  # Claude Code and Codex pad blank lines above their bottom box, so a read takes this many.
 RULE = re.compile(r"[─━]{8,}")
 # The bottom hint of a dialog that waits for a choice. Herdr may read such a dialog as idle.
-DIALOG = re.compile(r"esc to cancel|enter to (confirm|continue)|to choose\b|to select\b", re.I)
+DIALOG = re.compile(r"esc(?:ape)? to (?:cancel|dismiss)|enter to (?:confirm|continue|approve)|to choose\b|to select\b",
+                    re.I)
 TRUST = re.compile(r"one you trust|trust (this|the) (folder|files|contents|directory)", re.I)
+APPROVAL = re.compile(r"would you like to run|do you want to (?:run|allow|proceed)|"
+                      r"approval (?:required|requested|needed)|requires (?:your )?approval|permission (?:request|required)|"
+                      r"approve (?:this|the) (?:command|tool|action)", re.I)
 
 
 def dialog(tail):
@@ -102,9 +106,8 @@ def dialog(tail):
     return "trust" if TRUST.search("\n".join(lines[-15:])) else "dialog"
 
 
-def screen_tail(text, lines):
-    """The last lines of a pane's text, without trailing space, runs of blank lines, the blank padding at the bottom
-    and the input box and footer of Claude Code or Codex, at most settings.READBACK_LIMIT characters. A dialog is kept whole."""
+def screen_tail(text, lines, blocked=False):
+    """Clean the pane text, preserving the heading and command of a blocked approval."""
     kept = []
     for line in (text or "").splitlines():
         line = line.rstrip()
@@ -112,7 +115,13 @@ def screen_tail(text, lines):
             kept.append(line)
     while kept and not kept[-1]:
         kept.pop()
-    if not dialog("\n".join(kept[-15:])):
+    if blocked:
+        prompt = next((i for i in range(len(kept) - 1, max(-1, len(kept) - 61), -1)
+                       if APPROVAL.search(kept[i])), None)
+        if prompt is not None:
+            head = "\n".join(kept[prompt:prompt + lines]).strip()
+            return head[:settings.READBACK_LIMIT]
+    elif not dialog("\n".join(kept[-15:])):
         # Claude Code's input box starts with ❯ under a rule, and Codex's with ›. The footer follows it.
         for at in range(len(kept) - 1, max(len(kept) - 8, 0) - 1, -1):
             mark = kept[at].lstrip()[:1]
@@ -123,10 +132,27 @@ def screen_tail(text, lines):
     return tail if len(tail) <= settings.READBACK_LIMIT else "..." + tail[-settings.READBACK_LIMIT:]
 
 
-def read_screen(machine, agent, lines, timeout=SECONDS):
-    """The end of an agent's screen, as screen_tail gives it. relay.py and the watcher both read through here."""
-    return screen_tail(call(machine, "agent", "read", agent, "--source", "recent-unwrapped", "--lines",
-                            str(max(lines, SCREEN_LINES)), raw=True, timeout=timeout), lines)
+def read_screen(machine, agent, lines, timeout=SECONDS, *, source=None, blocked=False):
+    """Prefer the visible pane for a blocked agent and share one deadline across fallbacks."""
+    preferred = source or ("visible" if blocked else "recent-unwrapped")
+    deadline = time.monotonic() + timeout
+
+    def read(view, preserve_prompt):
+        count = max(lines, SCREEN_LINES) if preserve_prompt or view == "recent-unwrapped" else lines
+        screen = call(machine, "agent", "read", agent, "--source", view, "--lines", str(count),
+                      raw=True, timeout=max(0.1, deadline - time.monotonic()))
+        return screen_tail(screen, lines, blocked=preserve_prompt)
+
+    try:
+        text = read(preferred, blocked)
+    except Failed as error:
+        if preferred != "recent-unwrapped" or error.code != "agent_not_idle" or time.monotonic() >= deadline:
+            raise
+        text = read("visible", True)
+        blocked = True
+    if not text and blocked and source is None and time.monotonic() < deadline:
+        return read("detection", True)
+    return text
 
 
 def sends_path():
@@ -266,6 +292,57 @@ def free_name(base, taken):
 # Each agent's own effort flag, and the levels its CLI takes: claude --help, and Codex's model_reasoning_effort.
 EFFORTS = {"claude": (["--effort", "{}"], ("low", "medium", "high", "xhigh", "max")),
            "codex": (["-c", "model_reasoning_effort={}"], ("low", "medium", "high", "xhigh", "max", "ultra"))}
+
+CODEX_MODEL = r"[A-Za-z0-9][A-Za-z0-9._:/-]*"
+CODEX_MODEL_CONFIRMATION = re.compile(
+    rf"(?m)^\s*• Model changed to ({CODEX_MODEL})(?: ([a-z]+))? for this session only\.?[ \t]*$")
+
+
+def configure_codex(machine, agent, model=None, effort=None):
+    """Change one idle Codex session through its inline /model command and verify the transcript."""
+    if model is None and effort is None:
+        raise Failed("Give a model, a reasoning effort, or both.", "usage")
+    if model is not None and not re.fullmatch(CODEX_MODEL, model):
+        raise Failed("Give a Codex model ID without spaces or flags.", "usage")
+    if effort is not None and effort not in ("none", "minimal", *EFFORTS["codex"][1]):
+        raise Failed("Codex effort must be none, minimal, low, medium, high, xhigh, max, or ultra.", "usage")
+    info = call(machine, "agent", "get", agent)["agent"]
+    if info.get("agent") != "codex" or info.get("agent_status") not in READY:
+        raise Failed("Choose an idle or done Codex pane.")
+    pane = info["pane_id"]
+    read = ("agent", "read", pane)
+    transcript = (*read, "--source", "recent-unwrapped", "--lines", str(SCREEN_LINES))
+    before = call(machine, *transcript, raw=True)
+    visible = call(machine, *read, "--source", "visible", "--lines", "30", raw=True)
+    composer = next((line.strip() for line in reversed(visible.splitlines()) if line.lstrip().startswith("›")), "")
+    if composer != "› Ask Codex to do anything" or dialog(visible):
+        raise Failed("Rook could not verify an empty Codex composer. Clear any draft or dialog in that pane first.")
+    current = call(machine, "agent", "get", pane)["agent"]
+    if (current.get("agent") != "codex" or current.get("agent_status") not in READY
+            or current.get("state_change_seq") != info.get("state_change_seq")):
+        raise Failed("The pane changed while Rook was checking it. Try again when it is idle.")
+    command = " ".join(("/model", *([model] if model else []), *([f"--reasoning={effort}"] if effort else [])))
+    try:
+        call(machine, "agent", "prompt", pane, command)
+    except Failed as error:
+        if error.code in NOT_SENT or error.code == "usage":
+            raise
+        raise Failed(f"The outcome of the Codex settings command is unknown. Check /status in {pane}.") from error
+    old = CODEX_MODEL_CONFIRMATION.findall(before)
+    deadline = time.monotonic() + 4  # The local slash command needs no model turn.
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            after = call(machine, *transcript, raw=True, timeout=remaining)
+        except Failed:
+            break
+        confirmations = CODEX_MODEL_CONFIRMATION.findall(after)
+        for changed in reversed(confirmations):
+            actual_model, actual_effort = changed
+            if ((not model or model == actual_model) and (not effort or effort == actual_effort)
+                    and confirmations.count(changed) > old.count(changed)):
+                return f"Codex in {pane} is using {actual_model}" + (f" at {actual_effort} effort." if actual_effort else ".")
+        time.sleep(min(0.15, remaining))
+    raise Failed(f"Codex did not confirm the requested change. Check /status in {pane} before retrying.")
 
 
 def start(machine, folder, kind, name=None, model=None, effort=None):

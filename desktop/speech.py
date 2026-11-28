@@ -256,11 +256,10 @@ def respell(text, engine="small"):
 
 def load(args):
     """Return the sample rate and a function that yields s16 audio chunks for a text until stopped."""
-    # Two threads each, so speech does not steal CPU from the game.
     if args.engine in ("phonon", "qwen"):
         import numpy as np
         import ptts
-        ptts.set_num_threads(2)
+        ptts.set_num_threads(args.threads)
         model = ptts.TTS(args.model, quant="q8", lang="en",  # None is the runtime's pinned phonon-31m-en.
                          temperature=args.temperature, conditions={"duration_delta": args.pace} if args.pace else None)
         voice = args.voice or "Miles"
@@ -278,7 +277,7 @@ def load(args):
         return model.sample_rate, generate
     import torch
     from pocket_tts import TTSModel
-    torch.set_num_threads(2)
+    torch.set_num_threads(args.threads)
     model = TTSModel.load_model(language=args.model or "english_7m_2026-10", quantize=args.int8)
     voice = model.get_state_for_audio_prompt(args.voice or "alba")
 
@@ -913,6 +912,8 @@ def main():
     parser.add_argument("--check-words", action="store_true", help="Check speech respellings and exit.")
     parser.add_argument("--engine", choices=("pocket", "phonon", "qwen"), default="pocket",
                         help="qwen speaks through the medium voice server, with Phonon and --voice as its fallback.")
+    parser.add_argument("--threads", type=int, choices=range(1, 17), default=2,
+                        help="Local speech synthesis threads for Phonon, Pocket TTS and the qwen fallback.")
     parser.add_argument("--url", help="qwen only. The medium voice server, such as https://voice.example:8090.")
     parser.add_argument("--voice-medium", default="jarvis-poe", help="qwen only. The medium voice server's voice.")
     parser.add_argument("--model", help="Default: english_7m_2026-10 for Pocket TTS, phonon-31m-en for Phonon.")

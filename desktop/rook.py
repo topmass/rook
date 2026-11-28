@@ -2341,8 +2341,11 @@ def _build_threads_prompt_section():
 class Companion:
     perf_log = None
     perf_log_path = None
-    perf_logging = "on"
+    perf_logging = relay.settings.PERF_LOGGING
     recogniser_threads = 2
+    tts_threads = relay.settings.TTS_THREADS
+    smart_turn_threads = relay.settings.SMART_TURN_THREADS
+    mac_focus_item = None
     diagram_names = ()  # The labels of the diagram shown in this turn, for lighting each node as the voice names it.
     diagram_seen = frozenset()  # The nodes the voice has named so far.
     mailbox_down = False  # Whether the last mailbox call failed, so an outage logs one line.
@@ -2655,9 +2658,11 @@ class Companion:
         self.exit = asyncio.Event()
         # The main agent, chosen once per start by the agent settings. With none, it is Claude Code as always.
         saved_settings = relay.read_settings()[0]
-        self.perf_logging = saved_settings.get("perf_logging", "on")
+        self.perf_logging = saved_settings.get("perf_logging", relay.settings.PERF_LOGGING)
         self.perf_log_path = relay.settings.perf_log_path_in_force(saved_settings)[0]
         self.recogniser_threads = saved_settings.get("recogniser_threads", 2)
+        self.tts_threads = saved_settings.get("tts_threads", relay.settings.TTS_THREADS)
+        self.smart_turn_threads = saved_settings.get("smart_turn_threads", relay.settings.SMART_TURN_THREADS)
         os.environ["AIRTYPE_SHERPA_THREADS"] = str(self.recogniser_threads)
         if self.perf_logging == "on":
             import perf
@@ -2832,7 +2837,7 @@ class Companion:
             elif trace := self.perf_log.turns.get(fields.get("turn")):
                 fields["request_id"] = trace.request_id
         level = ("error" if fields.get("error") or event.endswith("_error") else
-                 "warning" if event.endswith(("_failed", "_stalled", "_dropped", "_late")) else "info")
+                 "warning" if event.endswith(("_failed", "_stalled", "_dropped", "_late", "_disabled")) else "info")
         row = {"at": datetime.now(timezone.utc).isoformat(), "session": self.session,
                "level": level, "event": event, **fields}
         try:
@@ -4687,6 +4692,8 @@ class Companion:
             if voice is not self.voice:
                 continue
             if self.perf_log is not None and message.get("event") in (None, "start", "tts_begin", "tts_pcm"):
+                if message.get("event") in (None, "start"):
+                    self.mac_focus_boundary(message.get("id"), starting=message.get("event") == "start")
                 self.perf_log.speech_event(message)
                 if message.get("event") in ("tts_begin", "tts_pcm"):
                     continue
@@ -4783,6 +4790,7 @@ class Companion:
             self.reveal_scene(self.staged, fallback=True)
         if voice is self.voice:
             if self.perf_log is not None:
+                self.mac_focus_boundary(self.mac_focus_item, starting=False)
                 self.perf_log.cancel_audio("worker_closed")
             self.flush_pending_timing()
         if voice is self.voice and self.playing:  # A worker that closed plays nothing more.
@@ -4897,7 +4905,7 @@ class Companion:
         engine = (["--engine", "qwen", "--url", med_url, "--voice-medium", values["voice_medium"]]
                   if values.get("voice_engine") == "medium" and med_url else ["--engine", "phonon"])
         voice = await asyncio.create_subprocess_exec(
-            str(voice_python), str(ROOT / "desktop/speech.py"), *engine,
+            str(voice_python), str(ROOT / "desktop/speech.py"), *engine, "--threads", str(self.tts_threads),
             "--volume", str(values["voice_volume"]), "--pace", str(values["voice_pace"]),
             "--temperature", str(values["voice_temperature"]), *model,
             "--voice", values["voice"], stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
@@ -4945,6 +4953,8 @@ class Companion:
                                                                "source": "running"},
                                              "recogniser_threads": {"value": self.recogniser_threads,
                                                                     "source": "running"},
+                                             "tts_threads": {"value": self.tts_threads, "source": "running"},
+                                             "smart_turn_threads": {"value": self.smart_turn_threads, "source": "running"},
                                              "font": {"value": font, "source": source},
                                              "light_dust": {"value": dust, "source": dust_source},
                                              "theme": {"value": theme_pack, "source": theme_source},
@@ -5020,6 +5030,8 @@ class Companion:
                 while (self.voice_id or self.voice_texts) and time.monotonic() - waited < 60:
                     await asyncio.sleep(0.1)
                 self.stop_voice()
+                if self.mac_focus_item is not None:
+                    self.mac_focus_boundary(self.mac_focus_item, starting=False)
                 old, self.voice = self.voice, new
                 if self.playing:  # The old worker's end reports go unread now, so its speech ends here.
                     self.playing.clear()
@@ -6478,7 +6490,7 @@ class Companion:
         if turn_end is None:
             return None, "unavailable:module_missing"
         if self.turn_detector is None:
-            self.turn_detector = turn_end.SmartTurnDetector()
+            self.turn_detector = turn_end.SmartTurnDetector(intra_op_num_threads=self.smart_turn_threads)
         det = self.turn_detector
         if not isinstance(det, turn_end.SmartTurnDetector):
             return (det, "on") if det.available() else (det, "unavailable:detector_unavailable")
@@ -8217,8 +8229,28 @@ class Companion:
         self.log("approval_voice", allowed=allowed)
         return True
 
+    def mac_focus_boundary(self, item, *, starting):
+        helper = getattr(self, "mac_helper", None)
+        if helper is None or item is None:
+            return
+        if starting:
+            self.mac_focus_item = item
+        elif self.mac_focus_item == item:
+            self.mac_focus_item = None
+        else:
+            return
+        if helper.returncode is not None or helper.stdin.is_closing():
+            return
+        trace = self.perf_log.audio.get(item) if self.perf_log is not None and starting else None
+        try:
+            send(helper, {"event": "focus_snapshot", "phase": "speech_start" if starting else "speech_end",
+                          "speech_id": item, "turn": trace.turn if trace else None,
+                          "request_id": trace.request_id if trace else None})
+        except OSError:
+            pass  # A closing helper cannot interrupt speech.
+
     async def read_mac_helper(self, helper_proc):
-        """Route the helper's talk keys and explicit approval clicks from its private pipe."""
+        """Route the helper's talk keys, approval clicks and diagnostics from its private pipe."""
         router = self.make_mac_talk_router()
         while helper_proc.stdout is not None:
             raw = await helper_proc.stdout.readline()
@@ -8230,19 +8262,30 @@ class Companion:
                 continue
             if not isinstance(event, dict):
                 continue
-            if event.get("type") in ("keys_ready", "keys_unavailable"):
+            kind = event.get("type")
+            if kind in ("keys_ready", "keys_unavailable"):
                 self.mac_keys = event  # relay.py verify's keys row reads it through probe keys.
-            elif event.get("type") == "talk_key":
+            elif kind == "talk_key":
                 self.last_key = time.monotonic()
                 self.save_presence()
                 router.handle(event)
-            elif event.get("type") == "approval":
+            elif kind == "approval":
                 card, allowed = event.get("card"), event.get("allow")
                 if not isinstance(card, str) or not isinstance(allowed, bool):
                     continue
                 if allowed and self.permission and self.permission["request"]["tool_name"] == "AskUserQuestion":
                     continue
                 self.answer_permission(allowed, card=card)
+            elif self.perf_log is not None and kind in (
+                    "mac_focus_changed", "mac_speech_focus", "mac_event_tap_disabled"):
+                fields = ("reason", "native_at", "speech_id", "turn", "request_id", "frontmost_bundle", "frontmost_pid",
+                          "rook_active", "rook_key_window", "rook_main_window", "panel_key", "panel_visible", "tap_enabled")
+                details = {key: event[key] for key in fields if key in event}
+                if kind == "mac_event_tap_disabled" and (item := self.mac_focus_item):
+                    details["speech_id"] = item
+                    if trace := self.perf_log.audio.get(item):
+                        details["turn"], details["request_id"] = trace.turn, trace.request_id
+                self.log(kind, **details)
 
     async def run(self):
         # Restore any music left ducked by an earlier crash first, before voice, socket, or agent launch.
@@ -8532,6 +8575,8 @@ class Companion:
                 helper_args = [str(mac_helper_path), "--url", f"http://127.0.0.1:{self.phone.server.port}/presence"]
                 if getattr(self.args, "keys", False):
                     helper_args.append("--enable-keys")
+                if self.perf_log is not None:
+                    helper_args.append("--focus-diagnostics")
                 self.mac_helper = await asyncio.create_subprocess_exec(
                     *helper_args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env=helper_env
                 )
@@ -8553,7 +8598,8 @@ class Companion:
         ):
             self.keep("desktop start", lambda: self.watch_desktop_start(start_state), optional=True)
         self.log("service_started", agent=self.agent_name, model=self.harness.model, effort=self.harness.effort,
-                 perf_logging=self.perf_logging, recogniser_threads=self.recogniser_threads)
+                 perf_logging=self.perf_logging, recogniser_threads=self.recogniser_threads,
+                 tts_threads=self.tts_threads, smart_turn_threads=self.smart_turn_threads)
         print(f"Rook is ready. {hint}", flush=True)
         if _desk.IS_MAC:
             start_limit.cleared()  # A good start: the failed ones before it no longer count.

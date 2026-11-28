@@ -11,8 +11,9 @@ Herdr runs coding agents in terminal panes, on this machine and on saved Herdr m
 ## Commands
 
 - `relay.py herdr agents` lists every agent: name, kind, state, folder and machine.
-- `relay.py herdr read AGENT [--machine NAME] [--lines N]` gives the agent's state and the end of its screen.
+- `relay.py herdr read AGENT [--machine NAME] [--lines N]` gives the agent's state and screen, including a visible approval if it is blocked.
 - `relay.py herdr send AGENT [--machine NAME] "<text>"` sends one message.
+- `relay.py herdr configure AGENT [--machine NAME] [--model MODEL] [--effort LEVEL]` changes an idle Codex session when ⟦owner⟧ explicitly asks. Resolve the exact pane and model ID first. Pass only the settings ⟦owner⟧ named. Report what Codex confirms. Ask ⟦owner⟧ to check Codex if the result is uncertain.
 - `relay.py herdr start <folder> --kind claude|codex|pi|... [--model MODEL] [--effort LEVEL] [--name NAME] "<first prompt>"` starts the agent without focus, in a new tab of the folder's Herdr workspace or in a new workspace, and sends the first prompt. Only claude and codex take `--effort`. On a saved machine, give the folder as an absolute path or one that starts with `~/`.
 - `relay.py pi sessions` and `relay.py pi read <session id>` read Pi's saved sessions. They never change them. A live Pi agent runs inside Herdr: start it with `--kind pi`.
 

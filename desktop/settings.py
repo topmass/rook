@@ -106,12 +106,15 @@ SPEAK_THOUGHTS_MODES = ("off", "beats", "thoughts", "both")
 SPEAK_THOUGHTS = "off"
 # 0.75 avoids coin-flip mid-clause cutoffs while keeping finished turns fast.
 SMART_TURN_THRESHOLD = 0.75
+SMART_TURN_THREADS = 2  # ONNX threads within a single Smart Turn inference.
 # Longest single recording in minutes before Rook stops and sends it. Applies to the next recording.
 RECORDING_MINUTES_RANGE = (1, 30)
 RECORDING_MINUTES = 10
 # Rook's two voices: small is Phonon on this computer, and medium is a remote Qwen3-TTS GPU server.
 # No default server address is shipped in code: configure medium_voice_url in settings.json or ROOK_MEDIUM_VOICE_URL.
 VOICE_ENGINES = ("small", "medium")
+TTS_THREADS = 2  # Local speech synthesis, including the medium voice's fallback.
+PERF_LOGGING = "off"
 MEDIUM_VOICE_URL = os.environ.get("ROOK_MEDIUM_VOICE_URL", "").strip().rstrip("/")
 # The two speech-to-text models a public install offers, by AirType model name. Unset keeps AirType's own choice.
 RECOGNISER_MODELS = {"en": "parakeet-unified-en-0.6b-int8", "multi": "parakeet-tdt-0.6b-v3-int8"}
@@ -123,7 +126,7 @@ SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "them
             "stage", "listen_after", "smart_turn", "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
-            "recogniser_model", "recogniser_threads", "perf_logging", "perf_log_path")
+            "recogniser_model", "recogniser_threads", "tts_threads", "smart_turn_threads", "perf_logging", "perf_log_path")
 CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
 # The text fields a build thread entry may hold when it is an object: its id, and what started it.
 BUILD_THREAD_FIELDS = ("thread", "machine", "provider", "model", "effort", "subagents")
@@ -183,7 +186,7 @@ def valid(data):
         elif (key == "recording_minutes" and isinstance(value, int) and not isinstance(value, bool)
               and RECORDING_MINUTES_RANGE[0] <= value <= RECORDING_MINUTES_RANGE[1]):
             found[key] = value
-        elif key == "recogniser_threads" and type(value) is int and 1 <= value <= 16:
+        elif key in ("recogniser_threads", "tts_threads", "smart_turn_threads") and type(value) is int and 1 <= value <= 16:
             found[key] = value
         elif key == "perf_logging" and value in ("on", "off"):
             found[key] = value

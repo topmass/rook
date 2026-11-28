@@ -157,7 +157,7 @@ RELAY_PROMPT = ("timer ", "remember ")
 RELAY_OWNER = ("device pair", "device list")
 # relay.py's guarded sends to Herdr agents pass with no card here, like a thread send (SENDS below). They stay out
 # of the skill's allowed-tools: under Claude Code they meet the person's own permission mode, as a T3 send does.
-RELAY_SENDS = ("herdr send ", "herdr start ")
+RELAY_SENDS = ("herdr send ", "herdr start ", "herdr configure ")
 _OPTIONAL_SKILL_RELAY = {"wow": ("wow-note ", "wow-data ", "clip ")}
 
 
@@ -1215,7 +1215,7 @@ def check():
     skills = {found.group(1) for base in (ROOT / "skills", ROOT / "wow/skills", *ROOT.glob("plugins/*/skills"))
               if base.is_dir() for path in base.glob("*/SKILL.md")
               for line in path.read_text().splitlines() if line.startswith("allowed-tools:")
-              for found in re.finditer(r"relay\.py ([^)*]*)\*?\)", line)}
+              for found in re.finditer(r'relay\.py"? ([^)*]*)\*?\)', line)}
     active_relay = _active_relay_skills()
     assert skills == set(active_relay), (skills ^ set(active_relay))
     # Rook pairs the owner's phone and lists their devices when they ask; unpairing one stays a card.
@@ -1229,7 +1229,8 @@ def check():
     assert [bash(f"{relay} {c}") for c in ("herdr agents", "herdr read fixer --lines 20", "pi sessions --limit 5",
                                            "pi read 01a1", "herdr send fixer 'Carry on.'",
                                            "herdr send fixer - <<'EOF'\nCarry on.\nEOF",
-                                           "herdr start ~/Code/x --kind pi 'Begin.'")] == ["allow"] * 7
+                                           "herdr start ~/Code/x --kind pi 'Begin.'",
+                                           "herdr configure fixer --effort low")] == ["allow"] * 8
     assert bash(f"{relay} herdr keys fixer y") == "ask"
     assert [bash(f"{relay} {c}") for c in ("note gone", "ask x", "handoff -", "tell x", "darkness", "settle x", "dream",
                                            "memory install-shared", "memory remove-shared",
