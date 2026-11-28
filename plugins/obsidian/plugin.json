@@ -1,0 +1,11 @@
+{
+  "name": "Obsidian",
+  "version": "0.1.0",
+  "description": "Append explicitly dictated notes to a dedicated folder in an Obsidian vault.",
+  "activation": "opt-in",
+  "skills": ["skills"],
+  "commands": {
+    "module": "commands.py",
+    "names": ["obsidian-note"]
+  }
+}

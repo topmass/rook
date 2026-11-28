@@ -736,7 +736,10 @@ def check():
                        "skill routing, browser link launcher, terminal folder lookup, and desktop confirmations.")
         herdr_off = ("herdr: off, its setup was not found on this computer. Herdr hand-offs: coding agents in Herdr's "
                      "terminal panes, here and on saved Herdr machines, and Pi's saved sessions.")
-        assert relay("plugin", "list") == (0, f"{herdr_off}\n{omarchy_off}\nfixture: off, a plugin you add stays off until you "
+        obsidian_off = ("obsidian: off, off by default. Append explicitly dictated notes to a dedicated folder in an "
+                        "Obsidian vault.")
+        bundled_off = f"{herdr_off}\n{obsidian_off}\n{omarchy_off}\n"
+        assert relay("plugin", "list") == (0, bundled_off + "fixture: off, a plugin you add stays off until you "
                                               "turn it on. A plugin written without editing Rook.\n")
         assert surface() == bare and relay("--help")[1] == bare_help
         assert relay("fixture-hello")[0] != 0
@@ -845,7 +848,7 @@ def check():
         started = time.monotonic()
         code, listing = relay("plugin", "check")
         assert time.monotonic() - started < 20, "a FIFO made the plugin check wait"
-        assert code == 1 and listing.startswith(f"{herdr_off}\n{omarchy_off}\nfixture: on, turned on in settings."), listing
+        assert code == 1 and listing.startswith(bundled_off + "fixture: on, turned on in settings."), listing
         for pid, words in (("dotdot", "must be a plain path"), ("absolute", "must be a plain path"),
                            ("escape", "leads outside the plugin folder"), ("dupget", "the command get is already Rook's"),
                            ("dupskill", "the skill settings is already Rook's"), ("badjson", "is not valid JSON"),
