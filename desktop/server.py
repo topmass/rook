@@ -1,6 +1,7 @@
 """The small HTTP/1.1 server for Rook's phone app, built on asyncio streams and the standard library.
 
-The server binds to 127.0.0.1 only. It enforces strict HTTP/1.1 framing, Host and Origin checks, and device cookies.
+The server binds to 127.0.0.1 only, unless it is given a home LAN address too (lan). It enforces strict HTTP/1.1
+framing, Host and Origin checks, and device cookies.
 It knows nothing about Rook beyond the small session interface below.
 
 Session interface (methods may be sync or async unless noted):
@@ -242,6 +243,7 @@ class _Request:
     content_length: int | None
     extra: bytearray
     start: float
+    lan: bool = False  # It came over the home LAN, in plain HTTP, to the address it names in Host.
 
 
 def _sha256(value: str) -> str:
@@ -554,7 +556,7 @@ async def _call_session(func: Callable[..., Any], *args: Any) -> Any:
 
 
 class Server:
-    """Asyncio HTTP/1.1 server for Rook's phone app, bound to 127.0.0.1 only."""
+    """Asyncio HTTP/1.1 server for Rook's phone app, bound to 127.0.0.1, and to a LAN address only when given one."""
 
     def __init__(
         self,
@@ -587,6 +589,8 @@ class Server:
         pair_on_loopback: bool = False,
         local_token: str | None = None,
         themes_dir: str | Path = DEFAULT_THEMES_DIR,
+        lan: str | None = None,
+        lan_port: int | None = None,
     ) -> None:
         self.session = session
         self.store = store
@@ -597,6 +601,11 @@ class Server:
         # Optional per-process loopback token for read-only desktop presence helpers (/snapshot and /events only).
         self.local_token = local_token
         self.themes_dir = Path(themes_dir)
+        # A device with no tailnet, such as a Steam Deck at home, reaches Rook over the LAN in plain HTTP: the server
+        # then listens on this IPv4 address too, or on every address with 0.0.0.0, on lan_port or else the loopback
+        # port. A LAN connection is accepted only with the Host of the address and port it came to, and its http Origin.
+        self.lan, self.lan_port = lan, lan_port
+        self._lan_server: asyncio.Server | None = None
         self.requested_port = port
         self.port = port
         self.static_dir = Path(static_dir)
@@ -632,19 +641,26 @@ class Server:
         self._audio_in_flight = 0
 
     async def start(self) -> Server:
-        """Bind to 127.0.0.1 and start accepting HTTP/1.1 connections."""
+        """Bind to 127.0.0.1, and the LAN address when given, and start accepting HTTP/1.1 connections."""
         self._loop = asyncio.get_running_loop()
         self._loop_thread_id = threading.get_ident()
+        hosts = ["127.0.0.1"]
+        if self.lan and not self.lan_port:  # On the same port, 0.0.0.0 holds loopback too: two binds would clash.
+            hosts = [self.lan] if self.lan == "0.0.0.0" else [*hosts, self.lan]
         self._server = await asyncio.start_server(
             self._handle_connection,
-            host="127.0.0.1",
+            host=hosts,
             port=self.requested_port,
             reuse_address=True,
         )
+        if self.lan and self.lan_port:
+            self._lan_server = await asyncio.start_server(
+                self._handle_connection, host=self.lan, port=self.lan_port, reuse_address=True)
         sockets = self._server.sockets
         if not sockets:
             raise RuntimeError("The server socket did not bind.")
-        self.port = sockets[0].getsockname()[1]
+        self.port = next((sock.getsockname()[1] for sock in sockets if sock.getsockname()[0] == "127.0.0.1"),
+                         sockets[0].getsockname()[1])  # With the LAN on port 0, as in a check, each bind has its own.
         self._loopback_host = f"127.0.0.1:{self.port}"
         self._allowed_hosts = {self._loopback_host, *self._extra_hosts}
         return self
@@ -657,10 +673,11 @@ class Server:
     async def close(self) -> None:
         """Stop accepting connections and close every active stream and socket."""
         self.close_streams()
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        for listening in (self._server, self._lan_server):
+            if listening is not None:
+                listening.close()
+                await listening.wait_closed()
+        self._server = self._lan_server = None
         tasks = list(self._connections)
         for task in tasks:
             if not task.done():
@@ -686,8 +703,8 @@ class Server:
         self.close_streams(device_id)
         return revoked
 
-    def _expected_origin(self, host: str) -> str:
-        if host == self._loopback_host or host.startswith("127.0.0.1:"):
+    def _expected_origin(self, host: str, lan: bool = False) -> str:
+        if lan or host == self._loopback_host or host.startswith("127.0.0.1:"):
             return f"http://{host}"
         return f"https://{host}"
 
@@ -704,7 +721,10 @@ class Server:
             return
         self._connections.add(task)
         try:
-            request = await self._read_request(reader)
+            # A connection that came to an address other than loopback came over the LAN, which only lan allows.
+            local = writer.get_extra_info("sockname") or ()
+            lan_host = f"{local[0]}:{local[1]}" if self.lan and len(local) >= 2 and local[0] != "127.0.0.1" else None
+            request = await self._read_request(reader, lan_host)
             if request is None:
                 return
             await self._dispatch(request, reader, writer)
@@ -730,7 +750,7 @@ class Server:
         except Exception:
             pass
 
-    async def _read_request(self, reader: asyncio.StreamReader) -> _Request | None:
+    async def _read_request(self, reader: asyncio.StreamReader, lan_host: str | None = None) -> _Request | None:
         loop = asyncio.get_running_loop()
         start = loop.time()
         header_deadline = start + self.header_timeout
@@ -792,7 +812,7 @@ class Server:
         if len(hosts) != 1 or not hosts[0]:
             raise _HttpError(400, "Send exactly one Host header.")
         host = hosts[0].lower()
-        if host not in self._allowed_hosts:
+        if host not in ({lan_host} if lan_host else self._allowed_hosts):
             if self.on_unknown_host is not None:
                 try:
                     self.on_unknown_host(host)
@@ -828,6 +848,7 @@ class Server:
             content_length=content_length,
             extra=extra,
             start=start,
+            lan=bool(lan_host),
         )
 
     def _parse_request_line(self, raw: bytes) -> tuple[str, str, str]:
@@ -903,7 +924,7 @@ class Server:
 
     def _check_origin(self, request: _Request) -> None:
         origins = request.headers.get("origin", [])
-        expected = self._expected_origin(request.host)
+        expected = self._expected_origin(request.host, request.lan)
         if len(origins) != 1 or origins[0] != expected:
             raise _HttpError(403, "This request came from another site.")
 
@@ -1131,7 +1152,7 @@ class Server:
             except Exception:
                 pass
         cookie = f"{COOKIE_NAME}={token}; Path=/; Max-Age={COOKIE_MAX_AGE}; HttpOnly; SameSite=Strict"
-        if self.secure_cookies:
+        if self.secure_cookies and not request.lan:  # A browser drops a Secure cookie that plain HTTP sets.
             cookie += "; Secure"
         await self._send_json(
             writer,
@@ -1602,8 +1623,9 @@ class _FakeSession:
         return {"open": 1, "items": [{"id": "m1", "kind": "note", "summary": "Hi", "detail": "Test"}]}
 
 
-async def _raw_request(port: int, payload: bytes, *, timeout: float = 3.0) -> tuple[int, dict[str, list[str]], bytes]:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+async def _raw_request(port: int, payload: bytes, *, timeout: float = 3.0,
+                       address: str = "127.0.0.1") -> tuple[int, dict[str, list[str]], bytes]:
+    reader, writer = await asyncio.open_connection(address, port)
     try:
         writer.write(payload)
         await writer.drain()
@@ -2494,11 +2516,77 @@ async def _run_check() -> str:
     return f"HTTP server: all checks passed. Push took {push_ms:.3f} ms and snapshot took {snap_ms:.2f} ms."
 
 
+async def _run_lan_check() -> str:
+    """The opt-in LAN listener. 127.0.0.2 stands in for the LAN address: Linux routes all of 127/8 to loopback."""
+    with tempfile.TemporaryDirectory(prefix="rook-server-lan-") as scratch:
+        store = DeviceStore(Path(scratch) / "devices.db").open()
+        pair_body = lambda code: json.dumps({"code": code, "name": "Steam Deck"}).encode()  # noqa: E731
+
+        def pair(host: str, origin: str, code: str) -> bytes:
+            return (f"POST /pair HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\n"
+                    f"Content-Length: {len(pair_body(code))}\r\n\r\n").encode() + pair_body(code)
+
+        # Off, as by default: the LAN address is not listened on, and its Host is refused over loopback.
+        plain = await Server(_FakeSession(), store, port=0, allowed_hosts=("oak.tail.ts.net",)).start()
+        try:
+            try:
+                await _raw_request(plain.port, f"GET / HTTP/1.1\r\nHost: 127.0.0.2:{plain.port}\r\n\r\n".encode(),
+                                   address="127.0.0.2")
+                raise AssertionError("a server with no LAN address answered on another address")
+            except ConnectionRefusedError:
+                pass
+            status, _, _ = await _raw_request(plain.port,
+                                              f"GET / HTTP/1.1\r\nHost: 127.0.0.2:{plain.port}\r\n\r\n".encode())
+            assert status == 403, status
+        finally:
+            await plain.close()
+
+        # On, with a port of its own and with the loopback port: each LAN connection takes only its own address's Host,
+        # with the http Origin, and pairs with a cookie a browser keeps over plain HTTP.
+        free = socket.socket()
+        free.bind(("127.0.0.2", 0))
+        lan_port = free.getsockname()[1]
+        free.close()
+        for own_port in (lan_port, None):
+            server = await Server(_FakeSession(), store, port=0, allowed_hosts=("oak.tail.ts.net",), lan="127.0.0.2",
+                                  lan_port=own_port).start()
+            try:
+                port = own_port or next(sock.getsockname()[1] for sock in server._server.sockets
+                                        if sock.getsockname()[0] == "127.0.0.2")
+                lan = f"127.0.0.2:{port}"
+                status, _, _ = await _raw_request(port, f"GET / HTTP/1.1\r\nHost: {lan}\r\n\r\n".encode(),
+                                                  address="127.0.0.2")
+                assert status == 200, status
+                for wrong in (f"127.0.0.1:{server.port}", "oak.tail.ts.net", f"127.0.0.3:{port}"):
+                    status, _, _ = await _raw_request(port, f"GET / HTTP/1.1\r\nHost: {wrong}\r\n\r\n".encode(),
+                                                      address="127.0.0.2")
+                    assert status == 403, (wrong, status)
+                status, _, _ = await _raw_request(server.port, f"GET / HTTP/1.1\r\nHost: {lan}\r\n\r\n".encode())
+                assert status == 403, "the LAN Host over loopback"
+                status, _, _ = await _raw_request(port, pair(lan, f"https://{lan}", store.create_code()),
+                                                  address="127.0.0.2")
+                assert status == 403, "an https Origin on the LAN"
+                status, hdrs, body = await _raw_request(port, pair(lan, f"http://{lan}", store.create_code()),
+                                                        address="127.0.0.2")
+                assert status == 200 and json.loads(body)["device"]["name"] == "Steam Deck", (status, body)
+                cookie = hdrs["set-cookie"][0]
+                assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Secure" not in cookie, cookie
+                token = _parse_cookie_value(cookie)
+                status, _, _ = await _raw_request(
+                    port, f"GET /snapshot HTTP/1.1\r\nHost: {lan}\r\nCookie: {COOKIE_NAME}={token}\r\n\r\n".encode(),
+                    address="127.0.0.2")
+                assert status == 200, status
+            finally:
+                await server.close()
+    return "LAN listener: off by default, and when on, its own Host and http Origin only. All checks passed."
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the hermetic check for Rook's HTTP server.")
     parser.add_argument("--check", action="store_true", help="Run the hermetic server check.")
     parser.parse_args()
     print(asyncio.run(_run_check()))
+    print(asyncio.run(_run_lan_check()))
 
 
 if __name__ == "__main__":

@@ -3166,6 +3166,18 @@ class Companion:
             return "Mode: World of Warcraft. Images: none. Screenshots are off in Rook's settings.", []
         return await self.game.screenshots(window)
 
+    async def deck_shots(self, device_id):
+        """--wow: a game request's (label, shots) for a request from this device, when it is the Steam Deck and the game
+        has focus there, as at the desk in the game. None for any other device, or with no Deck set up."""
+        if not (self.game and self.game.deck and self.phone and await self.phone.deck_device(device_id)):
+            return None
+        window = await self.game.deck_window()
+        if not window:
+            return None
+        if self.dark and not DARK_SCREENSHOTS:
+            return await self.no_shots(True)
+        return await self.bounded_shots(self.game_screenshots(window), True)
+
     async def screenshot(self, window):
         """Return (label, shots): the line that says what Claude sees, and the focused window's image,
         or no image when the focused window cannot be identified with certainty."""
@@ -7470,6 +7482,9 @@ class Companion:
         probed_at, locked = None, None
         urgent = media.is_urgent(event, text, extra)
         blocked = media.is_blocked_agent(event, text, extra)  # Goes ahead of routine news, and is never buried.
+        # --wow: a game event seen on the Steam Deck is said there, so the desk's presence, microphone, and videos do
+        # not hold it. The owner is at the Deck, playing.
+        on_deck = event == "event" and extra[2:] == ["deck"]
         video_wait_seq, video_held_since, media_checked_at = None, None, 0.0
         expire_backoff, expire_next_at, expire_fail_logged = 0.0, 0.0, False
         hold_surfaced = False
@@ -7522,7 +7537,7 @@ class Companion:
                 # second here, while the turn waits; the check at the hand-over below reads it again.
                 if probed_at is None or time.monotonic() - probed_at >= 1:
                     probed_at, locked = time.monotonic(), await self.screen_locked()
-                if not self.matt_here(locked):
+                if not (on_deck or self.matt_here(locked)):
                     if event == "nudge":  # A nudge never waits through an absence; the next quiet moment brings it again.
                         return False
                     if held_since is None:
@@ -7558,7 +7573,7 @@ class Companion:
                     continue
                 # Rook speaks unprompted only when no real call holds the microphone.
                 # A timed-out or failed read counts as no call for timers, and as a call for every other event.
-                callers = await self.microphone_busy(MEDIA_MIC_SECONDS)
+                callers = [] if on_deck else await self.microphone_busy(MEDIA_MIC_SECONDS)
                 if callers or (callers is None and event != "timer"):
                     waiting("microphone", **({"callers": callers} if callers else {"unknown": True}))
                     note_hold("microphone")
@@ -7572,7 +7587,7 @@ class Companion:
                     continue
                 # A routine unprompted turn waits while a video plays, until it pauses/stops, the owner speaks, or the bound expires.
                 # All D-Bus media reads and pauses happen here, outside turn_lock, so typed/phone requests never wait on D-Bus.
-                video_released = (self.last_matt_wall > arrived
+                video_released = (on_deck or self.last_matt_wall > arrived
                                   or (video_wait_seq is not None and self.matt_turn_seq > video_wait_seq))
                 paused_entries = []
                 if urgent:
@@ -7620,7 +7635,7 @@ class Companion:
                 async with self.turn_lock:  # Held from the last checks to the submit, so no other turn slips in.
                     await self.ensure_agent()
                     probed_at, locked = time.monotonic(), await self.screen_locked()
-                    if (not self.idle(quiet=True) or self.speech_gap() or not self.matt_here(locked)
+                    if (not self.idle(quiet=True) or self.speech_gap() or not (on_deck or self.matt_here(locked))
                             or self.dark and event != "timer"):
                         aborted = True  # Something changed meanwhile: resume any paused video outside turn_lock.
                     elif not urgent and not video_released and time.monotonic() - media_checked_at > 0.5:
@@ -7811,13 +7826,23 @@ class Companion:
         """Submit one unprompted turn. note is the line that says it came in while the owner was away, for this turn only.
         away is how long the owner was away while it waited, which the watcher's staleness limit does not count. Return
         True when the turn must stay queued, such as a show the overlay refused while the game has focus."""
-        if event == "event":  # --wow: a game event, with its images and the time it was seen.
-            shots, seen = extra
+        if event == "event":  # --wow: a game event, with its images, the time it was seen, and "deck" when seen there.
+            shots, seen, *deck = extra
             age = time.time() - seen  # A wall-clock time counts a suspend.
             if age > self.game.EVENT_STALE_SECONDS:
                 self.log("event_dropped", reason="stale", waited=round(age, 1))
                 return False
-            await self.submit(text, relay.settings.render(self.game.EVENT_LABEL), shots, source=event, note=note)
+            # An event seen on the Steam Deck goes to the Deck as its own turn, as the Deck's requests do: its text and
+            # speech go there, and nothing is said at the desk. With no Deck paired, it is said at the desk.
+            client = deck and self.phone and await self.phone.deck_device()
+            turn = str(uuid4()) if client else None
+            if client:
+                self.phone.voice_turns[turn] = client
+            sent = await self.submit(text, relay.settings.render(self.game.EVENT_LABEL), shots, source=event, note=note,
+                                     turn=turn, client=client or None)
+            if sent is False and client:  # A turn started meanwhile: the event waits for the next quiet moment.
+                self.phone.voice_turns.pop(turn, None)
+                return True
         elif event == "show":
             try:
                 item = json.loads(text)

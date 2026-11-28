@@ -518,7 +518,9 @@ class _Linux:
 
     def talk_key_access(self):
         """Whether this process may read the keyboards for the talk key: the input group. Run inside Rook, it is
-        Rook's own groups, which change only at a new login."""
+        Rook's own groups, which change only at a new login. In a rootless container, such as a distrobox, the host's
+        input group keeps its access but shows under another name (nobody), so an input device that opens for reading
+        counts too."""
         import grp
         names = set()
         for gid in os.getgroups():
@@ -526,7 +528,7 @@ class _Linux:
                 names.add(grp.getgrgid(gid).gr_name)
             except KeyError:
                 pass
-        return "input" in names
+        return "input" in names or any(os.access(path, os.R_OK) for path in Path("/dev/input").glob("event*"))
 
     def mic_access(self):
         """Whether this process may record. Linux has no microphone permission."""

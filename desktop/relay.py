@@ -478,6 +478,8 @@ def settings_command(argv):
         values["update_check"] = {"value": check, "source": f"{source}; off here, since {why}" if why else source}
         values["plugins"] = {"value": saved_file.get("plugins") or {},
                              "source": "settings file" if saved_file.get("plugins") else "not set"}
+        values["deck_device"] = {"value": settings.deck_device(saved_file),
+                                 "source": "settings file" if saved_file.get("deck_device") else "default"}
         for key in keys:
             if key.startswith("build_threads."):
                 name = key[len("build_threads."):].strip().lower()

@@ -130,6 +130,8 @@ run machine "$SYS_PY" desktop/machine.py
 run boundaries "$SYS_PY" scripts/check_boundaries.py
 run overlay-placement "$SYS_PY" desktop/overlay.py --check-placement
 run overlay-viewer "$SYS_PY" desktop/overlay.py --check-viewer
+# The game on a Steam Deck, with a stand-in Deck agent: only in a copy with the private wow/ folder.
+[ -f wow/check_deck.py ] && run wow-deck "$PY" wow/check_deck.py
 wait
 
 if [ ! -d "$X" ]; then
