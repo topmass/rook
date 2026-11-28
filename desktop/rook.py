@@ -9331,7 +9331,7 @@ def check_agent():
     assert agy_harness.Antigravity().permission_mode == "rook"  # A bare harness keeps today's mode and policy.
     own = Path(tempfile.mkdtemp(dir=os.environ.get("XDG_RUNTIME_DIR"))) / "settings.json"
     own.write_text(json.dumps({"agentMode": "auto", "toolPermission": "request-review", "theme": "dark"}))
-    old_own, agy_harness.COMPANION_SETTINGS = agy_harness.COMPANION_SETTINGS, own
+    old_own, agy_harness.OWN_SETTINGS = agy_harness.OWN_SETTINGS, own
     old_policy = agy_harness.PERMISSIONS
     # agy's private folder, fixed when antigravity_home loads, goes to scratch too: never the caller's live one.
     old_agy_home, agy_harness.antigravity_home.HOME = agy_harness.antigravity_home.HOME, own.parent / "agy-home"
@@ -9349,7 +9349,7 @@ def check_agent():
         agy_harness.PERMISSIONS = "ask"
         assert agy_harness.decide("Read", {"file_path": "x"}, set()) == "ask"  # inherit: the card, as the person's agy.
     finally:
-        agy_harness.COMPANION_SETTINGS, agy_harness.PERMISSIONS = old_own, old_policy
+        agy_harness.OWN_SETTINGS, agy_harness.PERMISSIONS = old_own, old_policy
         agy_harness.antigravity_home.HOME = old_agy_home
         shutil.rmtree(own.parent)
     assert [agy_harness.AGY_MODES.get(m) for m in ("rook", "careful", "automatic", "full", "inherit")] == [
