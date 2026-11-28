@@ -3308,6 +3308,8 @@ if verb == ["agent", "get"]:
     out({"agent": agents[args[2]], "type": "agent_info"})
 if verb == ["agent", "read"]:  # Like Herdr, only the last --lines lines.
     source = args[args.index("--source") + 1]
+    if source in state.get("no_sources", []):  # An older Herdr.
+        err("usage", f"unknown source {source}")
     if source == "recent-unwrapped" and args[2] in state.get("blocked_reads", []):
         err("agent_not_idle", "the pane is blocked")
     default = state.get("screens", {}).get(args[2], state.get("screen", ""))
@@ -3471,6 +3473,8 @@ def check_herdr():
             assert text.startswith(settings.render(watch.ANSWER)) and "nothing readable yet" in text, text
             delivered()
             assert poll(fake2=agent("fake2", "blocked", 8)) is None and (here, "herdr:fake2") in watcher.entries
+            fake(screens={"fake2": "Older output"}, visible_screens={"fake2": "Older output"})
+            assert poll(fake2=agent("fake2", "blocked", 8)) is None  # Older output is no prompt: the mark stays free.
             modal = "Would you like to run the following command?\n  git status\n\n› 1. Yes\n  2. No"
             fake(visible_screens={"fake2": modal + "\n" * 50})
             text, delivered, source = poll(fake2=agent("fake2", "blocked", 8))
@@ -3556,8 +3560,10 @@ def check_herdr():
         fake(visible_screens={"cl": ""}, screens={"cl": modal})
         assert "git status" in run("herdr", "read", "cl", "--lines", "3")[1]
         assert json.loads(calls.read_text().splitlines()[-1])[4] == "detection"
+        fake(visible_screens={}, screens={"cl": modal}, blocked_reads=[], no_sources=["visible", "detection"])  # Older Herdr.
+        assert "git status" in run("herdr", "read", "cl", "--lines", "3")[1]
         fake(machines={"local": {"cl": agent("cl", "idle", 3, "claude"), "cx": agent("cx", "done", 3, "codex")}},
-             screens={"cl": claude_idle, "cx": codex_idle}, visible_screens={}, blocked_reads=[])
+             screens={"cl": claude_idle, "cx": codex_idle}, visible_screens={}, blocked_reads=[], no_sources=[])
         # Bugs 2 and 7: an idle agent at a dialog is blocked. A send types nothing into it and records no intent.
         rows = len(herdr.records(sends))
         for screen, words in ((trust, "asks whether its folder is trusted"), (auto_modal, "waits at a dialog")):

@@ -714,8 +714,8 @@ class Watcher:
             entry["finish_told"] = entry.get("watched_at")
         if said is None:
             said, _ = await self.herdr_screen(machine, agent, blocked=state == "blocked")
-        if state == "blocked" and not said:
-            # Give one heads-up while the prompt is blank. A later poll can still deliver the actual prompt.
+        if state == "blocked" and not herdr.prompt_shown(said):
+            # Give one heads-up while the prompt is blank or older output. A later poll still delivers the prompt.
             mark += ":unreadable"
             if mark in entry["announced"] or (*key, mark) in self.queued:
                 return
