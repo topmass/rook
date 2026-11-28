@@ -55,11 +55,13 @@ Protocol, stdin (one JSON object per line):
     turn shows nothing while Rook is dark.
     {"stage": true} draws diagrams and the answer panel in the stage host (stage/host.py) instead of the swarm and the
     panel window, with the same messages and answers; when the host cannot start or dies, the overlay draws as before.
-    {"companion_screen": "DP-2"} has Rook live on a centred stage (COMPANION_STAGE) on that monitor, named by its connector or by
-    text in its description, whatever has focus; {"companion_screen": null} follows the focused monitor again. On the stage
-    the presence draws at COMPANION_SCALE times its size, and glides to the left while a turn has something to show, which
-    shows in a panel at the right (see CompanionStage). There "activity_detail", sent after "activity", is what the tool
-    works on (a file's name, a command's start or a thread's title), shown under its label.
+    {"companion_screen": "DP-2"} is Companion Screen mode: Rook lives on a centred stage (COMPANION_STAGE) on that
+    monitor, named by its connector or by text in its description, whatever has focus. {"companion_screen": null} is
+    overlay mode, which follows the focused monitor. On the stage the presence draws at COMPANION_SCALE times its size,
+    and glides to the left while a turn has something to show, which shows in a panel at the right (see
+    CompanionStage): captions, a running tool, a diagram, the card and a send fan. Media ("show") opens on the focused
+    monitor instead, in the viewer's own surface there, as overlay mode shows it. There "activity_detail", sent after
+    "activity", is what the tool works on (a file's name, a command's start or a thread's title), under its label.
     {"render": {"id": "7", "diagram": {"graph": "a > b", "title": ""}}} has the swarm form a constellation (see
     desktop/constellation.py); {"render": {"id": "8", "step": 2}} lights its second node (0 for none, a list for
     several), and {"render": {"id": "9", "clear": true}} ends it. A diagram sent with "stage": true is answered but not
@@ -3661,6 +3663,8 @@ def _check_viewer():
         ov.media_title, ov.media_paused, ov._media_ended_at, ov.opacity = "", False, None, 1.0
         ov.flight = ov.return_at = None
         ov.wow = ov.in_game = ov._viewer_hover = ov._scrubbing = False
+        ov.companion_stage = ov.view_scene = ov.view_place = None  # Overlay mode first.
+        ov._edges = None
         visible = [False]
         ov.viewer = types.SimpleNamespace(set_visible=lambda v: visible.__setitem__(0, v), get_visible=lambda: visible[0],
                                           set_opacity=lambda _v: None, get_surface=lambda: None)
@@ -3737,10 +3741,49 @@ def _check_viewer():
             ov.wow = ov.in_game = True
             ov._viewer_hovered(True)
             assert modes[-1] == LayerShell.KeyboardMode.NONE, "the viewer took the keyboard in the game"
+            assert ov.view_scene is None and ov.view_place is None  # Overlay mode: the viewer is Rook's own.
+            ov.wow = ov.in_game = ov._viewer_hover = False
+            ov.scene.step(time.monotonic() + 10)  # The X's close ends; the surface goes.
+            ov._step_viewer(time.monotonic())
+            assert not visible[0] and ov.scene.view is None
+
+            # Companion Screen mode: media opens on the focused monitor, in a viewer surface with a scene of its own,
+            # placed there as overlay mode places it; Rook's presence stays on the companion screen. Space, Escape and
+            # the X work on that surface, and closing it destroys the surface and its scene.
+            focused, monitors = types.SimpleNamespace(name="DP-1"), []
+            LayerShell.set_monitor = lambda _win, monitor: monitors.append(monitor)
+            ov.companion_stage = CompanionStage()
+            ov._focused_place = lambda: (focused, (1280.0, 228.0), (0.0, 0.0, 2560.0, 1440.0), 1.0)
+            show(clip)
+            assert monitors[-1] is focused and visible[0] and ov.view_place[0] is focused
+            assert ov.view_scene is not None and ov.view_scene.view is not None and ov.scene.view is None
+            assert ov._vs() is ov.view_scene and ov._view_centre() == (1280.0, 228.0)
+            box = ov.view_scene.view.box(later)
+            assert 0 <= 1280 + box[0] and 1280 + box[0] + box[2] <= 2560, box  # In that monitor's bounds.
+            assert ov._viewer_key(None, Gdk.KEY_space, 0, 0) and ov.media_paused
+            ov._viewer_hovered(True)
+            real_now, time.monotonic = time.monotonic, lambda: later
+            try:
+                ov._viewer_clicked(None, 1, *middle(ov._view_controls(later)["close"]))
+            finally:
+                time.monotonic = real_now
+            assert ov.view_scene.view.closing is not None, "the X did not close the companion viewer"
+            ov._viewer_hover = False
+            ov.view_scene.step(time.monotonic() + 10)
+            ov._step_viewer(time.monotonic())
+            assert not visible[0] and ov.view_scene is None and ov.view_place is None and ov.media is None
+            show(a)
+            assert ov.view_scene is not None and ov._viewer_key(None, Gdk.KEY_Escape, 0, 0)
+            assert ov.view_scene.view.closing is not None, "Escape did not close the companion viewer"
+            ov.view_scene.step(time.monotonic() + 10)
+            ov._step_viewer(time.monotonic())
+            assert not visible[0] and ov.view_scene is None
+            ov.companion_stage = None
         finally:
             LayerShell.set_keyboard_mode, LayerShell.set_monitor = saved
             ov._drop_media()
     print("viewer: every WebP frame at its own time, pause and seek, decode ahead, replace, close during a load, "
+          "Companion Screen mode's own surface on the focused monitor (opens, keys, the X, destroyed on close), "
           "hover controls with a grace, the X, click to pause: ok")
 
 # The render tool's scenes (see render.py). A diagram grows the swarm past GRAINS for as long as it shows.
@@ -7327,11 +7370,14 @@ class Scene:
 class CompanionStage:
     """The companion stage (companion_screen): where the presence sits, and the content panel at its right. At rest, listening and
     plain thinking the presence sits in the stage's middle at COMPANION_SCALE times its size. Once a turn has something to
-    show (captions, a running tool, a diagram, the viewer, the answer panel, a card or a send fan) it glides to
+    show (captions, a running tool, a diagram, media on the main screen, the answer panel, a card or a send fan) it
+    glides to
     COMPANION_LEFT of the width, and it holds there for the rest of the turn, so short captions never send it back and forth.
-    Once the turn is over and nothing shows, it glides back. A diagram and the viewer live in a panel scene of their
+    Once the turn is over and nothing shows, it glides back. A diagram lives in a panel scene of its
     own, whose grains come out of the presence and go back into it. No GTK: the overlay, the renders and the checks
     drive it the same way, from the scene and the clock."""
+
+    CAPTION_PAD = 24  # Room at the caption column's left for the light theme's caption plates and the halo.
 
     def __init__(self, size=COMPANION_STAGE):
         self.w, self.h = size
@@ -7339,9 +7385,10 @@ class CompanionStage:
         self.held = False  # The turn has shown something: the presence keeps to the left until the turn is over.
         self.title = None  # The running tool's label in the panel: [text, detail, since], or None.
         self.title_alpha = 0.0
-        self.panel_scene = None  # The diagram's or the viewer's own scene (see open_panel), or None.
+        self.panel_scene = None  # The diagram's own scene (see open_panel), or None.
         self.panel_end = None  # When the panel scene's content ended and its grains went home.
         self.last = None  # The last step's time.
+        self.caption_at = None  # Where the caption image's top-left corner went on the stage, for its pointer area.
 
     # ---- where things are, in stage px ----
     def side(self, now):
@@ -7370,8 +7417,7 @@ class CompanionStage:
         return x, COMPANION_MARGIN, self.w - COMPANION_MARGIN - x, self.h - 2 * COMPANION_MARGIN
 
     def caption_top(self, below):
-        """The top of the caption column's image: on the horizon, or with below at the panel's foot (under a diagram
-        or the viewer)."""
+        """The top of the caption column's image: on the horizon, or with below at the panel's foot, under a diagram."""
         key = (CAPTION_FONT.to_string(), CAPTION_LINE_SPACING)
         if self.__dict__.get("_two", (None,))[0] != key:  # Measured once per caption font.
             layout = Pango.Layout.new(PangoCairo.FontMap.get_default().create_context())
@@ -7385,16 +7431,19 @@ class CompanionStage:
         return self.horizon() - (CAPTION_TOP + two / 2) * COMPANION_CAPTION  # Two lines centred on the horizon.
 
     def room(self):
-        """A diagram's or the viewer's room in the panel (x, y, w, h): all of it above the captions' line."""
+        """A diagram's room in the panel (x, y, w, h): all of it above the captions' line."""
         x, y, w, _ = self.panel()
         bottom = self.caption_top(True) + CAPTION_TOP * COMPANION_CAPTION - 14
         return x, y, w, bottom - y
 
-    def box(self, now, scale):
+    def box(self, now, scale, wide=False):
         """The presence's picture on the stage: its rect (x, y, w, h) in stage px on whole device pixels, and the
-        presence's centre inside it in scene units. The picture is COMPANION_BOX at COMPANION_SCALE."""
+        presence's centre inside it in scene units. The picture is COMPANION_BOX at COMPANION_SCALE, or with wide (a send
+        fan, whose strands and names reach across the panel) the whole stage."""
         cx, cy = self.centre(now)
         bx, by, bw, bh = COMPANION_BOX
+        if wide:
+            bx, by, bw, bh = -cx / COMPANION_SCALE, -cy / COMPANION_SCALE, self.w / COMPANION_SCALE, self.h / COMPANION_SCALE
         x, y = round((cx + bx * COMPANION_SCALE) * scale) / scale, round((cy + by * COMPANION_SCALE) * scale) / scale
         return (x, y, bw * COMPANION_SCALE, bh * COMPANION_SCALE), ((cx - x) / COMPANION_SCALE, (cy - y) / COMPANION_SCALE)
 
@@ -7405,7 +7454,7 @@ class CompanionStage:
         ps = self.panel_scene
         return bool(extra or scene.state == "speaking" or any(c.visible() for c in scene.captions)
                     or (scene.state == "thinking" and scene.activity and not scene.quiet)
-                    or scene.dispatch_active(now) or scene.view is not None
+                    or scene.dispatch_active(now)
                     or (ps is not None and self.panel_end is None))
 
     def step(self, scene, now, extra=False):
@@ -7432,6 +7481,7 @@ class CompanionStage:
         else:
             scene.push = (0.0, 0.0)
         scene.companion_hud = True
+        self.fan(scene, now)
         # The title waits until the presence has nearly cleared the panel, so the two never cross.
         goal = self.title_text(scene, now) if self.side(now) > 0.85 else None
         if self.title is None or goal is None or goal[:2] != tuple(self.title[:2]):
@@ -7446,10 +7496,19 @@ class CompanionStage:
                 ps.handle({"state": scene.state}, now)
             (px, py), (qx, qy) = self.centre(now), self.panel_centre()
             ps.companion_home = (px - qx, py - qy, COMPANION_SCALE)
-            if self.panel_end is None and ps.render is None and ps.view is None:
+            if self.panel_end is None and ps.render is None:
                 self.panel_end = now  # Its grains fly home into the presence and fade there.
             if self.panel_end is not None and now - self.panel_end > COMPANION_HOME:
                 self.panel_scene = self.panel_end = None
+
+    def fan(self, scene, now):
+        """True while a send fan shows. It always opens to the right, at the presence's size, so its names sit in the
+        panel: it is laid out from the presence's place at the left, where the turn takes it."""
+        if not scene.dispatch_active(now):
+            return False
+        k = COMPANION_SCALE
+        scene.dispatch.layout_for_canvas(COMPANION_LEFT * self.w / k, self.w / k, self.w / k)
+        return True
 
     def title_text(self, scene, now):
         """The panel's title for a running tool: its label and detail, or None."""
@@ -7458,7 +7517,7 @@ class CompanionStage:
             return None
         return ACTIVITY_LABELS.get(scene.shown_activity(now), "THINKING"), scene.activity_detail
 
-    # ---- the panel scene: a diagram, or the viewer ----
+    # ---- the panel scene: a diagram ----
     def panel_centre(self):
         x, y, w, h = self.room()
         return x + w / 2, y + h / 2
@@ -7494,7 +7553,7 @@ class CompanionStage:
                 return presence.render_command(spec, now)  # Nothing on screen: the scene's own answer.
             ps = self.open_panel(presence, now)
         answer = ps.render_command(spec, now)
-        if ps.render is None and ps.view is None:
+        if ps.render is None:
             self.panel_end = self.panel_end or now
         return answer
 
@@ -7532,12 +7591,51 @@ class CompanionStage:
             since = now - self.title[2]
             title = (tuple(self.title[:2]), round(self.title_alpha, 3),
                      round(min(since, COMPANION_LINE + 0.5 + REVEAL_SECONDS), 3))
-        return title, scene.caption_key(CAPTION_W, now, dim), self.panel_scene is not None and self.panel_end is None, \
-            id(PALETTE), id(LETTERING)
+        return title, (scene.caption_key(CAPTION_W, now, dim), self.captions_below(scene, now)), id(PALETTE), \
+            id(LETTERING)
+
+    def captions_below(self, scene, now):
+        """True while the captions sit at the panel's foot: under a diagram, or under a send fan's names."""
+        return (self.panel_scene is not None and self.panel_end is None) or scene.dispatch_active(now)
+
+    def guide_spot(self, scene):
+        """Where the held guide goes: its letters' centre and top in units of its size k, and k. It hangs under the
+        presence at the presence's size, under the resting loop at home and under the working form's label in a turn.
+        With the presence at the left it keeps to the left of the panel, a little smaller if it must."""
+        cx, cy = self.centre(scene.last)
+        k, room = COMPANION_SCALE, self.w - 2 * COMPANION_MARGIN
+        if self.side(scene.last) > 0.0:
+            room = self.panel()[0] - 2 * COMPANION_MARGIN
+            cx = COMPANION_MARGIN + room / 2
+        k = min(k, room / max(1, scene.guide_w))
+        x = min(max(cx, COMPANION_MARGIN + scene.guide_w * k / 2), self.w - COMPANION_MARGIN - scene.guide_w * k / 2)
+        y = cy / k + (scene.rest_y_offset() + GUIDE_REST_DY if scene.guide_shown[2] else ORB / 2 + 34) * (
+            COMPANION_SCALE / k)
+        return x / k, y, k
+
+    def guide_image(self, scene, scale):
+        """The held guide, as an image of the whole stage set at its size, and that size; None with no guide. It is
+        the overlay's own guide: its code, text and reveal."""
+        if not (scene.guide_shown and scene.guide_alpha > 0.0):
+            return None
+        x, y, k = self.guide_spot(scene)
+        image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(self.w * scale), math.ceil(self.h * scale))
+        image.set_device_scale(scale * k, scale * k)
+        scene.draw_guide(cairo.Context(image), x, y, scene.guide_shown[2])
+        return image, k
+
+    def caption_rect(self, scene):
+        """Where the captions take the pointer on the stage, to open the answer and show READ MORE, or None."""
+        if not scene.captions or not scene.caption_box or self.caption_at is None:
+            return None
+        bx, by, bw, bh = scene.caption_box
+        x, y = self.caption_at
+        k = COMPANION_CAPTION
+        return x + (self.CAPTION_PAD + bx) * k - 12, y + by * k - 8, bw * k + 24, bh * k + 40
 
     def paint_hud(self, cr, scene, now, dim=0.0):
         """The panel's text on the stage: the running tool's label over its hairline and detail, and the captions as a
-        left-aligned column COMPANION_CAPTION times their size, under a diagram or the viewer when one shows."""
+        left-aligned column COMPANION_CAPTION times their size, under a diagram when one shows."""
         scale = cr.get_target().get_device_scale()[0]
         self.paint_title(cr, now)
         shown = self.caption_image(scene, now, scale, dim)
@@ -7556,7 +7654,7 @@ class CompanionStage:
         COMPANION_CAPTION times its own."""
         if not scene.captions:
             return None
-        pad = 24  # Room at the column's left for the light theme's caption plates and the halo.
+        pad = self.CAPTION_PAD
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil((CAPTION_W + 2 * pad) * COMPANION_CAPTION * scale),
                                    math.ceil(CAPTION_H * COMPANION_CAPTION * scale))
         image.set_device_scale(scale * COMPANION_CAPTION, scale * COMPANION_CAPTION)
@@ -7564,8 +7662,9 @@ class CompanionStage:
         context.translate(pad, 0)
         scene.draw_caption(context, CAPTION_W, now, dim)
         x = self.panel()[0] - pad * COMPANION_CAPTION
-        y = self.caption_top(self.panel_scene is not None and self.panel_end is None)
-        return image, round(x * scale) / scale, round(y * scale) / scale
+        y = self.caption_top(self.captions_below(scene, now))
+        self.caption_at = (round(x * scale) / scale, round(y * scale) / scale)
+        return image, *self.caption_at
 
     def paint_title(self, cr, now):
         """The running tool's title, its hairline and its detail, on the stage."""
@@ -10792,6 +10891,9 @@ class Overlay(Gtk.Application):
         self.companion_screen = None  # The companion_screen setting: the monitor Rook lives on alone, or None to follow focus.
         # While it is connected, its stage (CompanionStage): the window covers it, and the presence and the panel live in it.
         self.companion_stage, self._panel_gl, self._hud = None, None, {}
+        # Companion Screen mode's viewer, on the focused monitor while media shows: its scene, and that monitor's
+        # (monitor, working centre, free bounds, scale). None in overlay mode, where the viewer is Rook's own.
+        self.view_scene = self.view_place = None
         # The media viewer: its window, the media showing, the one it replaces while that leaves, the line under the
         # box, the file being checked and decoded in a worker thread, and when a video ended.
         self.viewer = None
@@ -10978,6 +11080,7 @@ class Overlay(Gtk.Application):
         lower.add_overlay(stack)
         lower.set_measure_overlay(stack, True)
         column.append(lower)
+        self.lower, self._stage_box = lower, None
 
         win.set_child(column)
         win.connect("map", lambda *_: setattr(self, "_region_key", None))
@@ -11013,7 +11116,8 @@ class Overlay(Gtk.Application):
         self.monitor, self.left, self.top = monitor, left, top
         self.home_xy = (left, top)
         if self.bounds is not None:
-            self.scene.monitor_width = float(self.bounds[2])
+            # On the companion stage the presence's own units are COMPANION_SCALE px: a send fan measures in them.
+            self.scene.monitor_width = float(self.bounds[2]) / (COMPANION_SCALE if self.companion_stage else 1)
         if in_game != self.in_game:
             # The look changes with the place, so a turn that ends after focus moved keeps one look throughout.
             self.in_game = in_game
@@ -11220,6 +11324,10 @@ class Overlay(Gtk.Application):
     def _draw_main(self, _area, cr, w, _h):
         now = time.monotonic()
         self._shown_at = now
+        if self.companion_stage is not None:
+            if not (self.reader_box is not None and self.reader_ready) and self.scene.swarm_vis > 0.002:
+                self._draw_stage(cr, now)
+            return
         # While the reading surface draws or the viewer has faded the main swarm out, draw nothing here.
         if not (self.reader_box is not None and self.reader_ready) and self.scene.swarm_vis > 0.002:
             centre = (self._canvas_cx(w), self.scene.lift + ORB / 2)
@@ -11265,6 +11373,26 @@ class Overlay(Gtk.Application):
         win.connect("map", self._viewer_mapped)
         self.viewer, self.viewer_area = win, area
 
+    def _vs(self):
+        """The scene the viewer lives in: in Companion Screen mode its own (view_scene), on the focused monitor, so the
+        presence stays on the companion screen; else the presence's own scene."""
+        return self.view_scene if self.view_scene is not None else self.scene
+
+    def _view_centre(self):
+        """The point the viewer's box hangs from, in its window: where Rook works on the focused monitor in Companion
+        Screen mode, as overlay mode has it there, else Rook's own working centre."""
+        return self.view_place[1] if self.view_place is not None else self._centre()
+
+    def _view_scale(self):
+        return self.view_place[3] if self.view_place is not None else self._monitor_scale()
+
+    def _focused_place(self):
+        """The focused monitor as overlay mode places Rook on it: (monitor, working centre, free bounds, scale)."""
+        monitor, left, _top, lift, _h, _rest, _game, bounds = _placement(
+            self.win.get_display(), self.wow and self.game_focused)
+        scale = monitor.get_scale() if monitor is not None and hasattr(monitor, "get_scale") else 1.0
+        return monitor, ((left or 0) + WIDTH / 2, lift + ORB / 2), bounds or (0, 0, 1920, 1080), scale
+
     def _viewer_mapped(self, *_):
         self._viewer_region = None
         self.viewer_ready = self.viewer.get_surface() is not None
@@ -11289,17 +11417,20 @@ class Overlay(Gtk.Application):
         title = " ".join(title.split()) if isinstance(title, str) else ""
         self._media_job += 1
         job, bounds, scale = self._media_job, self.bounds or (0, 0, 1920, 1080), self._monitor_scale()
+        place = self._focused_place() if self.companion_stage is not None else None
+        if place is not None:  # Companion Screen mode: on the focused monitor, sized for it.
+            bounds, scale = place[2], place[3]
 
         def load():
             try:
-                self._media_loaded = (job, path, title, _load_media(path, bounds, scale), None)
+                self._media_loaded = (job, path, title, (*_load_media(path, bounds, scale), place), None)
             except _MediaError as error:
                 self._media_loaded = (job, path, title, None, str(error))
             except Exception as error:  # A broken file must never take the overlay down.
                 self._media_loaded = (job, path, title, None, f"Rook could not open that file: {error}.")
         threading.Thread(target=load, daemon=True).start()
 
-    def _start_view(self, path, title, box, media_rect, media):
+    def _start_view(self, path, title, box, media_rect, media, place=None):
         now = time.monotonic()
         if self.quitting or self.left is None:  # Dark does not refuse it.
             media.close()
@@ -11308,8 +11439,19 @@ class Overlay(Gtk.Application):
             return
         self._jump_home()
         self.flight = self.return_at = None
-        cx, cy = self._centre()
-        scene, old = self.scene, self.media
+        if self.companion_stage is not None:
+            # Companion Screen mode: the viewer opens on the focused monitor, as overlay mode shows it there, in a scene
+            # of its own whose frame gathers at the box. Rook stays on the companion screen with its captions.
+            self.view_place = place or self._focused_place()
+            if self.view_scene is None:
+                self.view_scene = Scene(now)
+                self.view_scene.handle({"state": "ready"}, now)
+                cx, cy = self.view_place[1]
+                for i in range(len(self.view_scene.x)):  # The frame gathers from the box, with no flight from Rook.
+                    self.view_scene.x[i] = box[0] + box[2] / 2 - cx + (i % 23 - 11)
+                    self.view_scene.y[i] = box[1] + box[3] / 2 - cy + (i % 17 - 8)
+        cx, cy = self._view_centre()
+        scene, old = self._vs(), self.media
         was_closing = scene.view is not None and scene.view.closing is not None
         replacing = scene.view is not None and old is not None
         scene.open_view(now, (box[0] - cx, box[1] - cy, box[2], box[3]),
@@ -11330,8 +11472,9 @@ class Overlay(Gtk.Application):
             old.close()
         self.media, self.media_path, self.media_title = media, path, title
         self.media_paused, self._media_ended_at = False, None
-        if self.monitor is not None:
-            LayerShell.set_monitor(self.viewer, self.monitor)
+        monitor = self.view_place[0] if self.view_place is not None else self.monitor
+        if monitor is not None:
+            LayerShell.set_monitor(self.viewer, monitor)
         self._viewer_hovered(self._viewer_hover and replacing)  # A new viewer waits for the pointer to come.
         self.viewer.set_visible(True)
         self._viewer_region = None
@@ -11343,10 +11486,10 @@ class Overlay(Gtk.Application):
         still loading. A hand close, an end or an error closes what shows, and a newer show still opens."""
         if why == "rook":
             self._media_job += 1
-        view = self.scene.view
+        view = self._vs().view
         if view is None or view.closing is not None:
             return
-        self.scene.close_view(time.monotonic())
+        self._vs().close_view(time.monotonic())
         if self.media is not None and self.media.kind == "video":
             self.media.pause()
         self._viewer_hover = False
@@ -11365,10 +11508,10 @@ class Overlay(Gtk.Application):
 
     def _toggle_pause(self):
         media = self.media
-        if media is None or media.kind == "image" or self.scene.view is None or self.scene.view.closing is not None:
+        if media is None or media.kind == "image" or self._vs().view is None or self._vs().view.closing is not None:
             return
         if media.kind == "animation":
-            t = time.monotonic() - self.scene.view.media_at
+            t = time.monotonic() - self._vs().view.media_at
             media.pause(t) if media.playing else media.play(t)
             self.media_paused = not media.playing
         elif media.playing:
@@ -11381,8 +11524,8 @@ class Overlay(Gtk.Application):
     def _viewer_quiet(self, now):
         """True while the open viewer moves only slowly: no turn. Its dust then moves VIEW_REST_FPS times a second; a
         video's frames come in on the display's own clock (see _video_frame)."""
-        v = self.scene.view
-        return v is not None and v.settled(now) and self.scene.state in ("ready", "hidden", "result")
+        v = self._vs().view
+        return v is not None and v.settled(now) and self._vs().state in ("ready", "hidden", "result")
 
     def _step_viewer(self, now):
         """Take a file the worker has finished, run the video (start, duck under a turn, end), let a replaced media go,
@@ -11397,7 +11540,7 @@ class Overlay(Gtk.Application):
                 self._emit({"event": "show_error", "path": path if isinstance(path, str) else "", "error": error})
             else:
                 self._start_view(path, title, *result)
-        view, media = self.scene.view, self.media
+        view, media = self._vs().view, self.media
         if view is not None and media is not None and media.kind == "video":
             media.poll()
             if media.error:
@@ -11421,10 +11564,15 @@ class Overlay(Gtk.Application):
         if self.viewer is None or not self.viewer.get_visible():
             return
         if view is None:
-            # The ring has reached home: the main window draws the swarm again.
+            # The ring has reached home: the main window draws the swarm again. A companion screen's viewer surface on
+            # the focused monitor goes with its scene; the presence never left the companion screen.
             self.viewer.set_visible(False)
             self.viewer_ready = False
             self._drop_media()
+            if self.view_scene is not None:
+                self.view_scene = self.view_place = None
+                self._edges = None
+                return
             self._place("the viewer closed")
             return
         self.viewer.set_opacity(self.opacity)
@@ -11436,7 +11584,7 @@ class Overlay(Gtk.Application):
         appsink keeps only the newest frame, so a late one is dropped, never queued. The rest of the viewer is drawn
         from the dust strips already made (see _snapshot_viewer), so a frame costs little."""
         media = self.media
-        if media is None or media.kind != "video" or not media.playing or self.scene.view is None:
+        if media is None or media.kind != "video" or not media.playing or self._vs().view is None:
             self._video_clock = None
             return False
         version = media.version
@@ -11448,17 +11596,17 @@ class Overlay(Gtk.Application):
     def _viewer_rects(self, now):
         """Where the viewer takes the pointer, in its own coordinates: the box once it is open, the close mark of a
         video, and the captions while they can open the answer."""
-        view = self.scene.view
+        view = self._vs().view
         if view is None or view.closing is not None or view.opened(now) < 0.5:
             return []
-        cx, cy = self._centre()
+        cx, cy = self._view_centre()
         bx, by, bw, bh = view.box(now)
         rects = [(cx + bx, cy + by, bw, bh)]
         if (row := self._view_controls(now, always=True).get("row")) is not None:
             rects.append(row)
-        if self.scene.captions and self.scene.caption_box and self.details.strip() and not self.answer_open:
-            ox, oy = _view_caption_origin(self.scene, now, (cx, cy))
-            x, y, w, h = self.scene.caption_box
+        if self._vs().captions and self._vs().caption_box and self.details.strip() and not self.answer_open:
+            ox, oy = _view_caption_origin(self._vs(), now, (cx, cy))
+            x, y, w, h = self._vs().caption_box
             rects.append((ox + x - 12, oy + y - 8, w + 24, h + 40))
         return [tuple(int(round(v)) for v in rect) for rect in rects]
 
@@ -11474,7 +11622,7 @@ class Overlay(Gtk.Application):
 
     def _viewer_clicked(self, _gesture, _n, x, y):
         now = time.monotonic()
-        view = self.scene.view
+        view = self._vs().view
         if view is None or view.closing is not None:
             return
         rects = self._viewer_rects(now)
@@ -11546,11 +11694,11 @@ class Overlay(Gtk.Application):
         pointer, "play" and "scrub" show for a clip or a video, "open" for any file, and "close", an X in the box's
         top-right corner. Empty while the pointer is elsewhere, unless always, which the input region uses so the
         pointer can reach the row before the controls show."""
-        view, media = self.scene.view, self.media
+        view, media = self._vs().view, self.media
         if (not (always or self._viewer_hover) or media is None or view is None or view.closing is not None
                 or view.opened(now) < 0.5):
             return {}
-        cx, cy = self._centre()
+        cx, cy = self._view_centre()
         bx, by, bw, bh = view.box(now)
         x, y, yc = cx + bx, cy + by + bh, cy + by + bh + VIEW_LINE_DY
         controls = {"row": (x - 7, y, bw + 14, VIEW_LINE_DY + 14)}
@@ -11564,7 +11712,7 @@ class Overlay(Gtk.Application):
 
     def _media_progress(self, now):
         """How far the clip or video has played, from 0 to 1, or None."""
-        media, view = self.media, self.scene.view
+        media, view = self.media, self._vs().view
         if media is None or view is None or media.kind == "image":
             return None
         if media.kind == "animation":
@@ -11584,7 +11732,7 @@ class Overlay(Gtk.Application):
         to = max(0.0, min(1.0, (x + dx - scrub[0]) / max(1, scrub[2])))
         media = self.media
         if media.kind == "animation":
-            media.seek(to * (media.total or media.length), now - self.scene.view.media_at)
+            media.seek(to * (media.total or media.length), now - self._vs().view.media_at)
         elif (where := media.where()) is not None:
             media.seek(to * where[1])
             self._media_ended_at = None
@@ -11854,11 +12002,11 @@ class Overlay(Gtk.Application):
         draw them: the GL frame is not chosen, or GL failed, which is logged once and leaves Cairo drawing for good."""
         if not self._dust_on_gpu():
             return False
-        scene = self.scene
+        scene = self._vs()
         try:
             if self._dust_gl is None:
                 self._dust_gl = _DustGL(self.viewer.get_display())
-            parts = self._dust_gl.draw(scene, rects, scene.moved_at, centre, self._monitor_scale(), clips=clips)
+            parts = self._dust_gl.draw(scene, rects, scene.moved_at, centre, self._view_scale(), clips=clips)
         except Exception as error:  # No GL, or a driver error: Cairo draws the frame from here on.
             print(f"the viewer's GL frame failed, so Cairo draws it: {error}", file=sys.stderr, flush=True)
             self._dust_gl = False
@@ -11874,9 +12022,9 @@ class Overlay(Gtk.Application):
     def _snapshot_viewer(self, snap, w, h):
         """Compose one viewer frame: black box, media texture, four narrow edge strips of dust, title line, and captions.
         Every dust grain sits on the box edge and is painted at most once, via GL or single-pass Cairo strips."""
-        now, scene = time.monotonic(), self.scene
+        now, scene = time.monotonic(), self._vs()
         view = scene.view
-        cx, cy = centre = self._centre()
+        cx, cy = centre = self._view_centre()
 
         def cairo_node(x, y, nw, nh):
             return snap.append_cairo(Graphene.Rect().init(x, y, max(0.0, nw), max(0.0, nh)))
@@ -12064,6 +12212,7 @@ class Overlay(Gtk.Application):
         scene = self.scene
         scene.companion_hud, scene.push, scene.diagram_room = stage is not None, (0.0, 0.0), None
         if stage is None:
+            self._stage_widgets(None)
             self._win_width = WIDTH
             self.column.set_size_request(WIDTH, -1)
             self.area.set_content_width(ORB_W)
@@ -12076,6 +12225,43 @@ class Overlay(Gtk.Application):
         self.area.set_content_width(round(stage.w))
         self.area.set_content_height(round(stage.h))
         self.caption_area.set_visible(False)  # The captions draw in the stage's panel (see _snapshot_stage).
+        self._stage_widgets(stage)
+
+    def _stage_widgets(self, stage):
+        """On the companion stage the card lies over the stage, centred in its panel and on its horizon, instead of
+        under the presence; off it, the window's widgets go back as they were built."""
+        if (stage is not None) == (self._stage_box is not None):
+            if stage is not None:
+                self._place_card(stage)
+            return
+        column, area, lower = self.column, self.area, self.lower
+        if stage is not None:
+            column.remove(area)
+            column.remove(lower)
+            self._stage_box = Gtk.Overlay()
+            self._stage_box.set_child(area)
+            self._stage_box.add_overlay(lower)
+            column.append(self._stage_box)
+            self._place_card(stage)
+            return
+        box, self._stage_box = self._stage_box, None
+        box.remove_overlay(lower)
+        box.set_child(None)
+        column.remove(box)
+        column.append(area)
+        column.append(lower)
+        lower.set_halign(Gtk.Align.CENTER)
+        lower.set_valign(Gtk.Align.FILL)
+        lower.set_margin_start(0)
+        lower.set_margin_bottom(0)
+
+    def _place_card(self, stage):
+        x, _, w, _ = stage.panel()
+        lower = self.lower
+        lower.set_halign(Gtk.Align.START)
+        lower.set_valign(Gtk.Align.CENTER)
+        lower.set_margin_start(max(0, round(x + (w - CARD_W) / 2 - 12)))  # The card has 12 px margins.
+        lower.set_margin_bottom(round(2 * (stage.h / 2 - stage.horizon())))  # Centred on the horizon.
 
     def _panel_dust(self):
         """The panel scene's own GL frame, made on first use; None without GL."""
@@ -12090,13 +12276,14 @@ class Overlay(Gtk.Application):
     def _step_stage(self, now):
         """Before the scene steps: the stage's choreography, and the panel scene's own step."""
         stage = self.companion_stage
-        stage.step(self.scene, now, extra=self.answer_open or self.card.get_visible())
+        # Media shows on the main screen meanwhile (view_scene): Rook keeps to the left with its captions.
+        stage.step(self.scene, now, extra=self.answer_open or self.card.get_visible() or self.view_scene is not None)
         ps, gl = stage.panel_scene, self._panel_dust()
         if ps is None:
             return
         if gl is not None and ps.spring_back is None:
             ps.spring_back = lambda: gl.read_springs(ps)
-        ps.spring_gl = gl is not None and ps.view is None
+        ps.spring_gl = gl is not None
         if ps.springs_on_gpu and ps.spring_gl:
             gl.follow(ps)
         ps.step(now)
@@ -12110,7 +12297,7 @@ class Overlay(Gtk.Application):
         now = scene.last
         self._shown_at = time.monotonic()
         ps, pgl = stage.panel_scene, self._panel_dust()
-        if ps is not None and ps.view is None and pgl is not None and (alpha := stage.panel_alpha(now)) > 0.002:
+        if ps is not None and pgl is not None and (alpha := stage.panel_alpha(now)) > 0.002:
             x, y, w, h = stage.panel_rect(now)
             qx, qy = stage.panel_centre()
             texture = pgl.draw_main(ps, w, h, (qx - x, qy - y), scale, ps.main_scrim(scale, qx - x, qy - y))
@@ -12131,11 +12318,19 @@ class Overlay(Gtk.Application):
                     (qy + ps.render["dy"] + ny - 14) * scale) / scale, tw, th))
                 snap.pop()
             snap.pop()
-        (bx, by, bw, bh), centre = stage.box(now, scale)
+        fan = stage.fan(scene, now)
+        (bx, by, bw, bh), centre = stage.box(now, scale, wide=fan)
         k = COMPANION_SCALE
         self._springs_to(gl)
         texture = gl.draw_main(scene, bw / k, bh / k, centre, scale * k, scene.main_scrim(scale * k, *centre))
         snap.append_texture(texture, Graphene.Rect().init(bx, by, bw, bh))
+        if fan:  # The fan's names, at the presence's size and set at that size, in the panel.
+            snap.save()
+            snap.translate(Graphene.Point().init(bx, by))
+            snap.scale(k, k)
+            scene.dispatch.append_gl_overlay(snap, centre[0], centre[1] + scene.dispatch_y_offset(), bw / k, now,
+                                             stage.w / k, scale * k, PALETTE, is_nova=(scene.pack_kind == "flipbook"))
+            snap.restore()
         hud = self._hud
 
         def layer(name, key, paint, rect):
@@ -12151,8 +12346,9 @@ class Overlay(Gtk.Application):
                 hud[name] = (key, DispatchState._surface_to_texture(image), rect)
             if hud[name][1] is not None:
                 snap.append_texture(hud[name][1], Graphene.Rect().init(*hud[name][2]))
+
         label_key = (scene.label, round(scene.label_alpha, 3), min(REVEAL_SECONDS, round(now - scene.label_at, 3)),
-                     id(PALETTE), id(scene.label_sprites), scale, round(centre[0], 2), round(centre[1], 2))
+                     id(PALETTE), id(scene.label_sprites), scale, round(centre[0], 2), round(centre[1], 2), bw)
         if scene.label and scene.label_alpha > 0.01:
             def label(cr):
                 cr.translate(bx, by)
@@ -12163,18 +12359,56 @@ class Overlay(Gtk.Application):
                 cr.set_source_surface(image, 0, 0)
                 cr.paint()
             layer("label", label_key, label, (bx, by, bw, bh))
-        title, captions = stage.hud_key(scene, now)[:2]
+        guide_key = scene.guide_key() if scene.guide_shown else None
+        if guide_key is not None:  # The held guide under the presence, at its size, at home and in a turn.
+            def guide(cr):
+                if (shown := stage.guide_image(scene, scale)) is not None:
+                    cr.scale(shown[1], shown[1])
+                    cr.set_source_surface(shown[0], 0, 0)
+                    cr.paint()
+            layer("guide", (guide_key, stage.guide_spot(scene), scale), guide, (0, 0, stage.w, stage.h))
+        dim = self._caption_dim()  # The captions dim under the card and the answer panel, which lie over them.
+        title, captions = stage.hud_key(scene, now, dim)[:2]
         if title is not None:
             layer("title", (title, id(PALETTE), id(LETTERING), scale), lambda cr: stage.paint_title(cr, now),
                   stage.hud_rect())
-        if captions is not None:
+        if captions[0] is not None:
             if hud.get("captions", (None,))[0] != (captions, scale):
-                shown = stage.caption_image(scene, now, scale)
+                shown = stage.caption_image(scene, now, scale, dim)
                 shown[0].flush()
                 hud["captions"] = ((captions, scale), DispatchState._surface_to_texture(shown[0]), (
                     shown[1], shown[2], shown[0].get_width() / scale, shown[0].get_height() / scale))
             snap.append_texture(hud["captions"][1], Graphene.Rect().init(*hud["captions"][2]))
         return True
+
+    def _draw_stage(self, cr, now):
+        """The companion stage in Cairo, when GL cannot draw it: as _snapshot_stage, the presence drawn at
+        COMPANION_SCALE into an image set at that size, so its grains, glow and label grow and stay crisp."""
+        stage, scene = self.companion_stage, self.scene
+        scale = cr.get_target().get_device_scale()[0]
+        ps = stage.panel_scene
+        if ps is not None and (alpha := stage.panel_alpha(now)) > 0.002:
+            cr.push_group()
+            ps.draw_swarm(cr, 0, now, centre=stage.panel_centre())
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(alpha)
+        k = COMPANION_SCALE
+        (bx, by, bw, bh), centre = stage.box(now, scale, wide=stage.fan(scene, now))
+        image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(bw * scale), math.ceil(bh * scale))
+        image.set_device_scale(scale * k, scale * k)
+        context = cairo.Context(image)
+        scene.draw_swarm(context, bw / k, now, centre=centre, label=False)
+        scene._label(context, *centre, grains=True)
+        guide = stage.guide_image(scene, scale) or (None, k)
+        for image, x, y, size in ((image, bx, by, k), (guide[0], 0, 0, guide[1])):  # The guide may be wider.
+            if image is not None:
+                cr.save()
+                cr.translate(x, y)
+                cr.scale(size, size)
+                cr.set_source_surface(image, 0, 0)
+                cr.paint()
+                cr.restore()
+        stage.paint_hud(cr, scene, now, self._caption_dim())
 
     def _pinned(self):
         """The connected monitor the companion_screen setting names, from Hyprland's list, or None."""
@@ -12809,6 +13043,10 @@ class Overlay(Gtk.Application):
 
     def _on_loop(self, x, y):
         w, h = LOOP_HIT
+        if getattr(self, "companion_stage", None) is not None:  # The loop at its size, where the stage has it.
+            cx, cy = self.companion_stage.centre(self.scene.last)
+            k = COMPANION_SCALE
+            return self.scene.home and abs(x - cx) <= w * k / 2 and abs(y - cy) <= h * k / 2
         cx = self._canvas_cx(self.area.get_width() or self._win_width)
         return self.scene.home and abs(x - cx) <= w / 2 and abs(y - self.scene.rest_pad) <= h / 2
 
@@ -12839,8 +13077,8 @@ class Overlay(Gtk.Application):
                 self.left, self._dispatch_cx = self.left - off, WIDTH / 2.0 + off
                 self.carry[1] = (self.left, self.top)
                 x0 = self.left
-        if self.in_game or self.left is None:
-            return
+        if self.in_game or self.left is None or getattr(self, "companion_stage", None) is not None:
+            return  # The companion stage stays where its monitor has it.
         now = _hypr_socket("j/cursorpos") if start else None
         if now:
             x, y = x0 + now["x"] - start["x"], y0 + now["y"] - start["y"]
@@ -12866,6 +13104,8 @@ class Overlay(Gtk.Application):
         if not moving:
             if self._on_loop(x, y) and self.answer:
                 self._toggle_answer()
+            elif self._on_stage_captions(x, y):
+                self._caption_clicked()
         elif self._away():
             self.return_at = time.monotonic() + RETURN_SECONDS
         else:
@@ -12925,6 +13165,15 @@ class Overlay(Gtk.Application):
 
     def _loop_pointer(self, x, y):
         self.scene.rest_hint = bool(self.answer) and self._on_loop(x, y)
+        if getattr(self, "companion_stage", None) is not None:  # READ MORE over the panel's captions.
+            self.scene.caption_hint = self._on_stage_captions(x, y)
+
+    def _on_stage_captions(self, x, y):
+        """True when (x, y) on the companion stage is on its captions, while they can open the answer."""
+        stage = getattr(self, "companion_stage", None)  # The send checks drive the drag with a stand-in window.
+        rect = stage.caption_rect(self.scene) if stage is not None else None
+        return (rect is not None and bool(self.details.strip()) and rect[0] <= x < rect[0] + rect[2]
+                and rect[1] <= y < rect[1] + rect[3])
 
     def _step_answer(self, dt):
         """Ease the panel open or closed, following the overlay's own fade. Nothing to do while it is closed."""
@@ -12941,7 +13190,7 @@ class Overlay(Gtk.Application):
     def _should_show(self, now):
         """Rook shows everywhere, at rest and in a turn, except at rest while dark. The media viewer shows while dark
         too: the owner asked for it."""
-        return not (self.dark and self.scene.view is None and self.scene.is_home(now, self._held()))
+        return not (self.dark and self._vs().view is None and self.scene.is_home(now, self._held()))
 
     def _show_permission(self, questions):
         while child := self.permission_fields.get_first_child():
@@ -13065,7 +13314,7 @@ class Overlay(Gtk.Application):
         screen. Hidden (dark mode, the game without WoW mode) or in a turn, the timer paces Rook as before."""
         if self.quitting:
             return None
-        if self.viewer_ready and self.viewer.get_visible() and self.scene.view is not None and self._dust_on_gpu():
+        if self.viewer_ready and self.viewer.get_visible() and self._vs().view is not None and self._dust_on_gpu():
             return self.viewer_area
         if (self.scene.view is None and self.win.get_visible() and self.opacity == 1.0 and self.flight is None
                 and self.reader_box is None and self._should_show(time.monotonic())):
@@ -13130,8 +13379,8 @@ class Overlay(Gtk.Application):
         dt = 1 / self._clock_fps() if clocked else self._tick_ms / 1000
         self._step_answer(dt)
         media = self.media
-        self.scene.view_video = media is not None and media.kind == "video" and media.playing
-        self.scene.dust_gl = self._dust_on_gpu()
+        self._vs().view_video = media is not None and media.kind == "video" and media.playing
+        self._vs().dust_gl = self._dust_on_gpu()
         # The main window's springs go to the chip only once GL is known to work here, so a failed start keeps Cairo,
         # and not while the reading surface draws the grains or while a flipbook pack (Nova) is active.
         flipbook_active = (self.scene.pack_kind == "flipbook" and self.scene.flipbook is not None
@@ -13146,6 +13395,10 @@ class Overlay(Gtk.Application):
                     raise
                 self._surface_down("following the grains failed", error)
         self.scene.view_still = self.scene.view_video and not self.scene.dust_gl
+        if self.view_scene is not None:  # Companion Screen mode's viewer, on the focused monitor.
+            vs = self.view_scene
+            vs.view_still = vs.view_video and not vs.dust_gl
+            vs.step(now)
         if self.companion_stage is not None:
             self._step_stage(now)
         try:
@@ -13391,9 +13644,17 @@ class Overlay(Gtk.Application):
         # While the viewer shows, the swarm is at its box, so the home spot takes no input; the viewer's window does.
         working = scene.state in ("thinking", "speaking") and not scene.home and scene.view is None
         loop = scene.home and (bool(self.answer) or not self.in_game) and scene.view is None
-        if (working or loop) and self.companion_stage is not None and (area := origin(self.area)):
-            (bx, by, bw, bh), _ = self.companion_stage.box(scene.last, self._monitor_scale())
-            rects.append((area[0] + bx, area[1] + by, bw, bh))  # The presence's own box, at its size.
+        stage = self.companion_stage
+        if stage is not None and (area := origin(self.area)):
+            cx, cy = stage.centre(scene.last)
+            k = COMPANION_SCALE
+            if working:  # The working form and its label, at the presence's size.
+                rects.append((area[0] + cx - ORB * k / 2, area[1] + cy - ORB * k / 2, ORB * k, ORB_H * k))
+            elif loop:
+                rects.append((area[0] + cx - LOOP_HIT[0] * k / 2, area[1] + cy - LOOP_HIT[1] * k / 2,
+                              LOOP_HIT[0] * k, LOOP_HIT[1] * k))
+            if self.details.strip() and not self.answer_open and (caption := stage.caption_rect(scene)):
+                rects.append((area[0] + caption[0], area[1] + caption[1], caption[2], caption[3]))
         elif (working or loop) and (area := origin(self.area)):
             x, y, w, _ = area
             cx_a = self._canvas_cx(w)
@@ -13404,7 +13665,7 @@ class Overlay(Gtk.Application):
         if self.card.get_visible() and (card := origin(self.card)):
             fall = CARD_FALL if self._devs_card() else 0  # The room the dust falls through takes no pointer.
             rects.append((card[0], card[1] + fall, card[2], max(0, card[3] - fall)))
-        if (scene.captions and scene.caption_box and self.details.strip() and not self.answer_open
+        if (stage is None and scene.captions and scene.caption_box and self.details.strip() and not self.answer_open
                 and not self._viewer_drawing() and (captions := origin(self.caption_area))):
             bx, by, bw, bh = scene.caption_box
             rects.append((captions[0] + bx - 12, captions[1] + by - 8, bw + 24, bh + 40))
@@ -14286,6 +14547,18 @@ def _check_companion_stage():
         sc.handle({"activity_detail": "constellation.py"}, t[0])
         run(0.6)
         assert st.title[:2] == ["READING", "constellation.py"], st.title
+        # A send fan: it opens to the right at the presence's size, its strands and names in the panel, and the
+        # presence's picture covers the stage while it shows.
+        sc.handle({"activity": "t3_thread_send", "send": [{"id": "a", "name": "Rook build"},
+                                                          {"id": "b", "name": "Docs"}]}, t[0])
+        run(0.5)
+        assert st.fan(sc, t[0]) and sc.dispatch._side_mode == "right", sc.dispatch and sc.dispatch._side_mode
+        k, left = COMPANION_SCALE, st.centre(t[0])[0]
+        assert all(left + row["ex"] * k > px - 40 for row in sc.dispatch.rows)
+        assert left + (DISPATCH_R + DISPATCH_REACH + DISPATCH_GAP + sc.dispatch._rooms[1]) * k <= st.w
+        assert st.box(t[0], 1.0, wide=True) == ((0.0, 0.0, 1540.0, 720.0), (left / k, st.horizon() / k))
+        sc.handle({"send": []}, t[0])
+        assert not st.fan(sc, t[0])
         # Between tools, and in a gap between short captions, it holds at the left for the whole turn.
         sc.handle({"state": "thinking", "activity": ""}, t[0])
         assert run(1.0) == 0.0 and st.centre(t[0])[0] == 308.0 and st.title is None
@@ -14326,9 +14599,8 @@ def _check_companion_stage():
         assert st.panel_end is not None and st.panel_alpha(t[0]) > 0.9  # Its grains go home into the presence.
         run(COMPANION_GLIDE + COMPANION_HOME)
         assert st.panel_scene is None and st.centre(t[0])[0] == 770.0 and sc.push == (0.0, 0.0)
-        # The viewer: its box fits the panel's room. The answer panel: in the panel, never over the presence.
-        box = _view_layout(st.room(), (1280, 400), 1.0)[0]
-        assert rx <= box[0] and box[0] + box[2] <= rx + rw and ry <= box[1] and box[1] + box[3] <= ry + rh, box
+        # The answer panel: in the panel, never over the presence. (Media opens on the focused monitor: see the
+        # viewer's own checks in _check_placement.)
         x, y, w, h, cap = st.answer_rect(5000)
         assert (x, y, w, h) == (px + (pw - TERM_W) // 2, py + TERM_MARGIN, TERM_W, ph - 2 * TERM_MARGIN), (x, y, w, h)
         x, y, w, h, cap = st.answer_rect(200)
@@ -14349,7 +14621,7 @@ def _check_companion_stage():
     assert plain.push == (0.0, 0.0) and plain.companion_home is None and plain.diagram_room is None and not plain.companion_hud
     assert not CAPTION_LEFT
     print("companion stage (1540 x 720, 2x presence, glide left on content and hold, glide home, panel title, captions, "
-          "diagram, viewer and answer in the panel): ok")
+          "diagram and answer in the panel): ok")
 
 
 def _check_placement():
@@ -14655,6 +14927,8 @@ def _check_placement():
                     set_opacity=lambda v: None,
                 )
                 ov.companion_stage, ov._hud, ov._panel_gl, ov._win_width = None, {}, None, WIDTH
+                ov.view_scene = ov.view_place = None
+                ov._stage_widgets = lambda stage: None
                 ov.widths, ov.captions_shown = [], [True]
                 ov.column = types.SimpleNamespace(set_size_request=lambda w, _h: ov.widths.append(w))
                 ov.area = types.SimpleNamespace(set_content_height=lambda h: None, set_content_width=lambda w: None)
@@ -14849,6 +15123,10 @@ def _check_placement():
                     scattered.clear()
                     ov._follow("DP-1", "Hyprland reported focus there")
                     assert ov._follow_focus() is False and ov.monitor.get_connector() == "DP-2" and not scattered
+                    # Media goes to the focused monitor, placed there as overlay mode places Rook, while Rook stays.
+                    mon, centre, bounds, _ = ov._focused_place()
+                    assert mon.get_connector() == "DP-1" and bounds == (0.0, 0.0, 1920.0, 1080.0), (mon, bounds)
+                    assert centre[0] == 590 + WIDTH / 2 and ov.monitor.get_connector() == "DP-2", centre
                     ov.scene = Scene(0.0)
                     # Unplugged: the monitor-change path places Rook on the focused monitor, and focus moves it again.
                     hypr_state["monitors"] = [m_d1]
