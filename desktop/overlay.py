@@ -210,6 +210,9 @@ COMPANION_SCALE = 2.0
 # s, and the stage from COMPANION_PANEL of its width, COMPANION_MARGIN px inside its edges, is the content panel (the owner's
 # layout, 2026-11-27: Rook moves to the left and shows the content on the right).
 COMPANION_LEFT, COMPANION_PANEL, COMPANION_MARGIN, COMPANION_GLIDE = 0.2, 0.3, 36, 0.7
+# Once the panel has nothing left to show, the presence waits COMPANION_HOLD s before it glides home, so the gap
+# between two spoken sentences never sends it to the middle and back (the owner asked for no back and forth).
+COMPANION_HOLD = 1.0
 # The grains feel COMPANION_TRAIL of the glide's acceleration, so the presence travels as one body and trails a little.
 COMPANION_TRAIL = 0.3
 # In the panel the captions are COMPANION_CAPTION times their size, in a left-aligned column; a running tool's label is
@@ -7368,21 +7371,40 @@ class Scene:
 
 
 class CompanionStage:
-    """The companion stage (companion_screen): where the presence sits, and the content panel at its right. At rest, listening and
-    plain thinking the presence sits in the stage's middle at COMPANION_SCALE times its size. Once a turn has something to
-    show (captions, a running tool, a diagram, media on the main screen, the answer panel, a card or a send fan) it
-    glides to
-    COMPANION_LEFT of the width, and it holds there for the rest of the turn, so short captions never send it back and forth.
-    Once the turn is over and nothing shows, it glides back. A diagram lives in a panel scene of its
-    own, whose grains come out of the presence and go back into it. No GTK: the overlay, the renders and the checks
-    drive it the same way, from the scene and the clock."""
+    """The companion stage (companion_screen): where the presence sits, and the content panel at its right. The
+    presence sits in the stage's middle at COMPANION_SCALE times its size at rest, while it listens, thinks, runs a tool
+    (its label under it, as in overlay mode) and sends to threads (its fan open to both sides). It glides to
+    COMPANION_LEFT of the width only while the panel has something to show: captions, a diagram, the answer panel or a
+    card. Once the panel empties it waits COMPANION_HOLD s, then glides back, so it goes back and forth through a turn
+    but never between two sentences. A glide that turns mid-way turns from where it is, at the speed it has. A
+    diagram lives in a panel scene of its own, whose grains come out of the presence and go back into it. No GTK: the
+    overlay, the renders and the checks drive it the same way, from the scene and the clock."""
 
     CAPTION_PAD = 24  # Room at the caption column's left for the light theme's caption plates and the halo.
+    TITLE_TOP, TITLE_GAPS = 8, (20, 18)  # The title's ink below the panel's top; ink to hairline, hairline to detail.
+
+    def title_rect(self, scale=1.0):
+        """Where the panel's title, hairline and detail lie on the stage (x, y, w, h), or None with no title."""
+        if self.title is None:
+            return None
+        text, detail = self.title[:2]
+        if LETTERING:
+            kind = LETTERING["label"]
+            ink = _type_geometry(_cased(text, "label"), _grown(kind["font"], COMPANION_TITLE),
+                                 kind["spacing"] * COMPANION_TITLE)[0]
+        else:
+            ink = _type_geometry(text, _grown(LABEL_FONT, COMPANION_TITLE), LABEL_SPACING * COMPANION_TITLE)[0]
+        x, top = self.panel()[0], self.panel()[1] + self.TITLE_TOP
+        h = ink[3] + self.TITLE_GAPS[0] + 1 + (self.TITLE_GAPS[1] + 17 * 1.3 if detail else 0)
+        return x, top, max(ink[2], 0.62 * self.panel()[2]), h
 
     def __init__(self, size=COMPANION_STAGE):
         self.w, self.h = size
-        self.glide = (0.0, 0.0, -math.inf)  # From and to (0 the middle, 1 the left), and when it began.
-        self.held = False  # The turn has shown something: the presence keeps to the left until the turn is over.
+        # The glide: the quintic from where the presence was, at its speed and acceleration, to its goal (0 the middle,
+        # 1 the left), its start, its length in s, and the goal.
+        self.glide = ((0.0, 0.0, 0.0, 0.0, 0.0, 0.0), -math.inf, 1.0, 0.0)
+        self.emptied = None  # When the panel last had nothing to show while the presence was at the left.
+        self.zoom = COMPANION_SCALE  # The presence's size now: smaller only while a send fan needs the room.
         self.title = None  # The running tool's label in the panel: [text, detail, since], or None.
         self.title_alpha = 0.0
         self.panel_scene = None  # The diagram's own scene (see open_panel), or None.
@@ -7391,16 +7413,32 @@ class CompanionStage:
         self.caption_at = None  # Where the caption image's top-left corner went on the stage, for its pointer area.
 
     # ---- where things are, in stage px ----
-    def side(self, now):
-        """How far the presence is to the left: 0 in the middle, 1 at COMPANION_LEFT, eased (smootherstep)."""
-        f, t, at = self.glide
-        if f == t:
-            return t
-        u = (now - at) / (COMPANION_GLIDE * max(0.4, abs(t - f)))
+    def _glide_at(self, now, order=0):
+        """The glide at now: how far left (order 0), or its speed (1) or acceleration (2) per second."""
+        c, at, span, goal = self.glide
+        u = (now - at) / span
         if u >= 1:
-            return t
+            return goal if order == 0 else 0.0
         u = max(0.0, u)
-        return f + (t - f) * u * u * u * (10 - 15 * u + 6 * u * u)
+        if order == 0:
+            return c[0] + u * (c[1] + u * (c[2] + u * (c[3] + u * (c[4] + u * c[5]))))
+        if order == 1:
+            return (c[1] + u * (2 * c[2] + u * (3 * c[3] + u * (4 * c[4] + u * 5 * c[5])))) / span
+        return (2 * c[2] + u * (6 * c[3] + u * (12 * c[4] + u * 20 * c[5]))) / span / span
+
+    def side(self, now):
+        """How far the presence is to the left: 0 in the middle, 1 at COMPANION_LEFT."""
+        return self._glide_at(now)
+
+    def _glide_to(self, goal, now):
+        """Glide to goal from where the presence is now, keeping its speed and acceleration, and coming to rest there
+        (a quintic: from rest it is smootherstep, and a glide that turns mid-way turns smoothly)."""
+        p0, v0, a0 = self._glide_at(now), self._glide_at(now, 1), self._glide_at(now, 2)
+        span = COMPANION_GLIDE * max(0.4, abs(goal - p0))
+        c0, c1, c2 = p0, v0 * span, a0 * span * span / 2
+        d, e, f = goal - c0 - c1 - c2, -c1 - 2 * c2, -2 * c2
+        self.glide = ((c0, c1, c2, 10 * d - 4 * e + f / 2, -15 * d + 7 * e - f, 6 * d - 3 * e + f / 2), now, span,
+                      goal)
 
     def centre(self, now):
         """The presence's centre on the stage. Its label hangs under the form, so the form sits a little above the
@@ -7438,52 +7476,55 @@ class CompanionStage:
 
     def box(self, now, scale, wide=False):
         """The presence's picture on the stage: its rect (x, y, w, h) in stage px on whole device pixels, and the
-        presence's centre inside it in scene units. The picture is COMPANION_BOX at COMPANION_SCALE, or with wide (a send
-        fan, whose strands and names reach across the panel) the whole stage."""
+        presence's centre inside it in scene units. The picture is COMPANION_BOX at the presence's size (zoom), or with
+        wide (a send fan, whose strands and names reach to both sides) the whole stage."""
+        k = self.zoom
         cx, cy = self.centre(now)
         bx, by, bw, bh = COMPANION_BOX
         if wide:
-            bx, by, bw, bh = -cx / COMPANION_SCALE, -cy / COMPANION_SCALE, self.w / COMPANION_SCALE, self.h / COMPANION_SCALE
-        x, y = round((cx + bx * COMPANION_SCALE) * scale) / scale, round((cy + by * COMPANION_SCALE) * scale) / scale
-        return (x, y, bw * COMPANION_SCALE, bh * COMPANION_SCALE), ((cx - x) / COMPANION_SCALE, (cy - y) / COMPANION_SCALE)
+            bx, by, bw, bh = -cx / k, -cy / k, self.w / k, self.h / k
+        x, y = round((cx + bx * k) * scale) / scale, round((cy + by * k) * scale) / scale
+        return (x, y, bw * k, bh * k), ((cx - x) / k, (cy - y) / k)
 
     # ---- the turn ----
     def content(self, scene, now, extra=False):
-        """True while the turn shows something besides the presence. extra is what only the overlay knows: the answer
-        panel or a card is open."""
+        """True while the panel has something to show: captions (Rook speaks), a diagram, or what only the overlay
+        knows, extra: the answer panel or a card is open. A running tool and a send fan show at the presence."""
         ps = self.panel_scene
         return bool(extra or scene.state == "speaking" or any(c.visible() for c in scene.captions)
-                    or (scene.state == "thinking" and scene.activity and not scene.quiet)
-                    or scene.dispatch_active(now)
                     or (ps is not None and self.panel_end is None))
 
     def step(self, scene, now, extra=False):
-        """Before scene.step: where the presence goes, the push its grains feel on the way, the panel's title, and
-        the panel scene's state, home and end."""
+        """Before scene.step: where the presence goes, the push its grains feel on the way, its size, the panel's
+        title, and the panel scene's state, home and end."""
         dt, self.last = (0.0 if self.last is None else max(0.0, now - self.last)), now
-        showing = self.content(scene, now, extra)
-        if scene.state == "listening" and not showing:
-            self.held = False  # A new turn starts in the middle.
-        if showing:
-            self.held = True
-        elif scene.home:
-            self.held = False
-        want = 1.0 if self.held else 0.0
-        if want != self.glide[1]:
-            self.glide = (self.side(now), want, now)
-        f, t, at = self.glide
-        span = COMPANION_GLIDE * max(0.4, abs(t - f))
-        u = (now - at) / span
-        if f != t and 0 <= u < 1:
-            # The presence's acceleration across the stage, in scene units: smootherstep's second derivative.
-            a = (t - f) * (COMPANION_LEFT - 0.5) * self.w * (60 * u - 180 * u * u + 120 * u * u * u) / span / span
-            scene.push = (-COMPANION_TRAIL * a / COMPANION_SCALE, 0.0)
-        else:
-            scene.push = (0.0, 0.0)
-        scene.companion_hud = True
+        sending = scene.dispatch_active(now)
+        if self.content(scene, now, extra) and not sending:
+            want, self.emptied = 1.0, None
+        elif self.glide[3] == 1.0 and not sending and scene.state != "listening" and not scene.home:
+            # The panel has emptied mid-turn: wait COMPANION_HOLD s, in case the next sentence is coming.
+            self.emptied = self.emptied if self.emptied is not None else now
+            want = 1.0 if now - self.emptied < COMPANION_HOLD else 0.0
+        else:  # Sends, a new turn and a finished one go to the middle at once.
+            want, self.emptied = 0.0, None
+        if want != self.glide[3]:
+            self._glide_to(want, now)
+        a = self._glide_at(now, 2)
+        # The presence's acceleration across the stage, in scene units: the grains feel it and trail a little.
+        scene.push = (-COMPANION_TRAIL * a * (COMPANION_LEFT - 0.5) * self.w / self.zoom, 0.0) if a else (0.0, 0.0)
+        goal_zoom = self.fan_zoom(scene) if sending else COMPANION_SCALE
+        self.zoom = goal_zoom if abs(goal_zoom - self.zoom) < 1e-3 else self.zoom + (goal_zoom - self.zoom) * _glide(
+            dt, 0.2)
         self.fan(scene, now)
-        # The title waits until the presence has nearly cleared the panel, so the two never cross.
-        goal = self.title_text(scene, now) if self.side(now) > 0.85 else None
+        # A running tool's title shows in the panel only beside captions, at its top, once the presence has nearly
+        # cleared it. Under a diagram, the answer panel or a card, and with the presence in the middle, the tool's
+        # label shows under the presence instead, as in overlay mode.
+        goal = self.title_text(scene, now)
+        if goal is not None and not (want == 1.0 and self.side(now) > 0.85 and not extra
+                                     and any(c.visible() for c in scene.captions)
+                                     and (self.panel_scene is None or self.panel_end is not None)):
+            goal = None
+        scene.companion_hud = goal is not None
         if self.title is None or goal is None or goal[:2] != tuple(self.title[:2]):
             self.title_alpha = max(0.0, self.title_alpha - dt / 0.18) if self.title else 0.0
             if self.title_alpha <= 0.0:
@@ -7495,19 +7536,45 @@ class CompanionStage:
             if ps.state != scene.state:
                 ps.handle({"state": scene.state}, now)
             (px, py), (qx, qy) = self.centre(now), self.panel_centre()
-            ps.companion_home = (px - qx, py - qy, COMPANION_SCALE)
+            ps.companion_home = (px - qx, py - qy, self.zoom)
             if self.panel_end is None and ps.render is None:
                 self.panel_end = now  # Its grains fly home into the presence and fade there.
             if self.panel_end is not None and now - self.panel_end > COMPANION_HOME:
                 self.panel_scene = self.panel_end = None
 
+    def label_shift(self, scene, now):
+        """How far, in scene units, the presence's label moves left of its centre so that it ends before the panel:
+        at the left, a long tool label at the presence's size would reach into it."""
+        if not scene.label or self.side(now) <= 0.0:
+            return 0.0
+        probe = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        half = (scene._label_sprite(probe, scene.label)[1] - 28) / 2  # Less the sprite's 14 px pad each side.
+        right = self.centre(now)[0] + half * self.zoom
+        return max(0.0, right - (self.panel()[0] - 12)) / self.zoom
+
+    def fan_zoom(self, scene):
+        """The presence's size while a send fan shows: COMPANION_SCALE when its widest name fits at both sides of the
+        stage, else as much smaller as it must be, so no name is cut more than overlay mode cuts it."""
+        ds, need = scene.dispatch, 0.0
+        for row in ds.rows:
+            if LETTERING:
+                need = max(need, ds._row_geometry(row, DISPATCH_MAX_W)[0][2])
+            else:
+                layout = Pango.Layout.new(PangoCairo.FontMap.get_default().create_context())
+                layout.set_font_description(_font(CAPTION_FONT.get_family() or "Noto Serif", 21, Pango.Weight.BOLD))
+                layout.set_text(_safe_utf8(row["name"]), -1)
+                need = max(need, layout.get_pixel_size()[0])
+        reach = DISPATCH_EDGE + DISPATCH_R + DISPATCH_REACH + DISPATCH_GAP + min(DISPATCH_MAX_W, need) + 4
+        return min(COMPANION_SCALE, self.w / 2 / reach)
+
     def fan(self, scene, now):
-        """True while a send fan shows. It always opens to the right, at the presence's size, so its names sit in the
-        panel: it is laid out from the presence's place at the left, where the turn takes it."""
+        """True while a send fan shows. The presence is in the middle, and the fan opens to both sides at the
+        presence's size, as overlay mode opens it."""
         if not scene.dispatch_active(now):
             return False
-        k = COMPANION_SCALE
-        scene.dispatch.layout_for_canvas(COMPANION_LEFT * self.w / k, self.w / k, self.w / k)
+        k = self.zoom
+        scene.monitor_width = self.w / k
+        scene.dispatch.layout_for_canvas(self.w / 2 / k, self.w / k, self.w / k)
         return True
 
     def title_text(self, scene, now):
@@ -7696,9 +7763,8 @@ class CompanionStage:
             mono = _font(_terminal_family(), 17)
             cache[dkey] = _word_sprite(cr, detail, scale, mono, filament.CHAMP if PALETTE is THEMES["dark"]
                                        else PALETTE["label"], 0.0, PALETTE["text_halos"], PALETTE["text_halo"])
-        gap_line, gap_detail = 20, 18
-        dh = 17 * 1.3 if detail else 0
-        top = self.horizon() - (ih + gap_line + (gap_detail + dh if detail else 0)) / 2
+        gap_line, gap_detail = self.TITLE_GAPS
+        top = self.panel()[1] + self.TITLE_TOP
         sx, sy = _device_round(cr, x0 - ix, top - iy)
         cr.set_source_surface(sprite, sx, sy)
         if LETTERING and LETTERING["reveal"] == "spread" and t < REVEAL_SECONDS:
@@ -12276,8 +12342,8 @@ class Overlay(Gtk.Application):
     def _step_stage(self, now):
         """Before the scene steps: the stage's choreography, and the panel scene's own step."""
         stage = self.companion_stage
-        # Media shows on the main screen meanwhile (view_scene): Rook keeps to the left with its captions.
-        stage.step(self.scene, now, extra=self.answer_open or self.card.get_visible() or self.view_scene is not None)
+        # Media shows on the main screen (view_scene), not in the panel, so only the answer panel and a card count.
+        stage.step(self.scene, now, extra=self.answer_open or self.card.get_visible())
         ps, gl = stage.panel_scene, self._panel_dust()
         if ps is None:
             return
@@ -12320,7 +12386,7 @@ class Overlay(Gtk.Application):
             snap.pop()
         fan = stage.fan(scene, now)
         (bx, by, bw, bh), centre = stage.box(now, scale, wide=fan)
-        k = COMPANION_SCALE
+        k = stage.zoom
         self._springs_to(gl)
         texture = gl.draw_main(scene, bw / k, bh / k, centre, scale * k, scene.main_scrim(scale * k, *centre))
         snap.append_texture(texture, Graphene.Rect().init(bx, by, bw, bh))
@@ -12348,14 +12414,15 @@ class Overlay(Gtk.Application):
                 snap.append_texture(hud[name][1], Graphene.Rect().init(*hud[name][2]))
 
         label_key = (scene.label, round(scene.label_alpha, 3), min(REVEAL_SECONDS, round(now - scene.label_at, 3)),
-                     id(PALETTE), id(scene.label_sprites), scale, round(centre[0], 2), round(centre[1], 2), bw)
+                     id(PALETTE), id(scene.label_sprites), scale, round(centre[0], 2), round(centre[1], 2), bw,
+                     round(stage.label_shift(scene, now), 2))
         if scene.label and scene.label_alpha > 0.01:
             def label(cr):
                 cr.translate(bx, by)
                 cr.scale(k, k)  # The label at the presence's size, set at that size so it stays crisp.
                 image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(bw * scale), math.ceil(bh * scale))
                 image.set_device_scale(scale * k, scale * k)
-                scene._label(cairo.Context(image), *centre)
+                scene._label(cairo.Context(image), centre[0] - stage.label_shift(scene, now), centre[1])
                 cr.set_source_surface(image, 0, 0)
                 cr.paint()
             layer("label", label_key, label, (bx, by, bw, bh))
@@ -12392,13 +12459,13 @@ class Overlay(Gtk.Application):
             ps.draw_swarm(cr, 0, now, centre=stage.panel_centre())
             cr.pop_group_to_source()
             cr.paint_with_alpha(alpha)
-        k = COMPANION_SCALE
+        k = stage.zoom
         (bx, by, bw, bh), centre = stage.box(now, scale, wide=stage.fan(scene, now))
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(bw * scale), math.ceil(bh * scale))
         image.set_device_scale(scale * k, scale * k)
         context = cairo.Context(image)
         scene.draw_swarm(context, bw / k, now, centre=centre, label=False)
-        scene._label(context, *centre, grains=True)
+        scene._label(context, centre[0] - stage.label_shift(scene, now), centre[1], grains=True)
         guide = stage.guide_image(scene, scale) or (None, k)
         for image, x, y, size in ((image, bx, by, k), (guide[0], 0, 0, guide[1])):  # The guide may be wider.
             if image is not None:
@@ -14496,10 +14563,11 @@ def _note(cr, text, x, y):
 
 
 def _check_companion_stage():
-    """The companion stage (CompanionStage), with no window: its size and the presence's scale; the glide to the left when a turn
-    has something to show, the hold through the turn, the push its grains feel on the way, and the glide home; the
-    panel's title; the places of the captions, a diagram, the viewer and the answer panel in the panel; and nothing
-    of it once companion_screen is off."""
+    """The companion stage (CompanionStage), with no window: its size and the presence's scale; in the middle while it
+    thinks, runs a tool or sends; to the left while the panel shows captions, a diagram, the answer or a card, home
+    after COMPANION_HOLD, never back and forth between sentences, and a smooth turn mid-glide; the send fan at both
+    sides, whole on the stage; the panel's title over the captions with no overlap in every mix; and nothing of it once
+    companion_screen is off."""
     global CAPTION_LEFT
     kept = CAPTION_LEFT
     CAPTION_LEFT = True
@@ -14532,48 +14600,107 @@ def _check_companion_stage():
         sc.handle({"state": "thinking"}, t[0])
         assert run(1.0) == 0.0 and st.centre(t[0])[0] == 770.0  # Listening and plain thinking stay in the middle.
         assert st.title is None and sc.label == "THINKING"
-        # A tool runs: the presence glides to the left in COMPANION_GLIDE s, its grains feel the push on the way, and the
-        # panel shows the tool's label once the presence has cleared it; the presence shows none of its own.
+        def apart(r1, r2):  # Two stage rects that do not overlap.
+            return (r1[0] + r1[2] <= r2[0] or r2[0] + r2[2] <= r1[0] or r1[1] + r1[3] <= r2[1]
+                    or r2[1] + r2[3] <= r1[1])
+
+        def inside(r, outer):  # To a px: the caption image sits on whole device px.
+            return outer[0] - 1 <= r[0] and r[0] + r[2] <= outer[0] + outer[2] + 1 and outer[1] - 1 <= r[1] and \
+                r[1] + r[3] <= outer[1] + outer[3] + 1
+        def words(r):  # The captions' own text, from their pointer area (12 px each side, 8 above, READ MORE below).
+            return r[0] + 12, r[1] + 8, r[2] - 24, r[3] - 40
+        long = "This sentence runs long on purpose, so that it fills both lines a caption page ever holds here."
+        # A tool runs with nothing else to show: the presence stays in the middle with the tool's label under it, as
+        # in overlay mode, and the panel stays empty.
         sc.handle({"activity": "WebSearch"}, t[0])
-        start = t[0]
+        assert run(1.5) == 0.0 and st.centre(t[0])[0] == 770.0 and st.title is None
+        assert sc.label == "SEARCHING THE WEB" and not sc.companion_hud, sc.label
+        # Rook speaks: captions fill the panel, and the presence glides left in COMPANION_GLIDE s, its grains feeling the
+        # push on the way.
+        sc.handle({"state": "speaking", "caption": "First, the layout rules.", "seconds": 1.2}, t[0])
         pushed = run(COMPANION_GLIDE / 2)
-        assert 308.0 < st.centre(t[0])[0] < 770.0 and pushed > 100 and st.title is None, (st.centre(t[0]), pushed)
-        run(COMPANION_GLIDE / 2 + 0.6)
+        assert 308.0 < st.centre(t[0])[0] < 770.0 and pushed > 100, (st.centre(t[0]), pushed)
+        run(COMPANION_GLIDE / 2 + 0.3)
         assert st.centre(t[0])[0] == COMPANION_LEFT * st.w == 308.0 and sc.push == (0.0, 0.0), st.centre(t[0])
-        assert st.title[:2] == ["SEARCHING THE WEB", ""] and sc.label == "", (st.title, sc.label)
         reach = max(sc._targets(sc.form, t[0])[0]) * COMPANION_SCALE + st.centre(t[0])[0]
         assert reach < px, reach  # The presence's form keeps out of the panel.
-        sc.handle({"activity": "Read"}, t[0])
-        sc.handle({"activity_detail": "constellation.py"}, t[0])
-        run(0.6)
-        assert st.title[:2] == ["READING", "constellation.py"], st.title
-        # A send fan: it opens to the right at the presence's size, its strands and names in the panel, and the
-        # presence's picture covers the stage while it shows.
-        sc.handle({"activity": "t3_thread_send", "send": [{"id": "a", "name": "Rook build"},
-                                                          {"id": "b", "name": "Docs"}]}, t[0])
-        run(0.5)
-        assert st.fan(sc, t[0]) and sc.dispatch._side_mode == "right", sc.dispatch and sc.dispatch._side_mode
-        k, left = COMPANION_SCALE, st.centre(t[0])[0]
-        assert all(left + row["ex"] * k > px - 40 for row in sc.dispatch.rows)
-        assert left + (DISPATCH_R + DISPATCH_REACH + DISPATCH_GAP + sc.dispatch._rooms[1]) * k <= st.w
-        assert st.box(t[0], 1.0, wide=True) == ((0.0, 0.0, 1540.0, 720.0), (left / k, st.horizon() / k))
-        sc.handle({"send": []}, t[0])
-        assert not st.fan(sc, t[0])
-        # Between tools, and in a gap between short captions, it holds at the left for the whole turn.
-        sc.handle({"state": "thinking", "activity": ""}, t[0])
-        assert run(1.0) == 0.0 and st.centre(t[0])[0] == 308.0 and st.title is None
-        sc.handle({"state": "speaking", "caption": "Done.", "seconds": 0.5}, t[0])
-        run(0.5)
-        sc.handle({"caption": ""}, t[0])
-        run(2.0)
-        assert not sc.captions and st.centre(t[0])[0] == 308.0
-        sc.handle({"state": "speaking", "caption": "Here is how Rook runs.", "seconds": 1.5}, t[0])
-        run(0.5)
-        # The captions: a left-aligned column at the panel's left edge, set COMPANION_CAPTION times their size.
+        # The captions only: a left-aligned column at the panel's left edge, COMPANION_CAPTION times their size.
         image, cx, cy = st.caption_image(sc, t[0], 1.0)
-        assert abs(cx + 24 * COMPANION_CAPTION - px) <= 0.5 and py < cy < st.horizon() and image.get_width() >= CAPTION_W * COMPANION_CAPTION
+        assert abs(cx + 24 * COMPANION_CAPTION - px) <= 0.5 and py < cy < st.horizon() and st.title is None
+        assert image.get_width() >= CAPTION_W * COMPANION_CAPTION and inside(words(st.caption_rect(sc)), st.panel()), (
+            st.caption_rect(sc), sc.caption_box, st.caption_at)
         assert min(x for s in sc.captions[-1].sentences for _, x, _, _ in s.sprites) < 20  # Left, not centred.
-        # A diagram: a panel scene of its own, laid out for the panel's room, whose grains start at the presence.
+        # Between two sentences the captions fade and the voice thinks on, but the presence holds at the left: it
+        # never goes home and back.
+        sc.handle({"caption": ""}, t[0])
+        sc.handle({"state": "thinking"}, t[0])
+        seen = []
+        for _ in range(int(1.6 * 60)):
+            run(1 / 60)
+            seen.append(st.centre(t[0])[0])
+        sc.handle({"state": "speaking", "caption": "Then the panel.", "seconds": 1.0}, t[0])
+        for _ in range(60):
+            run(1 / 60)
+            seen.append(st.centre(t[0])[0])
+        assert set(seen) == {308.0}, (min(seen), max(seen))
+        # Rook narrates while the next tool runs: the tool's title, hairline and detail at the panel's top, and the
+        # captions below them, apart at the longest caption a page holds.
+        sc.handle({"state": "thinking", "activity": "Read"}, t[0])
+        sc.handle({"activity_detail": "constellation.py"}, t[0])
+        sc.handle({"caption": long, "seconds": 2.0}, t[0])
+        run(1.5)
+        st.caption_image(sc, t[0], 1.0)
+        title, cap = st.title_rect(), st.caption_rect(sc)
+        assert st.title[:2] == ["READING", "constellation.py"] and sc.label == "" and sc.companion_hud, st.title
+        shown = [page for page, _ in sc.captions[-1].visible()]
+        assert len(shown) == 1 and len(shown[0].lines) == 2 and title[1] >= py, [page.lines for page in shown]
+        assert apart(title, cap) and cap[1] - (title[1] + title[3]) >= 40 and inside(title, st.panel()), (title, cap)
+        assert inside(words(cap), st.panel()), cap
+        # The narration ends and the tool runs on: after COMPANION_HOLD the presence glides back to the middle, where
+        # the tool's label shows under it again, and the panel's title goes.
+        sc.handle({"caption": ""}, t[0])
+        run(1.2 + COMPANION_HOLD + COMPANION_GLIDE + 0.4)
+        assert st.centre(t[0])[0] == 770.0 and st.title is None and sc.label == "READING", (st.centre(t[0]), sc.label)
+        # A glide that turns mid-way turns from where it is, at the speed it has.
+        turn = CompanionStage()
+        turn._glide_to(1.0, 0.0)
+        at, v = turn.side(0.3), turn._glide_at(0.3, 1)
+        turn._glide_to(0.0, 0.3)
+        assert abs(turn.side(0.3) - at) < 1e-9 and abs(turn._glide_at(0.3, 1) - v) < 1e-9 and 0 < at < 1
+        assert turn.side(0.3 + COMPANION_GLIDE) == 0.0
+
+        # A send to threads: the presence stays in the middle and the fan opens to both sides, at the presence's size
+        # when its names fit there, every name whole and on the stage.
+        def fan_fits():
+            ds, k = sc.dispatch, st.zoom
+            assert st.fan(sc, t[0]) and ds._side_mode == "both" and st.centre(t[0])[0] == 770.0, ds._side_mode
+            for row in ds.rows:
+                room = ds._rooms[0 if row["side"] < 0 else 1]
+                width = ds._row_geometry(row, room)[0][2]
+                assert room + 0.5 >= ds._row_geometry(row, DISPATCH_MAX_W)[0][2], (row["name"], room)  # Uncut.
+                end = 770.0 + (row["ex"] + row["side"] * (DISPATCH_GAP + width)) * k
+                assert 0 <= end <= st.w, (row["name"], end, k)
+            box = st.box(t[0], 1.0, wide=True)
+            assert box[0] == (0.0, 0.0, 1540.0, 720.0), box
+        sc.handle({"state": "thinking", "activity": "t3_thread_send",
+                   "send": [{"id": "a", "name": "Rook build"}, {"id": "b", "name": "Docs"}]}, t[0])
+        run(0.6)
+        fan_fits()
+        assert st.zoom == COMPANION_SCALE and sc.label == ""
+        sc.handle({"send": []}, t[0])
+        sc.handle({"send": [{"id": "c", "name": "Companion screen polish: the narration and the send fan"},
+                            {"id": "d", "name": "Release notes for the companion screen and the viewer"},
+                            {"id": "e", "name": "Docs"}]}, t[0])
+        run(1.0)
+        fan_fits()
+        assert 1.0 <= st.zoom < COMPANION_SCALE, st.zoom  # Smaller, not cut.
+        sc.handle({"send": []}, t[0])
+        run(1.5)
+        assert st.zoom == COMPANION_SCALE and not st.fan(sc, t[0])
+        # Rook speaks with a diagram: left, the diagram in a panel scene laid out for the room, whose grains start at
+        # the presence, and the captions under it.
+        sc.handle({"state": "speaking", "caption": "Here is how Rook runs.", "seconds": 1.5}, t[0])
+        run(0.3)
         answer = st.render(sc, {"diagram": {"title": "What Rook runs", "graph": "agent:rook* > threads:terminal, "
                                             "timers:clock, mailbox:mail, phone, work list:file"}}, t[0])
         ps = st.panel_scene
@@ -14583,13 +14710,26 @@ def _check_companion_stage():
         assert size[0] <= rw and size[1] <= rh and rx >= px and ry + rh <= st.caption_top(True) + 61, (size, st.room())
         qx, qy = st.panel_centre()
         mean = sum(ps.x[:GRAINS]) / GRAINS + qx
-        assert abs(mean - st.centre(t[0])[0]) < 40, mean  # Out of the presence, not out of thin air.
-        assert st.caption_image(sc, t[0], 1.0)[2] + CAPTION_TOP * COMPANION_CAPTION > ry + rh  # The captions go under it.
+        assert abs(mean - st.centre(t[0])[0]) < 200, mean  # Out of the presence, gliding left, not out of thin air.
         for k in range(1, 7):
             assert st.render(sc, {"step": k}, t[0] + 0.1 * k)["ok"]
         run(3.0)
+        st.caption_image(sc, t[0], 1.0)
+        assert st.centre(t[0])[0] == 308.0 and apart(st.caption_rect(sc), st.room()) and st.title is None
         assert st.panel_rect(t[0]) == st.room()  # A settled diagram draws in its room alone.
-        # The turn ends while the diagram holds: the presence stays at the left until it clears.
+        # A diagram, captions and a tool: the tool's label shows under the presence, never in the panel, and ends
+        # before it.
+        sc.handle({"state": "thinking", "activity": "recall"}, t[0])  # CHECKING THE NOTEBOOK, the widest label.
+        sc.handle({"caption": long, "seconds": 2.0}, t[0])
+        run(1.0)
+        st.caption_image(sc, t[0], 1.0)
+        assert st.title is None and sc.label == "CHECKING THE NOTEBOOK" and not sc.companion_hud, sc.label
+        assert st.centre(t[0])[0] == 308.0
+        assert apart(st.caption_rect(sc), st.room())
+        probe = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        half = (sc._label_sprite(probe, sc.label)[1] - 28) / 2
+        assert 308.0 + (half - st.label_shift(sc, t[0])) * COMPANION_SCALE <= px - 11.9, sc.label
+        # The turn ends while the diagram holds: the presence stays at the left until it clears, then goes home.
         sc.handle({"caption": ""}, t[0])
         sc.handle({"state": "ready"}, t[0])
         run(3.0)
@@ -14620,8 +14760,8 @@ def _check_companion_stage():
     plain = Scene(0.0)
     assert plain.push == (0.0, 0.0) and plain.companion_home is None and plain.diagram_room is None and not plain.companion_hud
     assert not CAPTION_LEFT
-    print("companion stage (1540 x 720, 2x presence, glide left on content and hold, glide home, panel title, captions, "
-          "diagram and answer in the panel): ok")
+    print("companion stage (1540 x 720, 2x presence; middle for thinking, tools and sends, left for captions, a diagram, "
+          "the answer or a card; the hold, no back and forth, smooth turns; two-sided fan; title and captions apart): ok")
 
 
 def _check_placement():
@@ -16301,7 +16441,7 @@ def _check_render():
     while t < 4.0:
         t += 1 / 60
         if 2.0 <= t < 2.0 + 1 / 60:
-            sc.handle({"activity": "Grep"}, t)
+            sc.handle({"activity": "Grep", "caption": "Looking for it now.", "seconds": 3.0}, t)  # Captions: left.
         st.step(sc, t)
         sc.step(t)
         if t > 2.0:  # How far the grains are from their places, on average across the glide: the trail.
