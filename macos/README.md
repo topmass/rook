@@ -4,7 +4,7 @@
 
 macOS gives each permission to the responsible process. launchd runs `Rook.app/Contents/MacOS/RookHelper --launch <python> desktop/rook.py ...`, and Python, the presence panel and every tool run as its children. So Microphone, Input Monitoring, Screen Recording, Accessibility and Automation all belong to `Rook.app` (`com.rook.helper`), and they survive Python and Rook updates. `launchd/install.sh` writes that plist.
 
-Opening `Rook.app` by hand, or through System Settings' "Quit & Reopen", restarts Rook through launchd and never starts a second Rook.
+Opening the installed `Rook.app` in Finder loads and starts its login agent if needed. If the agent is already loaded, Finder and System Settings' "Quit & Reopen" restart the same job through launchd.
 
 `RookHelper --check-access` prints each grant without a prompt. `RookHelper --request-access microphone|input|screen|accessibility` shows Apple's prompt. Run them through `relay.py mac-access`, so the answer is Rook.app's.
 
