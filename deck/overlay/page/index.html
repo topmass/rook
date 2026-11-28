@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-presence-unit="0.72">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="color-scheme" content="dark">
+<title>Rook Overlay</title>
+<!-- Rook over the game: its presence in the top-right corner, the answer as it streams, and a pending draft. Served by
+     the plugin backend at http://127.0.0.1:47331/overlay, fed by /overlay/events (SSE). ?anchor= places it
+     (middle-right by default; see overlay.css). The page is transparent and takes no input; it keeps off the top
+     12 px of the screen (a WoW add-on draws its data strip there) and off the screen's middle third. -->
+<link rel="stylesheet" href="/overlay/overlay.css">
+<script src="/overlay/presence.js" defer></script>
+<script src="/overlay/overlay.js" defer></script>
+</head>
+<body data-shown="false" data-mood="resting" data-anchor="middle-right" data-frame="screen">
+<div class="corner">
+  <div class="rook" aria-hidden="true">
+    <div class="presence"><canvas id="dust"></canvas></div>
+    <p id="label" class="label"></p>
+  </div>
+  <section id="say" class="say" aria-live="polite" hidden>
+    <div id="text" class="text"></div>
+    <div id="draft" class="draft" hidden>
+      <p class="draft-label">Draft <span class="draft-hint">· say yes to send</span></p>
+      <p id="draft-text" class="draft-text"></p>
+    </div>
+  </section>
+</div>
+</body>
+</html>

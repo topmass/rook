@@ -1,0 +1,17 @@
+{
+  "name": "Rook",
+  "author": "bencz",
+  "flags": [
+    "root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "voice",
+      "assistant",
+      "root"
+    ],
+    "description": "Rook on the Deck: push-to-talk to the Rook voice assistant on your PC, with its presence and answers over your game.",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}

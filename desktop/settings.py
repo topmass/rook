@@ -124,7 +124,10 @@ SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "them
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
             "recogniser_model")
-CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
+CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins", "deck_device")
+# The paired device that is the Steam Deck, by the name it paired with. With --wow, its requests are game requests
+# while World of Warcraft has focus on it (docs/steamdeck-plan.md, Contracts).
+DECK_DEVICE = "Steam Deck"
 # The text fields a build thread entry may hold when it is an object: its id, and what started it.
 BUILD_THREAD_FIELDS = ("thread", "machine", "provider", "model", "effort", "subagents")
 KNOWN_SETTINGS_KEYS = frozenset((*SETTINGS, *CONFIG_SETTINGS, "previous"))
@@ -219,6 +222,9 @@ def valid(data):
         elif key == "plugins" and isinstance(value, dict):
             import plugin_loader  # Here: native relay commands never load it unless the file holds plugins.
             found[key] = plugin_loader.valid_settings(value)  # {plugin id: true or false}.
+        elif (key == "deck_device" and isinstance(value, str) and 0 < len(value.strip()) <= 40
+              and not any(ord(ch) < 32 for ch in value)):  # The rule for a paired device's name.
+            found[key] = value.strip()
         elif key == "github_user" and isinstance(value, str):
             login = value.strip()
             if not login or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login):
@@ -538,6 +544,13 @@ def medium_voice_url(saved=None):
     if saved is None:
         saved, _ = read_settings()
     return (saved.get("medium_voice_url") or "").strip().rstrip("/")
+
+
+def deck_device(saved=None):
+    """The paired device name of the Steam Deck: the saved deck_device, else DECK_DEVICE."""
+    if saved is None:
+        saved, _ = read_settings()
+    return saved.get("deck_device") or DECK_DEVICE
 
 
 def build_threads(saved=None):

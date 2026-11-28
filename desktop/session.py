@@ -41,12 +41,19 @@ def pn(phrase, they=None):
 
 PORT = 47326  # The phone server's port on loopback. tailscale serve forwards the tailnet HTTPS name to it.
 SERVE_PORT = 8447  # The HTTPS port tailscale serve gives the phone, so the server accepts that Host too.
+# Opt in: the phone server also listens on this home LAN IPv4 address (or 0.0.0.0 for every one), in plain HTTP, for a
+# device with no tailnet, such as the Steam Deck. ROOK_PHONE_PORT gives it a port of its own; else it is PORT.
+LAN_ENV, LAN_PORT_ENV = "ROOK_PHONE_LISTEN", "ROOK_PHONE_PORT"
 TAILSCALE_SECONDS = 3  # How long one read of the tailnet name may wait for tailscale status.
 NAME_RETRY_SECONDS = 60  # A request with an unknown Host reads the tailnet name again, at most this often.
 ADMIT_SECONDS = 5  # A command whose admission write takes longer is refused with a 5xx, and the app retries it.
 LIST_POLL_SECONDS = 5  # While a client is attached, the work list and the mailbox are checked this often for changes.
 PHONE_LABEL = f"Images: none. {OWNER_START} typed this on {pn('his')} phone."
 PHONE_SPOKEN_LABEL = f"Images: none. {OWNER_START} said this to {pn('his')} phone."
+# A request from the Steam Deck while the game has focus there carries the game's label and images, as a request at the
+# desk in the game does, and then one of these, which say where it came from.
+DECK_LABEL = f"{OWNER_START} typed this on {pn('his')} Steam Deck."
+DECK_SPOKEN_LABEL = f"{OWNER_START} said this to {pn('his')} Steam Deck."
 TEXT_LIMIT = 20000
 AUDIO_EXTENSIONS = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a"}
 SPEECH_MAX_CLIPS = 32  # Cap on rendered audio pieces kept in memory across devices.
@@ -676,6 +683,30 @@ class PhoneSession:
             return
         await self.run_ask(device_id, command_id, turn, cleaned, label=PHONE_SPOKEN_LABEL, source="spoken")
 
+    async def deck_device(self, device_id=None):
+        """The id of the paired device named by the deck_device setting, the one seen last when two share the name, or
+        None. With device_id, that id only when it is that device."""
+        if not self.server:
+            return None
+        name = relay.settings.deck_device()
+        try:
+            devices = await asyncio.to_thread(self.server.store.list_devices)
+        except Exception:  # The device store is busy or gone: the request is a plain phone request.
+            return None
+        decks = [device for device in devices if device.name == name and device_id in (None, device.id)]
+        return max(decks, key=lambda device: device.last_seen).id if decks else None
+
+    async def game_label(self, device_id, source):
+        """(label, shots) for a request from the Steam Deck while the game has focus there, as a game request at the
+        desk gets them, with the line that says it came from the Deck. None for any other request."""
+        found = await self.c.deck_shots(device_id)
+        if not found:
+            return None
+        label, shots = found
+        first, _, data = label.partition("\n")  # The game data is never rendered: only Rook's own line is.
+        said = relay.settings.render(DECK_SPOKEN_LABEL if source == "spoken" else DECK_LABEL)
+        return f"{first} {said}" + (f"\n{data}" if data else ""), shots
+
     def request_state(self, turn):
         conn = journal.reader(self.c.journal.file)
         try:
@@ -686,7 +717,9 @@ class PhoneSession:
 
     async def run_ask(self, device_id, command_id, turn, text, label=PHONE_LABEL, source="typed"):
         """Give a phone's request to the agent. It waits its turn as a typed ask does: the turn lock, then an idle
-        Rook. No screenshot: the desk is not the phone. A stop word cuts the running turn first, as at the desk."""
+        Rook. No screenshot: the desk is not the phone. The Steam Deck with the game focused is the one exception: its
+        request is a game request, with the game's own capture. A stop word cuts the running turn first, as at the
+        desk."""
         try:
             heeded = await self.c.heed_stop(text, client=device_id) if source == "spoken" else None
             if heeded is True:  # A bare stop: nothing goes to the agent.
@@ -702,8 +735,9 @@ class PhoneSession:
                     if self.c.exit.is_set():  # Rook is stopping: its row stays queued, and the next start gives it.
                         self.voice_turns.pop(turn, None)
                         return
-                    if await self.c.submit(text, relay.settings.render(label), (), source=source, note=heeded or None, turn=turn,
-                                           client=device_id) is not False:
+                    game = await self.game_label(device_id, source)
+                    if await self.c.submit(text, *(game or (relay.settings.render(label), ())), source=source,
+                                           note=heeded or None, turn=turn, client=device_id) is not False:
                         break
         except Exception as error:  # Its row stays queued, and the next start gives it again.
             self.voice_turns.pop(turn, None)
@@ -760,6 +794,8 @@ class PhoneSession:
         try:
             store = await asyncio.to_thread(lambda: server.DeviceStore(devices_path()).open())
             extra = {"local_token": self.local_presence_token} if desk.IS_MAC else {}
+            if os.environ.get(LAN_ENV, "").strip():
+                extra.update(lan=os.environ[LAN_ENV].strip(), lan_port=int(os.environ.get(LAN_PORT_ENV) or 0) or None)
             self.server = await server.Server(self, store, port=port, on_unknown_host=self.unknown_host,
                                               on_paired=lambda: self.c.phone_paired(),
                                               static_dir=Path(__file__).resolve().parent.parent / "phone",
