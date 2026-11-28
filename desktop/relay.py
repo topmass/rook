@@ -2513,18 +2513,6 @@ def work_actor():
     return thread, ("rook" if os.environ.get("ROOK_AGENT") else f"thread {thread}" if thread else "terminal")
 
 
-def finish_thread_work():
-    """A T3 thread's tell or note is its report: its running work entries are done (work.thread_told)."""
-    thread, by = work_actor()
-    if not by.startswith("thread "):
-        return
-    try:
-        with work.changing() as data:
-            work.thread_told(data, watch.local_machine(), thread, time.time())
-    except (work.Unreadable, OSError):  # The report went out: a work list that cannot be written must not hide that.
-        pass
-
-
 def validate_work_fields(fields):
     if len(fields.get("brief") or "") > work.BRIEF:
         sys.exit(f"The brief is {len(fields['brief'])} characters, and the list keeps at most {work.BRIEF}.")
@@ -6443,8 +6431,6 @@ def main():
             sys.exit(f"Rook is not running: nothing answers at {INBOX}.")
         if not answer.get("ok"):
             sys.exit(answer.get("error") or "Rook did not take the message.")
-        if not watch.decision(text):  # A report that asks the owner to decide leaves its work waiting on them.
-            finish_thread_work()
         print("Rook has the message.")
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "note":
@@ -6454,7 +6440,6 @@ def main():
         if not (text := text.strip()):
             sys.exit("Give the text as an argument or on stdin.")
         write_note(text)
-        finish_thread_work()
         print("Rook reports the note when it next starts, within ten minutes.")
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "mac-access":
