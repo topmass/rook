@@ -1756,7 +1756,7 @@ class Sentence:
             layout.set_attributes(attrs)
         self.text = _safe_utf8(self.text)
         _caption_set_text(layout, self.text)
-        if layout.get_line_count() == 2:
+        if layout.get_line_count() == 2 and CAPTION_COLUMN is None:  # The companion stage fills each line instead.
             # The narrowest width that still keeps two lines evens them out, so no word sits alone on the second.
             lo, hi = column // 2, column
             while lo < hi:
@@ -2413,6 +2413,13 @@ def _caption_pages(words):
         n = 1
         while n + 1 < len(words) and fits(words[:n + 1]):
             n += 1
+        if CAPTION_COLUMN is not None:
+            # The companion stage fills each page's two lines before it turns the page (the owner saw lines break
+            # with room to spare); only a last word left alone moves over, so no page holds a single word.
+            cut = n - 1 if n > 1 and len(words) - n == 1 and fits(words[n - 1:]) else n
+            pages.append(words[:cut])
+            words = words[cut:]
+            continue
         cut = next((k for k in range(n, n // 2, -1) if clause(words[k - 1])), n)
         if fits(words[cut:]) and 2 * len(" ".join(words[cut:])) < len(" ".join(words[:cut])):
             early = next((k for k in range(cut - 1, 0, -1) if clause(words[k - 1]) and fits(words[k:])), None)
@@ -14969,6 +14976,13 @@ def _check_companion_stage():
                         text, place, x0 + box[2])  # 12 px: the halo's soft edge past the margin.
                     assert y0 + box[3] <= st2.h, (text, place, y0 + box[3])
                     assert len(page.lines) <= 2, (text, place, len(page.lines))
+                    if len(page.lines) == 2:  # Line one is full: line two's first word would not have fit on it.
+                        size = page.scale
+                        tops = sorted({y for _, _, y, _ in page.sprites})
+                        one = [(x, sp.get_width() / size) for sp, x, y, _ in page.sprites if y == tops[0]]
+                        two = [sp.get_width() / size for sp, _, y, _ in page.sprites if y != tops[0]]
+                        right = max(x + w - 14 for x, w in one)
+                        assert right + 4 + (two[0] - 28) > CAPTION_COLUMN, (text, place, right, two[0] - 28)
         # A smaller monitor shrinks the stage to fit, and the layout follows it.
         small = CompanionStage((924, 432))
         assert small.panel()[0] == round(0.3 * 924) and small.centre(0.0) == (462.0, 200.0)
