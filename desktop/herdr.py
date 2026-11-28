@@ -146,13 +146,27 @@ def read_screen(machine, agent, lines, timeout=SECONDS, *, source=None, blocked=
     try:
         text = read(preferred, blocked)
     except Failed as error:
-        if preferred != "recent-unwrapped" or error.code != "agent_not_idle" or time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             raise
-        text = read("visible", True)
-        blocked = True
-    if not text and blocked and source is None and time.monotonic() < deadline:
-        return read("detection", True)
+        if preferred == "recent-unwrapped" and error.code == "agent_not_idle":
+            text, blocked = read("visible", True), True
+        elif preferred == "visible" and source is None and error.code not in ("timeout", "agent_not_found"):
+            text = read("recent-unwrapped", True)  # An older Herdr has no visible source.
+        else:
+            raise
+    if blocked and source is None and not prompt_shown(text) and time.monotonic() < deadline:
+        try:
+            found = read("detection", True)
+        except Failed:  # An older Herdr has no detection source either.
+            found = ""
+        if prompt_shown(found) or not text:
+            return found
     return text
+
+
+def prompt_shown(text):
+    """Whether a blocked agent's screen shows its question or approval, not only older output."""
+    return bool(APPROVAL.search(text or "") or dialog(text))
 
 
 def sends_path():
