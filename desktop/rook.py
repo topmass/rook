@@ -4090,26 +4090,70 @@ class Companion:
             self.journal_write("card_shown", message["card"])
         self.card_move(message.get("request_id") or "", Card.SHOWN, "shown")
         questions = (request.get("input") or {}).get("questions")
+        details = json.dumps(request.get("input"), indent=2)
         self.show("permission", spoken=self.card_spoken(),
-                  details=json.dumps(request.get("input"), indent=2), card=message.get("card"),
+                  details=details, card=message.get("card"),
                   questions=questions if request["tool_name"] == "AskUserQuestion" else None,
                   tool=request["tool_name"], who=getattr(self.harness, "short", "Rook"), count=self.card_count())
+        self.show_mac_card(details)
         if self.phone and (card := self.phone.card()):  # Its full words go live only, not stored.
             self.phone.live("card", {**card, "state": "opened"})
+
+    def show_mac_card(self, details=None):
+        """Send the current card over the helper's private pipe, or dismiss it when it closes."""
+        helper = getattr(self, "mac_helper", None)
+        if helper is None or helper.returncode is not None or helper.stdin.is_closing():
+            return
+        voice = getattr(self, "voice", None)
+        previous = getattr(self, "mac_approval_speech", None)
+        self.mac_approval_speech = None
+        if previous is not None and previous in self.voice_texts and voice and voice.returncode is None:
+            send(voice, {"type": "cancel_speak", "id": previous})
+        card = self.permission
+        if card is None:
+            send(helper, {"event": "approval", "card": None})
+            return
+        request = card["request"]
+        inputs = request.get("input") or {}
+        preview = next((inputs[key] for key in ("command", "file_path", "path", "description", "query", "url")
+                        if isinstance(inputs.get(key), str) and inputs[key].strip()), "")
+        preview = " ".join(preview.split())
+        tool = request["tool_name"]
+        title = self.card_spoken()
+        if tool == "AskUserQuestion":
+            preview = card_summary(request, getattr(self.harness, "short", "Rook"))
+        send(helper, {"event": "approval", "card": card["card"], "title": title,
+                      "details": details if details is not None else json.dumps(request.get("input"), indent=2),
+                      "can_allow": tool != "AskUserQuestion"})
+        if voice and voice.returncode is None and not self.dark and not self.talking():
+            who = getattr(self.harness, "short", "Rook")
+            lead = {"Bash": f"{who} wants to run a command.", "Read": f"{who} wants to read a file."}.get(tool, title)
+            if len(preview) > 220:
+                preview = preview[:220].rstrip() + ". Hover over the buttons for the full request."
+            spoken = f"{lead} {preview}".strip()
+            if tool != "AskUserQuestion":
+                spoken = f"{spoken.rstrip('.')}. Hold Right Option and say yes or no."
+            item = self.mac_approval_speech = str(uuid4())
+            self.voice_texts[item] = spoken
+            self.send_speech({"type": "speak", "id": item, "text": spoken, "cancelable": True})
 
     def next_card(self, thinking):
         """After the shown card ends: the oldest waiting card shows, or the presence goes back to thinking."""
         if self.card_queue:
             message, self.card_queue = self.card_queue[0], self.card_queue[1:]
             self.show_card(message, promoted=True)
-        elif thinking:
-            self.show("thinking")
+        else:
+            self.show_mac_card()
+            if thinking:
+                self.show("thinking")
 
     def close_cards(self, why, deny=False):
         """End every card, shown and waiting, such as when the turn ends, is cut, or the agent closes. deny answers
         each as declined first, so none of their tools runs. Return how many there were."""
         cards = ([self.permission] if self.permission else []) + list(self.card_queue)
         self.permission, self.card_queue, self.card_overflow = None, (), False
+        if cards:
+            self.show_mac_card()
         for message in cards:
             if deny and (agent := getattr(self, "agent", None)) and agent.returncode is None:
                 self.harness.permit(agent, message, False)
@@ -6261,6 +6305,7 @@ class Companion:
                 trace.finish("capture_failed")
             self.log("capture_error", error="Speech recognition is not on this system yet.")
             return
+        approval_card = getattr(released, "approval_card", None)
         window = await self.hyprctl("activewindow") or {}
         in_game = bool(self.game and window.get("title", "").startswith("World of Warcraft"))
         if released.is_set():
@@ -6281,7 +6326,7 @@ class Companion:
         if trace:
             trace.begin("capture")
             trace.begin("screenshot")
-        shots = self.loop.create_task(self.no_shots(in_game) if self.dark and not DARK_SCREENSHOTS else
+        shots = self.loop.create_task(self.no_shots(in_game) if approval_card or self.dark and not DARK_SCREENSHOTS else
                                       self.game_screenshots(window) if in_game else self.screenshot(window))
         result = None
         record_ms = transcribe_ms = 0
@@ -6352,7 +6397,18 @@ class Companion:
                 self.capture_finished.set()
             # From here the reply's end resumes it, or at once below when the owner said nothing.
             self.hush_hold = False
-        if result and result.text:
+        if approval_card:
+            shots.cancel()
+            answered = self.answer_mac_card_voice(approval_card, result.text if result else "")
+            if trace:
+                trace.finish("approval_voice" if answered else "approval_unrecognised")
+            if not answered:
+                if self.permission:
+                    self.show("permission")
+                else:
+                    self.show_resting()
+            self.maybe_restore_media_duck()
+        elif result and result.text:
             images = await self.bounded_shots(shots, in_game)
             if trace:
                 trace.end("screenshot", complete=not shots.cancelled())
@@ -8120,6 +8176,8 @@ class Companion:
         def _start(_key):
             released = asyncio.Event()
             released.cancelled = False
+            if self.permission and self.permission["request"]["tool_name"] != "AskUserQuestion":
+                released.approval_card = self.permission["card"]
             if self.start_talk(released):
                 active[0] = released
                 return True
@@ -8147,8 +8205,20 @@ class Companion:
             is_talking=self.talking,
         )
 
+    def answer_mac_card_voice(self, card, transcript):
+        """Accept just yes or no from a push-to-talk capture tied to the currently shown card."""
+        decision = re.fullmatch(r"\s*(yes|no)[.!?]?\s*", transcript or "", re.IGNORECASE)
+        if (decision is None or self.permission is None or self.permission["card"] != card
+                or self.permission["request"]["tool_name"] == "AskUserQuestion"):
+            return False
+        allowed = decision[1].lower() == "yes"
+        if not self.answer_permission(allowed, card=card):
+            return False
+        self.log("approval_voice", allowed=allowed)
+        return True
+
     async def read_mac_helper(self, helper_proc):
-        """Read JSON talk_key events from RookHelper.app stdout and route them through MacTalkRouter."""
+        """Route the helper's talk keys and explicit approval clicks from its private pipe."""
         router = self.make_mac_talk_router()
         while helper_proc.stdout is not None:
             raw = await helper_proc.stdout.readline()
@@ -8158,12 +8228,21 @@ class Companion:
                 event = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            if isinstance(event, dict) and event.get("type") in ("keys_ready", "keys_unavailable"):
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") in ("keys_ready", "keys_unavailable"):
                 self.mac_keys = event  # relay.py verify's keys row reads it through probe keys.
-            if isinstance(event, dict) and event.get("type") == "talk_key":
+            elif event.get("type") == "talk_key":
                 self.last_key = time.monotonic()
                 self.save_presence()
                 router.handle(event)
+            elif event.get("type") == "approval":
+                card, allowed = event.get("card"), event.get("allow")
+                if not isinstance(card, str) or not isinstance(allowed, bool):
+                    continue
+                if allowed and self.permission and self.permission["request"]["tool_name"] == "AskUserQuestion":
+                    continue
+                self.answer_permission(allowed, card=card)
 
     async def run(self):
         # Restore any music left ducked by an earlier crash first, before voice, socket, or agent launch.
@@ -8456,6 +8535,7 @@ class Companion:
                 self.mac_helper = await asyncio.create_subprocess_exec(
                     *helper_args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env=helper_env
                 )
+                self.show_mac_card()
                 self.loop.create_task(self.read_mac_helper(self.mac_helper))
         # Delivery starts after the launch, so a turn cannot start a second Claude process.
         self.keep("delivery", self.deliver)
@@ -10266,12 +10346,16 @@ def check_agent():
                 saved_strict, machine.Machine.strict = machine.Machine.strict, True
                 try:
                     writes, states, rows[:] = [], [], []
+                    mac_cards = []
                     c = companion()
                     c.__dict__.update(
                         agent=SimpleNamespace(returncode=None, kill=lambda: None, stdout=None,
                                               stdin=SimpleNamespace(write=lambda raw: writes.append(json.loads(raw)))),
+                        mac_helper=SimpleNamespace(returncode=None, stdin=SimpleNamespace(
+                            is_closing=lambda: False, write=lambda raw: mac_cards.append(json.loads(raw)))),
                         capture_finished=asyncio.Event(), latest_turn="turn-c", pending_turns={"turn-c"},
                         delegating={}, turn_tools=[], voice=None, voice_id=None, voice_texts={}, voice_steps={},
+                        talking=lambda: False,
                         step_task=None, step_lit=False, step_loop=None, auditions={}, staged=None, turn_timing=None,
                         show=lambda state, **fields: states.append((state, fields.get("card"), fields.get("details"))))
                     c.capture_finished.set()
@@ -10285,6 +10369,13 @@ def check_agent():
                             for step in steps:
                                 yield step
                         return read
+
+                    async def mac_click(card, allow):
+                        stream = asyncio.StreamReader()
+                        stream.feed_data((json.dumps({"type": "approval", "card": card, "allow": allow}) + "\n").encode())
+                        stream.feed_eof()
+                        await c.read_mac_helper(SimpleNamespace(stdout=stream))
+
                     c.harness.read = card_stream(ask("a1"), ask("a2", "Edit"), ask("a3", "Write"), ask("a2", "Edit"))
                     await c.read_stream()
                     assert c.permission["request_id"] == "a1" and [m["request_id"] for m in c.card_queue] == ["a2", "a3"]
@@ -10296,14 +10387,24 @@ def check_agent():
                     assert not c.answer_permission(True)  # No id: the older desk path is closed.
                     assert not c.answer_permission(True, card="a1") and not writes  # The agent's own id is not a key.
                     assert len([row for row in rows if row[0] == "card_refused"]) == 3
-                    assert c.answer_permission(True, card=key["a1"]) and writes[-1]["response"]["request_id"] == "a1"
+                    assert len(mac_cards) == 1 and mac_cards[0]["card"] == key["a1"]
+                    assert json.loads(mac_cards[0]["details"]) == {"command": "ls"}
+                    await mac_click(key["a1"], "true")  # A malformed decision cannot answer the card.
+                    assert not writes
+                    await mac_click(key["a1"], True)
+                    assert writes[-1]["response"]["request_id"] == "a1" and mac_cards[-1]["card"] == key["a2"]
                     assert writes[-1]["response"]["response"]["behavior"] == "allow" and states[-1][:2] == ("permission", key["a2"])
-                    assert not c.answer_permission(False, card=key["a1"]) and len(writes) == 1  # Answered once.
+                    await mac_click(key["a1"], False)
+                    assert len(writes) == 1  # A late click cannot answer the replacement card.
                     c.harness.read = card_stream({"type": "control_cancel_request", "request_id": "a3"})
                     await c.read_stream()  # Taken back while it waits: it never shows.
                     assert c.permission["request_id"] == "a2" and not c.card_queue
-                    assert c.answer_permission(False, card=key["a2"]) and writes[-1]["response"]["response"]["behavior"] == "deny"
+                    assert not c.answer_mac_card_voice(key["a1"], "Yes.")  # The card changed during capture.
+                    assert not c.answer_mac_card_voice(key["a2"], "Yes, please.") and len(writes) == 1
+                    assert c.answer_mac_card_voice(key["a2"], "No!")
+                    assert writes[-1]["response"]["response"]["behavior"] == "deny"
                     assert states[-1][:2] == ("thinking", None) and c.permission is None and not c.card_states
+                    assert mac_cards[-1] == {"event": "approval", "card": None}
                     # Two waiting at Stop: both are declined, then the turn is cancelled.
                     c.harness.read = card_stream(ask("b1"), ask("b2"))
                     await c.read_stream()

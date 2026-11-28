@@ -2,10 +2,13 @@
 #import <AVFoundation/AVFoundation.h>
 #import <Cocoa/Cocoa.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #include <errno.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 
 extern char **environ;
@@ -228,6 +231,21 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
+@interface ApprovalPanel : NSPanel
+@end
+
+@implementation ApprovalPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface ApprovalButton : NSButton
+@end
+
+@implementation ApprovalButton
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate>
 @property (nonatomic, copy) NSString *urlString;
 @property (nonatomic, assign) CGFloat width;
@@ -236,6 +254,8 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 @property (nonatomic, strong) NSNumber *smokeSeconds;
 @property (nonatomic, copy) NSString *token;
 @property (nonatomic, strong) PresencePanel *panel;
+@property (nonatomic, strong) ApprovalPanel *approvalPanel;
+@property (nonatomic, copy) NSString *approvalID;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) EventTapHost *eventTap;
 @property (nonatomic, assign) BOOL finishedLoad;
@@ -373,6 +393,79 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     emitJSON(@{@"type": @"error", @"error": error.localizedDescription ?: @"Provisional navigation failed"});
 }
 
+- (void)showApproval:(NSDictionary *)message {
+    if (self.approvalPanel) {
+        [self.panel removeChildWindow:self.approvalPanel];
+        [self.approvalPanel orderOut:nil];
+    }
+    self.approvalPanel = nil;
+    self.approvalID = nil;
+    NSString *card = message[@"card"];
+    if (![card isKindOfClass:[NSString class]] || card.length == 0) return;
+    self.approvalID = card;
+
+    BOOL canAllow = [message[@"can_allow"] isEqual:@YES];
+    const CGFloat buttonSize = 36, inset = 4, gap = 4;
+    CGFloat width = 2 * inset + buttonSize + (canAllow ? buttonSize + gap : 0);
+    CGFloat height = buttonSize + 2 * inset;
+    NSRect bubble = self.panel.frame;
+    NSScreen *screen = self.panel.screen ?: NSScreen.mainScreen;
+    NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
+    CGFloat x = MIN(NSMaxX(visible) - width, MAX(NSMinX(visible), NSMidX(bubble) - width / 2));
+    CGFloat y = MAX(NSMinY(visible), NSMinY(bubble) - height + 12);
+    ApprovalPanel *panel = [[ApprovalPanel alloc]
+        initWithContentRect:NSMakeRect(x, y, width, height)
+        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+        backing:NSBackingStoreBuffered defer:NO];
+    panel.opaque = NO;
+    panel.backgroundColor = NSColor.clearColor;
+    panel.hasShadow = NO;
+    panel.level = NSFloatingWindowLevel;
+    panel.collectionBehavior = self.panel.collectionBehavior;
+    panel.hidesOnDeactivate = NO;
+
+    NSView *content = panel.contentView;
+    content.wantsLayer = YES;
+    content.layer.backgroundColor = [NSColor colorWithSRGBRed:0.09 green:0.08 blue:0.07 alpha:0.94].CGColor;
+    content.layer.borderColor = [NSColor colorWithSRGBRed:0.55 green:0.43 blue:0.26 alpha:0.75].CGColor;
+    content.layer.borderWidth = 1;
+    content.layer.cornerRadius = height / 2;
+    NSString *title = [message[@"title"] isKindOfClass:[NSString class]] ? message[@"title"] : @"Tool approval";
+    NSString *details = [message[@"details"] isKindOfClass:[NSString class]] ? message[@"details"] : @"";
+    for (NSNumber *choice in (canAllow ? @[@YES, @NO] : @[@NO])) {
+        BOOL allow = choice.boolValue;
+        NSString *action = allow ? @"Allow once" : @"Decline";
+        CGFloat left = inset + (!allow && canAllow ? buttonSize + gap : 0);
+        ApprovalButton *button = [[ApprovalButton alloc] initWithFrame:NSMakeRect(left, inset, buttonSize, buttonSize)];
+        button.identifier = card;
+        button.tag = allow;
+        button.target = self;
+        button.action = @selector(answerApproval:);
+        button.bordered = NO;
+        button.imagePosition = NSImageOnly;
+        button.image = [NSImage imageWithSystemSymbolName:(allow ? @"checkmark" : @"xmark")
+                              accessibilityDescription:action];
+        button.contentTintColor = allow
+            ? [NSColor colorWithSRGBRed:0.68 green:0.90 blue:0.69 alpha:1]
+            : [NSColor colorWithSRGBRed:0.97 green:0.73 blue:0.69 alpha:1];
+        button.accessibilityLabel = action;
+        button.toolTip = [NSString stringWithFormat:@"%@\n%@\n%@", action, title, details];
+        [content addSubview:button];
+    }
+    self.approvalPanel = panel;
+    [self.panel addChildWindow:panel ordered:NSWindowAbove];
+    [panel orderFront:nil];
+}
+
+- (void)answerApproval:(NSButton *)sender {
+    // An old button can never answer a replacement card, even if it was clicked during the switch.
+    NSString *card = sender.identifier;
+    if (sender.window != self.approvalPanel || ![card isEqualToString:self.approvalID]) return;
+    BOOL allowed = sender.tag == 1;
+    [self showApproval:@{}];
+    emitJSON(@{@"type": @"approval", @"card": card, @"allow": @(allowed)});
+}
+
 - (void)emitSmokeAndExit {
     BOOL active = NSApp.isActive;
     BOOL ignores = self.panel.ignoresMouseEvents;
@@ -384,6 +477,10 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
             @"active": @(active),
             @"ignoresMouseEvents": @(ignores),
             @"isOpaque": @(opaque),
+            @"approvalVisible": @(self.approvalPanel.isVisible),
+            @"approvalAttached": @(self.approvalPanel && self.approvalPanel.parentWindow == self.panel),
+            @"approvalAllowsKeyFocus": @(self.approvalPanel.canBecomeKeyWindow),
+            @"approvalButtons": @(self.approvalPanel.contentView.subviews.count),
             @"host": hostInfo ?: @{},
         });
         [NSApp terminate:nil];
@@ -402,20 +499,24 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 - (void)startStdinReader {
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), stdin) != NULL) {
-            NSString *line = [[NSString stringWithUTF8String:buf]
-                              stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (line.length == 0) continue;
-            NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        char *buf = NULL;
+        size_t capacity = 0;
+        ssize_t length;
+        while ((length = getline(&buf, &capacity, stdin)) != -1) {
+            NSData *data = [NSData dataWithBytes:buf length:(NSUInteger)length];
             id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if (![obj isKindOfClass:[NSDictionary class]]) continue;
             NSDictionary *dict = (NSDictionary *)obj;
             if ([dict[@"quit"] respondsToSelector:@selector(boolValue)] && [dict[@"quit"] boolValue]) {
                 dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+                free(buf);
                 return;
             }
             NSString *kind = [dict[@"event"] isKindOfClass:[NSString class]] ? dict[@"event"] : @"state";
+            if ([kind isEqualToString:@"approval"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showApproval:dict]; });
+                continue;
+            }
             NSData *kindData = [NSJSONSerialization dataWithJSONObject:@[kind] options:0 error:nil];
             NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
             if (!kindData || !jsonData) continue;
@@ -427,6 +528,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
                 [weakSelf.webView evaluateJavaScript:js completionHandler:nil];
             });
         }
+        free(buf);
         if (weakSelf.smokeSeconds == nil) {
             dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
         }
