@@ -1428,8 +1428,8 @@ def hyprland_json(command, timeout=0.5):
     return PLATFORM.hyprland_json(command, timeout=timeout)
 
 
-def own_screen_monitor(monitors, wanted):
-    """The monitor in Hyprland's monitor list that the own_screen setting names, or None. wanted is the connector
+def companion_screen_monitor(monitors, wanted):
+    """The monitor in Hyprland's monitor list that the companion_screen setting names, or None. wanted is the connector
     name, such as DP-2, or text in the monitor's description, in any case, since a port can change on a replug."""
     wanted = (wanted or "").strip().casefold()
     if not wanted or wanted == "off" or not isinstance(monitors, list):

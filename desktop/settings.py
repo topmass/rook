@@ -79,7 +79,7 @@ STAGE = "off"
 # The monitor Rook lives on alone, on a centred stage, whatever has focus: "off" (Rook follows the focused monitor),
 # or a Hyprland connector name, such as DP-2, or text in that monitor's description. Rook follows focus again while
 # no connected monitor matches.
-OWN_SCREEN = "off"
+COMPANION_SCREEN = "off"
 # When Rook keeps listening for 5 seconds after it speaks: never, after news the owner did not ask for, after a
 # question to the owner, or after both. A change applies to the next answer.
 LISTEN_AFTERS = ("off", "passive", "questions", "both")
@@ -119,7 +119,7 @@ MEDIUM_VOICES = ("late-night-architect", "velvet-wit", "jarvis-poe", "observator
 MACHINES_CONFIG = CONFIG.with_name("machines.json")
 DEFAULT_THEME_PACK = "devs"
 THEMES_DIR = Path(__file__).resolve().parent.parent / "themes"
-SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "stage", "own_screen", "listen_after", "smart_turn",
+SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "theme", "stage", "companion_screen", "listen_after", "smart_turn",
             "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
@@ -164,7 +164,7 @@ def valid(data):
             found[key] = value
         elif key == "stage" and isinstance(value, str) and value.strip().lower() in STAGES:
             found[key] = value.strip().lower()
-        elif key == "own_screen" and isinstance(value, str) and value.strip():
+        elif key == "companion_screen" and isinstance(value, str) and value.strip():
             found[key] = "off" if value.strip().lower() == "off" else " ".join(value.split())
         elif key == "listen_after" and isinstance(value, str) and value.strip().lower() in LISTEN_AFTERS:
             found[key] = value.strip().lower()
@@ -521,11 +521,11 @@ def stage_in_force(saved):
     return STAGE, "default"
 
 
-def own_screen_in_force(saved):
-    """Return (own_screen, source): the saved monitor, or "off", while valid, else the default, off."""
-    if "own_screen" in (found := valid({"own_screen": saved.get("own_screen")})):
-        return found["own_screen"], "settings file"
-    return OWN_SCREEN, "default"
+def companion_screen_in_force(saved):
+    """Return (companion_screen, source): the saved monitor, or "off", while valid, else the default, off."""
+    if "companion_screen" in (found := valid({"companion_screen": saved.get("companion_screen")})):
+        return found["companion_screen"], "settings file"
+    return COMPANION_SCREEN, "default"
 
 
 def medium_voice_url(saved=None):

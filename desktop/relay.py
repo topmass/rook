@@ -23,8 +23,10 @@ relay.py voices             List the voices Rook can speak with.
 relay.py fonts              List the fonts Rook can show its text in.
 relay.py dusts              List the looks of the dust that Rook's light theme draws.
 relay.py themes             List the presence theme packs installed under themes/ and ~/.config/rook/themes/.
-relay.py screens            List the connected monitors, for own_screen. "set own_screen DP-2" puts Rook on a centred
-                            stage on that monitor alone, by its name or words of its description; "off" follows focus.
+relay.py screens            List the connected monitors, for Companion Screen mode. "set companion_screen DP-2" makes
+                            that monitor Rook's companion screen: Rook lives on a centred stage there alone, and media
+                            opens on the focused monitor. Name it or use words of its description; "off" is overlay
+                            mode, which follows focus.
 relay.py forge <new|bake|list> ...
                             Create, bake, or list Rook's own shader icons and theme packs in ~/.config/rook/themes/.
 relay.py set KEY VALUE [--say TEXT]
@@ -251,7 +253,7 @@ from settings import (
     font_in_force, fonts, light_dust_in_force, light_dusts, listen_after_in_force, match_voice,
     medium_voice, medium_voice_url, points_to_engine, read_settings, recording_minutes_in_force,
     smart_turn_in_force, smart_turn_threshold_in_force, speak_thoughts_in_force, stage_in_force,
-    own_screen_in_force, theme_pack_in_force, theme_packs,
+    companion_screen_in_force, theme_pack_in_force, theme_packs,
     valid, valid_medium_voice_url, voice_python, voices, write_settings,
 )
 import update_check
@@ -359,13 +361,13 @@ def leave(message=None):
     sys.exit(settings.render(message) if isinstance(message, str) else message)
 
 
-def own_screen_said(value):
-    """For own_screen: the connected monitor value names (None when off or none matches), and a sentence that says
+def companion_screen_said(value):
+    """For companion_screen: the connected monitor value names (None when off or none matches), and a sentence that says
     no such monitor is connected now and lists the connected ones ("" when off or one matches)."""
     if value == "off":
         return None, ""
     monitors = desk.hyprland_json("monitors")
-    if mon := desk.own_screen_monitor(monitors, value):
+    if mon := desk.companion_screen_monitor(monitors, value):
         return mon, ""
     listed = "; ".join(f"{m.get('name')} ({m.get('description') or 'no description'})"
                        for m in (monitors if isinstance(monitors, list) else []) if isinstance(m, dict))
@@ -379,9 +381,9 @@ def settings_command(argv):
         monitors = desk.hyprland_json("monitors")
         if not isinstance(monitors, list) or not monitors:
             leave("Rook could not ask Hyprland for its monitors, so it cannot list them.")
-        pinned = desk.own_screen_monitor(monitors, own_screen_in_force(read_settings()[0])[0])
+        pinned = desk.companion_screen_monitor(monitors, companion_screen_in_force(read_settings()[0])[0])
         for mon in monitors:
-            mark = " (own screen)" if mon is pinned else ""
+            mark = " (companion screen)" if mon is pinned else ""
             utter(f"{mon.get('name')}{mark}: {mon.get('description') or 'no description'}")
         return
     if command == "voices":
@@ -449,7 +451,7 @@ def settings_command(argv):
             values["theme"] = {"value": theme_pack, "source": source}
             stage, source = stage_in_force(saved_file)
             values["stage"] = {"value": stage, "source": source}
-            values["own_screen"] = dict(zip(("value", "source"), own_screen_in_force(saved_file)))
+            values["companion_screen"] = dict(zip(("value", "source"), companion_screen_in_force(saved_file)))
             listen, source = listen_after_in_force(saved_file)
             values["listen_after"] = {"value": listen, "source": source}
             st_mode, source = smart_turn_in_force(saved_file)
@@ -713,7 +715,7 @@ def settings_command(argv):
                       "smart_turn_threshold": smart_turn_threshold_in_force(saved)[0],
                       "speak_thoughts": speak_thoughts_in_force(saved)[0],
                       "stage": stage_in_force(saved)[0],
-                      "own_screen": own_screen_in_force(saved)[0],
+                      "companion_screen": companion_screen_in_force(saved)[0],
                       "recording_minutes": recording_minutes_in_force(saved)[0]})
     from_previous = value.lower() == "previous"
     if from_previous:
@@ -784,10 +786,11 @@ def settings_command(argv):
         value = value.lower()
         if value not in STAGES:
             leave("The desktop stage is shelved, so stage stays off. Rook draws diagrams with its own particles.")
-    elif key == "own_screen":
+    elif key == "companion_screen":
         value = valid({key: value}).get(key)
         if value is None:
-            leave("own_screen takes off, or a monitor's name or words of its description. relay.py screens lists them.")
+            leave("companion_screen takes off, or a monitor's name or words of its description. "
+                  "relay.py screens lists them.")
     elif key == "listen_after":
         value = value.lower()
         if value not in LISTEN_AFTERS:
@@ -836,8 +839,8 @@ def settings_command(argv):
         previous = {**previous, key: in_force[key]}
     left = save_checked({**saved, key: value}, previous, updated={key})
     left_note = f" (left alone: {', '.join(left)})" if left else ""
-    screen, screen_note = own_screen_said(value) if key == "own_screen" else (None, "")
-    if key == "own_screen" and (running is None or key not in running["settings"]):
+    screen, screen_note = companion_screen_said(value) if key == "companion_screen" else (None, "")
+    if key == "companion_screen" and (running is None or key not in running["settings"]):
         left_note = screen_note + left_note
     if key == "orchestrator":  # Rook's prompt reads it at its next start, where the herdr plugin is on. Nothing to apply now.
         utter(f"Saved orchestrator = {shown}. Rook uses it from its next start.{left_note}")
@@ -884,14 +887,14 @@ def settings_command(argv):
         where = "the stage, beside the presence" if applied.get("stage") == "on" else "the overlay"
         utter(f"Diagrams and the answer panel now show in {where}, starting from the next one.{left_note}")
         return
-    if key == "own_screen":
-        if applied.get("own_screen") == "off":
-            utter(f"Rook follows the focused monitor again.{left_note}")
+    if key == "companion_screen":
+        if applied.get("companion_screen") == "off":
+            utter(f"Rook is back in overlay mode and follows the focused monitor.{left_note}")
         elif screen:
-            utter(f"Rook now lives on {screen.get('name')} ({screen.get('description') or 'no description'}), on a "
-                  f"centred stage, whatever has focus.{left_note}")
+            utter(f"Rook now lives on {screen.get('name')} ({screen.get('description') or 'no description'}) as "
+                  f"your companion screen, whatever has focus. Media opens on the focused monitor.{left_note}")
         else:
-            utter(f"Saved own_screen = {shown}.{screen_note}{left_note}")
+            utter(f"Saved companion_screen = {shown}.{screen_note}{left_note}")
         return
     if key == "listen_after":
         utter(f"Listen after speaking is now {applied.get('listen_after')}, starting from the next answer.{left_note}")
@@ -1221,13 +1224,13 @@ def check_settings():
         assert "stage: off (default)" in run_cli("get", "stage").stdout
         settings_path.write_text(json.dumps(kept))
 
-        # own_screen: off by default; a monitor by its connector or by words of its description, checked by type
+        # companion_screen: off by default; a monitor by its connector or by words of its description, checked by type
         # alone; a monitor that is not connected is saved, with the connected ones listed. A fake hyprctl answers.
-        assert valid({"own_screen": "  DP-2 "}) == {"own_screen": "DP-2"} and valid({"own_screen": "OFF"}) == {
-            "own_screen": "off"} and valid({"own_screen": "Graphica\n Computer"}) == {"own_screen": "Graphica Computer"}
-        assert all(valid({"own_screen": bad}) == {} for bad in ("", "  ", None, 2, ["DP-2"]))
-        assert settings.own_screen_in_force({}) == ("off", "default") == settings.own_screen_in_force({"own_screen": 3})
-        assert settings.own_screen_in_force({"own_screen": "dp-2"}) == ("dp-2", "settings file")
+        assert valid({"companion_screen": "  DP-2 "}) == {"companion_screen": "DP-2"} and valid({"companion_screen": "OFF"}) == {
+            "companion_screen": "off"} and valid({"companion_screen": "Graphica\n Computer"}) == {"companion_screen": "Graphica Computer"}
+        assert all(valid({"companion_screen": bad}) == {} for bad in ("", "  ", None, 2, ["DP-2"]))
+        assert settings.companion_screen_in_force({}) == ("off", "default") == settings.companion_screen_in_force({"companion_screen": 3})
+        assert settings.companion_screen_in_force({"companion_screen": "dp-2"}) == ("dp-2", "settings file")
         hypr_bin = base / "hypr-bin"
         hypr_bin.mkdir()
         (hypr_bin / "hyprctl").write_text("#!/bin/sh\necho '" + json.dumps([
@@ -1235,29 +1238,29 @@ def check_settings():
             {"name": "DP-2", "description": "Graphica Computer 12.3FHD", "focused": False}]) + "'\n")
         (hypr_bin / "hyprctl").chmod(0o755)
         hypr = {"PATH": f"{hypr_bin}:{os.environ.get('PATH', '')}", "HYPRLAND_INSTANCE_SIGNATURE": "check"}
-        assert "own_screen: off (default)" in run_cli("get", "own_screen").stdout
-        os_set = run_cli("set", "own_screen", "DP-2", **hypr)
+        assert "companion_screen: off (default)" in run_cli("get", "companion_screen").stdout
+        os_set = run_cli("set", "companion_screen", "DP-2", **hypr)
         assert os_set.returncode == 0 and os_set.stdout.strip() == (
-            "Saved own_screen = DP-2. Rook is not running, so it takes effect at Rook's next start."), os_set
-        assert json.loads(settings_path.read_text())["own_screen"] == "DP-2"
-        os_gone = run_cli("set", "own_screen", "HDMI-A-9", **hypr)
+            "Saved companion_screen = DP-2. Rook is not running, so it takes effect at Rook's next start."), os_set
+        assert json.loads(settings_path.read_text())["companion_screen"] == "DP-2"
+        os_gone = run_cli("set", "companion_screen", "HDMI-A-9", **hypr)
         assert os_gone.returncode == 0 and os_gone.stdout.strip() == (
-            "Saved own_screen = HDMI-A-9. Rook is not running, so it takes effect at Rook's next start. No monitor "
+            "Saved companion_screen = HDMI-A-9. Rook is not running, so it takes effect at Rook's next start. No monitor "
             "that matches 'HDMI-A-9' is connected now, so Rook follows the focused monitor until one is. Connected "
             "monitors: DP-1 (Example Desk 27); DP-2 (Graphica Computer 12.3FHD)."), os_gone.stdout
-        assert "own_screen: HDMI-A-9 (settings file)" in run_cli("get", "own_screen").stdout
-        assert "Rook could not ask Hyprland" in run_cli("set", "own_screen", "HDMI-A-9",
+        assert "companion_screen: HDMI-A-9 (settings file)" in run_cli("get", "companion_screen").stdout
+        assert "Rook could not ask Hyprland" in run_cli("set", "companion_screen", "HDMI-A-9",
                                                         HYPRLAND_INSTANCE_SIGNATURE="").stdout  # No Hyprland here.
-        os_bad = run_cli("set", "own_screen", " ")
-        assert os_bad.returncode != 0 and "own_screen takes off" in os_bad.stderr, (os_bad.stdout, os_bad.stderr)
-        assert run_cli("set", "own_screen", "graphica", **hypr).returncode == 0
+        os_bad = run_cli("set", "companion_screen", " ")
+        assert os_bad.returncode != 0 and "companion_screen takes off" in os_bad.stderr, (os_bad.stdout, os_bad.stderr)
+        assert run_cli("set", "companion_screen", "graphica", **hypr).returncode == 0
         assert run_cli("screens", **hypr).stdout.splitlines() == [
-            "DP-1: Example Desk 27", "DP-2 (own screen): Graphica Computer 12.3FHD"]
+            "DP-1: Example Desk 27", "DP-2 (companion screen): Graphica Computer 12.3FHD"]
         assert run_cli("screens", HYPRLAND_INSTANCE_SIGNATURE="").returncode != 0
-        os_prev = run_cli("set", "own_screen", "previous", **hypr)
-        assert os_prev.returncode == 0 and "Saved own_screen = HDMI-A-9." in os_prev.stdout, os_prev.stdout
-        assert run_cli("set", "own_screen", "Off", **hypr).stdout.startswith("Saved own_screen = off. Rook is not")
-        assert "own_screen: off (settings file)" in run_cli("get", "own_screen").stdout
+        os_prev = run_cli("set", "companion_screen", "previous", **hypr)
+        assert os_prev.returncode == 0 and "Saved companion_screen = HDMI-A-9." in os_prev.stdout, os_prev.stdout
+        assert run_cli("set", "companion_screen", "Off", **hypr).stdout.startswith("Saved companion_screen = off. Rook is not")
+        assert "companion_screen: off (settings file)" in run_cli("get", "companion_screen").stdout
 
         th_set = run_cli("set", "smart_turn_threshold", "0.65")
         assert th_set.returncode == 0 and "Saved smart_turn_threshold = 0.65." in th_set.stdout, (th_set.stdout, th_set.stderr)
@@ -1485,7 +1488,7 @@ def check_settings():
                             "smart_turn": {"value": st_mode, "source": st_source},
                             "smart_turn_threshold": {"value": st_thresh, "source": st_thresh_source},
                             "speak_thoughts": {"value": sp_mode, "source": sp_source},
-                            "own_screen": dict(zip(("value", "source"), settings.own_screen_in_force(cur))),
+                            "companion_screen": dict(zip(("value", "source"), settings.companion_screen_in_force(cur))),
                             # A Rook that knows the engine settings, so a voice set applies at once.
                             **({k: {"value": cur.get(k, d), "source": "settings file"}
                                 for k, d in (("voice_engine", "small"), ("voice_medium", "jarvis-poe"))}
@@ -1509,7 +1512,7 @@ def check_settings():
                             "smart_turn_threshold": smart_turn_threshold_in_force(cur)[0],
                             "speak_thoughts": speak_thoughts_in_force(cur)[0],
                             "speak_thoughts_beats_pending": speak_thoughts_in_force(cur)[0] in ("beats", "both"),
-                            "own_screen": settings.own_screen_in_force(cur)[0],
+                            "companion_screen": settings.companion_screen_in_force(cur)[0],
                         }, "said": False}
                     else:
                         resp = {"ok": False, "error": "bad"}
@@ -1563,17 +1566,19 @@ def check_settings():
             live_sp_prev = run_cli("set", "speak_thoughts", "previous")
             assert live_sp_prev.returncode == 0 and "now thoughts" in live_sp_prev.stdout, (live_sp_prev.stdout, live_sp_prev.stderr)
             assert run_cli("set", "speak_thoughts", "off").returncode == 0
-            # own_screen applies live: Rook moves at once, or says that no such monitor is connected now.
-            live_os = run_cli("set", "own_screen", "graphica", **hypr)
-            assert live_os.stdout.strip() == ("Rook now lives on DP-2 (Graphica Computer 12.3FHD), on a centred stage, "
-                                              "whatever has focus."), (live_os.stdout, live_os.stderr)
+            # companion_screen applies live: Rook moves at once, or says that no such monitor is connected now.
+            live_os = run_cli("set", "companion_screen", "graphica", **hypr)
+            assert live_os.stdout.strip() == ("Rook now lives on DP-2 (Graphica Computer 12.3FHD) as your companion "
+                                              "screen, whatever has focus. Media opens on the focused monitor."), (
+                live_os.stdout, live_os.stderr)
             assert asked[-1][0] == "apply", asked
-            live_gone = run_cli("set", "own_screen", "HDMI-A-9", **hypr)
-            assert live_gone.stdout.strip().startswith("Saved own_screen = HDMI-A-9. No monitor that matches "
+            live_gone = run_cli("set", "companion_screen", "HDMI-A-9", **hypr)
+            assert live_gone.stdout.strip().startswith("Saved companion_screen = HDMI-A-9. No monitor that matches "
                                                        "'HDMI-A-9' is connected now") and "DP-2 (Graphica" in \
                 live_gone.stdout, live_gone.stdout
-            live_off = run_cli("set", "own_screen", "off", **hypr)
-            assert live_off.stdout.strip() == "Rook follows the focused monitor again.", live_off.stdout
+            live_off = run_cli("set", "companion_screen", "off", **hypr)
+            assert live_off.stdout.strip() == "Rook is back in overlay mode and follows the focused monitor.", \
+                live_off.stdout
 
             # Onboarding: the audition and a dry run save nothing, and each choice is checked before anything changes.
             def files():

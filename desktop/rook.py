@@ -3671,10 +3671,10 @@ class Companion:
                         else:  # An answer to a thread's question is a send to it; listing or reading them only reads.
                             self.show(None, activity="t3_pending_request" if args.get("action") == "respond"
                                       else "t3_thread_read")
-                if (getattr(self, "own_screen_on", False) and message.get("parent_tool_use_id") is None
+                if (getattr(self, "companion_screen_on", False) and message.get("parent_tool_use_id") is None
                         and not self.warming and self.latest_turn in self.pending_turns
                         and self.capture_finished.is_set()):
-                    # The own stage's panel shows what the tool works on: the phone's own detail, a file's name, a
+                    # The companion stage's panel shows what the tool works on: the phone's own detail, a file's name, a
                     # command's first 80 characters or a thread's title (session.tool_activity).
                     title_of = self.phone.title_of if self.phone else (lambda _thread: None)
                     for block in message["message"]["content"]:
@@ -4777,13 +4777,13 @@ class Companion:
         font, dust = relay.font_in_force(saved)[0], relay.light_dust_in_force(saved)[0]
         theme_pack = relay.theme_pack_in_force(saved)[0]
         stage = relay.stage_in_force(saved)[0]
-        own_screen = relay.own_screen_in_force(saved)[0]
-        self.own_screen_on = own_screen != "off"  # The own stage's panel shows what a running tool works on.
+        companion_screen = relay.companion_screen_in_force(saved)[0]
+        self.companion_screen_on = companion_screen != "off"  # The companion stage's panel shows what a running tool works on.
         if self.overlay and self.overlay.returncode is None and (font or dust or theme_pack or self.dark or self.held_waiting):
             waiting = ("TIMER WAITING" if self.held_waiting["kind"] == "timer" else "WAITING") if self.held_waiting else ""
             send(self.overlay, {**({"font": font} if font else {}), **({"light_dust": dust} if dust else {}),
                                 **({"pack": theme_pack} if theme_pack else {}),
-                                "stage": stage == "on", "own_screen": None if own_screen == "off" else own_screen,
+                                "stage": stage == "on", "companion_screen": None if companion_screen == "off" else companion_screen,
                                 **({"dark": True} if self.dark else {}),
                                 **({"waiting": waiting} if waiting else {})})
 
@@ -4853,8 +4853,8 @@ class Companion:
                                              "light_dust": {"value": dust, "source": dust_source},
                                              "theme": {"value": theme_pack, "source": theme_source},
                                              "stage": {"value": stage, "source": stage_source},
-                                             "own_screen": dict(zip(("value", "source"),
-                                                                    relay.own_screen_in_force(saved))),
+                                             "companion_screen": dict(zip(("value", "source"),
+                                                                    relay.companion_screen_in_force(saved))),
                                              "listen_after": {"value": listen, "source": listen_source},
                                              "smart_turn": {"value": st_mode, "source": st_source},
                                              "smart_turn_threshold": {"value": st_thresh, "source": st_thresh_source},
@@ -4954,7 +4954,7 @@ class Companion:
                                              "light_dust": relay.light_dust_in_force(saved)[0],
                                              "theme": relay.theme_pack_in_force(saved)[0],
                                              "stage": relay.stage_in_force(saved)[0],
-                                             "own_screen": relay.own_screen_in_force(saved)[0],
+                                             "companion_screen": relay.companion_screen_in_force(saved)[0],
                                              "listen_after": relay.listen_after_in_force(saved)[0],
                                              "smart_turn": relay.smart_turn_in_force(saved)[0],
                                              "smart_turn_threshold": relay.smart_turn_threshold_in_force(saved)[0],
@@ -9325,7 +9325,7 @@ def check_agent():
     assert agy_harness.Antigravity().permission_mode == "rook"  # A bare harness keeps today's mode and policy.
     own = Path(tempfile.mkdtemp(dir=os.environ.get("XDG_RUNTIME_DIR"))) / "settings.json"
     own.write_text(json.dumps({"agentMode": "auto", "toolPermission": "request-review", "theme": "dark"}))
-    old_own, agy_harness.OWN_SETTINGS = agy_harness.OWN_SETTINGS, own
+    old_own, agy_harness.COMPANION_SETTINGS = agy_harness.COMPANION_SETTINGS, own
     old_policy = agy_harness.PERMISSIONS
     # agy's private folder, fixed when antigravity_home loads, goes to scratch too: never the caller's live one.
     old_agy_home, agy_harness.antigravity_home.HOME = agy_harness.antigravity_home.HOME, own.parent / "agy-home"
@@ -9343,7 +9343,7 @@ def check_agent():
         agy_harness.PERMISSIONS = "ask"
         assert agy_harness.decide("Read", {"file_path": "x"}, set()) == "ask"  # inherit: the card, as the person's agy.
     finally:
-        agy_harness.OWN_SETTINGS, agy_harness.PERMISSIONS = old_own, old_policy
+        agy_harness.COMPANION_SETTINGS, agy_harness.PERMISSIONS = old_own, old_policy
         agy_harness.antigravity_home.HOME = old_agy_home
         shutil.rmtree(own.parent)
     assert [agy_harness.AGY_MODES.get(m) for m in ("rook", "careful", "automatic", "full", "inherit")] == [

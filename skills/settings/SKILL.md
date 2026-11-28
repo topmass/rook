@@ -18,7 +18,7 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `expressiveness` | How freely the voice varies. Higher is more expressive | 1 to 100. Default is 80 |
 | `font` | The font of Rook's captions and labels on screen | One of the fonts `relay.py fonts` lists |
 | `light_dust` | The look of the dust Rook draws in the light theme. The dark theme's gold dust never changes | One of the looks `relay.py dusts` lists |
-| `own_screen` | The one monitor you live on, on a centred stage, whatever has focus. It applies at once. While that monitor is unplugged, you follow the focused monitor | `off` (the default), or a monitor's name or words of its description, as `relay.py screens` lists them |
+| `companion_screen` | Companion Screen mode: the one monitor you live on, on a centred stage, whatever has focus. Media you show opens on the focused monitor. It applies at once. While that monitor is unplugged, you follow the focused monitor. `off` is overlay mode | `off` (the default), or a monitor's name or words of its description, as `relay.py screens` lists them |
 | `listen_after` | When you listen for 5 seconds after you talk, so ⟦owner⟧ can reply without a key | `off` (the default), `passive` (after updates ⟦he⟧ did not ask for), `questions` (after you ask ⟦him⟧ something), or `both` |
 | `smart_turn` | Smart Turn v3.2 mid-thought pause detection during `listen_after`. It can send only a request shorter than 15 seconds; a longer one sends after 4.5 seconds of quiet | `off` (the default) or `on` |
 | `smart_turn_threshold` | How sure Smart Turn must be before ending a turn; higher waits longer | `0.1` to `0.95`. Default is `0.75` |
@@ -68,7 +68,7 @@ The relay script is `${CLAUDE_SKILL_DIR}/../../desktop/relay.py`. Run it with `/
 - `relay.py set font previous` goes back to the font before the last change.
 - `relay.py dusts` lists every look of the light theme's dust with a short description. The current one is marked.
 - `relay.py set light_dust <name>` switches the look, and `relay.py set light_dust previous` goes back.
-- `relay.py screens` lists the connected monitors. `relay.py set own_screen <name>` puts you on a centred stage on that monitor alone, and `relay.py set own_screen off` follows focus again.
+- `relay.py screens` lists the connected monitors. `relay.py set companion_screen <name>` makes that monitor your companion screen, and `relay.py set companion_screen off` goes back to overlay mode, which follows focus.
 - `relay.py set listen_after off|passive|questions|both` changes when you listen after you talk. It applies to your next answer.
 - `relay.py set smart_turn off|on` turns Smart Turn v3.2 mid-thought pause detection off or on, and `relay.py set smart_turn_threshold <0.1-0.95>` sets its threshold; both accept `previous` and apply to the next listen window.
 - `relay.py set speak_thoughts off|beats|thoughts|both` toggles the thinking debug mode: live thought narration and between-tool beats (off by default); accepts `previous`. Live thought narration takes effect on the next turn; the between-tool beats prompt rule takes effect at Rook's next start.
