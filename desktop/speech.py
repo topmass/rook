@@ -1125,6 +1125,7 @@ def main():
     sample_rate, generate = load(args)
     lock = threading.Condition()
     speaks = collections.deque()
+    speech_stops = {}
     renders = collections.deque()
     render_stops = {}
     active_render_id = None
@@ -1140,7 +1141,7 @@ def main():
             print(json.dumps(payload), flush=True)
 
     def commands():
-        # Desk speak items share the stop event of their generation, so one desk stop skips only queued desk speech.
+        # Ordinary desk speech shares a generation. A permission prompt can also be stopped on its own.
         # Renders each carry their own stop event, so desk stop never cancels a render and cancel_render never stops speech.
         nonlocal current, eof
         for line in sys.stdin:
@@ -1148,9 +1149,15 @@ def main():
             kind = message.get("type")
             with lock:
                 if kind == "speak":
-                    speaks.append((message, current))
+                    stop = current
+                    if message.get("cancelable"):
+                        stop = speech_stops[message["id"]] = threading.Event()
+                    speaks.append((message, stop))
                     if active_render_stop is not None:
                         active_render_stop.set()
+                elif kind == "cancel_speak":
+                    if stop := speech_stops.get(message.get("id")):
+                        stop.set()
                 elif kind == "render":
                     stop = threading.Event()
                     render_stops[message["id"]] = stop
@@ -1166,11 +1173,15 @@ def main():
                             active_render_stop.set()
                 else:
                     current.set()
+                    for stop in speech_stops.values():
+                        stop.set()
                     current = threading.Event()
                 lock.notify()
         with lock:
             eof = True
             current.set()
+            for stop in speech_stops.values():
+                stop.set()
             lock.notify()
 
     def finish_render(rid, pcm, dest_path, seconds, stop, problem=None):
@@ -1278,6 +1289,9 @@ def main():
                 )
         except Exception as exc:
             error = str(exc)
+        if message.get("cancelable"):
+            with lock:
+                speech_stops.pop(message["id"], None)
         problem, generate.__dict__["problem"] = getattr(generate, "problem", None), None
         emit({"id": message["id"], "volume": volume, "error": error,
               "seconds": round(max(0, played[2] - played[1]) / sample_rate, 2),

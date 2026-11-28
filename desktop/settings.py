@@ -286,17 +286,19 @@ def _read_settings_raw():
     return data, stat.S_IMODE(st.st_mode)
 
 
-def read_settings(strict=False):
+def read_settings(strict=False, *, validate_current=False):
     """Return (settings, previous values) from the settings file.
     With strict=False, a missing or broken file gives ({}, {}).
     With strict=True, a missing file gives ({}, {}), while an unreadable file, invalid JSON, or non-object raises.
-    Invalid values for individual known keys are omitted from the returned dicts rather than blocking reads."""
+    Invalid values for known keys are omitted unless validate_current is set, which rejects invalid current values."""
     try:
         data, _ = _read_settings_raw()
     except (OSError, ValueError):
         if strict:
             raise
         return {}, {}
+    if validate_current and (bad := invalid_keys({key: value for key, value in data.items() if key != "previous"})):
+        raise ValueError(f"Invalid settings in {CONFIG}: {', '.join(bad)}.")
     return valid(data), valid(data.get("previous"))
 
 

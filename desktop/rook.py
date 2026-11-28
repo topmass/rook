@@ -2677,6 +2677,7 @@ class Companion:
         self.exit = asyncio.Event()
         # The main agent, chosen once per start by the agent settings. With none, it is Claude Code as always.
         saved_settings = relay.read_settings()[0]
+        self.startup_settings = saved_settings
         self.agent_choice = {key: value for key, value in saved_settings.items() if key in relay.AGENT_SETTINGS}
         self.harness, problem = harness.pick(self.agent_choice)
         self.speak_thoughts = relay.speak_thoughts_in_force(saved_settings)[0]
@@ -4028,26 +4029,70 @@ class Companion:
             self.journal_write("card_shown", message["card"])
         self.card_move(message.get("request_id") or "", Card.SHOWN, "shown")
         questions = (request.get("input") or {}).get("questions")
+        details = json.dumps(request.get("input"), indent=2)
         self.show("permission", spoken=self.card_spoken(),
-                  details=json.dumps(request.get("input"), indent=2), card=message.get("card"),
+                  details=details, card=message.get("card"),
                   questions=questions if request["tool_name"] == "AskUserQuestion" else None,
                   tool=request["tool_name"], who=getattr(self.harness, "short", "Rook"), count=self.card_count())
+        self.show_mac_card(details)
         if self.phone and (card := self.phone.card()):  # Its full words go live only, not stored.
             self.phone.live("card", {**card, "state": "opened"})
+
+    def show_mac_card(self, details=None):
+        """Send the current card over the helper's private pipe, or dismiss it when it closes."""
+        helper = getattr(self, "mac_helper", None)
+        if helper is None or helper.returncode is not None or helper.stdin.is_closing():
+            return
+        voice = getattr(self, "voice", None)
+        previous = getattr(self, "mac_approval_speech", None)
+        self.mac_approval_speech = None
+        if previous is not None and previous in self.voice_texts and voice and voice.returncode is None:
+            send(voice, {"type": "cancel_speak", "id": previous})
+        card = self.permission
+        if card is None:
+            send(helper, {"event": "approval", "card": None})
+            return
+        request = card["request"]
+        inputs = request.get("input") or {}
+        preview = next((inputs[key] for key in ("command", "file_path", "path", "description", "query", "url")
+                        if isinstance(inputs.get(key), str) and inputs[key].strip()), "")
+        preview = " ".join(preview.split())
+        tool = request["tool_name"]
+        title = self.card_spoken()
+        if tool == "AskUserQuestion":
+            preview = card_summary(request, getattr(self.harness, "short", "Rook"))
+        send(helper, {"event": "approval", "card": card["card"], "title": title,
+                      "details": details if details is not None else json.dumps(request.get("input"), indent=2),
+                      "can_allow": tool != "AskUserQuestion"})
+        if voice and voice.returncode is None and not self.dark and not self.talking():
+            who = getattr(self.harness, "short", "Rook")
+            lead = {"Bash": f"{who} wants to run a command.", "Read": f"{who} wants to read a file."}.get(tool, title)
+            if len(preview) > 220:
+                preview = preview[:220].rstrip() + ". Hover over the buttons for the full request."
+            spoken = f"{lead} {preview}".strip()
+            if tool != "AskUserQuestion":
+                spoken = f"{spoken.rstrip('.')}. Hold Right Option and say yes or no."
+            item = self.mac_approval_speech = str(uuid4())
+            self.voice_texts[item] = spoken
+            self.send_speech({"type": "speak", "id": item, "text": spoken, "cancelable": True})
 
     def next_card(self, thinking):
         """After the shown card ends: the oldest waiting card shows, or the presence goes back to thinking."""
         if self.card_queue:
             message, self.card_queue = self.card_queue[0], self.card_queue[1:]
             self.show_card(message, promoted=True)
-        elif thinking:
-            self.show("thinking")
+        else:
+            self.show_mac_card()
+            if thinking:
+                self.show("thinking")
 
     def close_cards(self, why, deny=False):
         """End every card, shown and waiting, such as when the turn ends, is cut, or the agent closes. deny answers
         each as declined first, so none of their tools runs. Return how many there were."""
         cards = ([self.permission] if self.permission else []) + list(self.card_queue)
         self.permission, self.card_queue, self.card_overflow = None, (), False
+        if cards:
+            self.show_mac_card()
         for message in cards:
             if deny and (agent := getattr(self, "agent", None)) and agent.returncode is None:
                 self.harness.permit(agent, message, False)
@@ -4759,10 +4804,11 @@ class Companion:
                 answers.append(row["text"])
         send(self.overlay, {"answers": answers[-10:]})
 
-    def send_font(self):
+    def send_font(self, saved=None):
         """Tell the overlay which font to show Rook's text in, which dust its light theme draws, and that Rook is dark
         when it is. With no fonts.json it keeps its usual font."""
-        saved = relay.read_settings()[0]
+        if saved is None:
+            saved = relay.read_settings()[0]
         font, dust = relay.font_in_force(saved)[0], relay.light_dust_in_force(saved)[0]
         theme_pack = relay.theme_pack_in_force(saved)[0]
         stage = relay.stage_in_force(saved)[0]
@@ -4775,9 +4821,10 @@ class Companion:
                                 **({"dark": True} if self.dark else {}),
                                 **({"waiting": waiting} if waiting else {})})
 
-    def voice_values(self):
+    def voice_values(self, saved=None):
         """The voice settings in force, each as (value, source): the settings file over the flags."""
-        saved, _ = relay.read_settings()
+        if saved is None:
+            saved = relay.read_settings()[0]
         flags = {"voice": self.args.voice or "Miles", "voice_pace": self.args.voice_pace,
                  "voice_volume": self.args.voice_volume, "voice_temperature": self.args.voice_temperature,
                  "voice_engine": relay.VOICE_ENGINES[0], "voice_medium": relay.MEDIUM_VOICES[0]}
@@ -4803,7 +4850,7 @@ class Companion:
         self.loop.create_task(self.read_voice(voice))
         return voice
 
-    async def settings_request(self, command, say):
+    async def settings_request(self, command, say, *, reload_from=None):
         """Answer relay.py's settings requests: get the values in force, or apply the settings file."""
         if command == "get":
             saved = relay.read_settings()[0]
@@ -4868,12 +4915,14 @@ class Companion:
         if command != "apply":
             return {"ok": False, "error": f"Unknown settings request {command!r}."}
         async with self.voice_lock:
-            values = {key: value for key, (value, _) in self.voice_values().items()}
-            med_url = relay.MEDIUM_VOICE_URL or relay.medium_voice_url()
+            saved = relay.read_settings()[0] if reload_from is None else reload_from
+            values = {key: value for key, (value, _) in self.voice_values(saved).items()}
+            med_url = relay.MEDIUM_VOICE_URL or relay.medium_voice_url(saved)
             values["medium_voice_url"] = med_url
             engine, was = values.get("voice_engine"), (self.voice_settings or {}).get("voice_engine")
             was_url = (self.voice_settings or {}).get("medium_voice_url", "")
-            if engine == "medium" and med_url and (was != "medium" or med_url != was_url):
+            voice_unavailable = reload_from is not None and not self.voice and relay.voice_python(DATA.parent) is None
+            if not voice_unavailable and engine == "medium" and med_url and (was != "medium" or med_url != was_url):
                 # Warm the medium voice first, up to its 8 to 11 second cold load. The old voice keeps speaking.
                 # An offline voice server answers no /health. The switch then goes on after 3 s, and the worker falls back.
                 health = await self.loop.run_in_executor(None, relay.medium_voice, "/health", 3)
@@ -4888,7 +4937,8 @@ class Companion:
                 medium = settings.get("voice_engine") == "medium"
                 return (settings.get("voice_engine"), settings.get("voice_medium" if medium else "voice"),
                         settings.get("voice_pace"))
-            if worker(values) != worker(self.voice_settings) or not self.voice or self.voice.returncode is not None:
+            if not voice_unavailable and (
+                    worker(values) != worker(self.voice_settings) or not self.voice or self.voice.returncode is not None):
                 # The new worker loads beside the old one, which keeps speaking, so Rook stays responsive.
                 new = await self.start_voice(values)
                 if new is None:
@@ -4925,13 +4975,12 @@ class Companion:
                 self.log("voice_change", settings=values)
                 if was == "medium" and engine != "medium":
                     self.loop.run_in_executor(None, relay.medium_voice, "/unload")  # Frees nimbus-pc's graphics card.
-            self.send_font()  # A font or dust change shows at once; an unchanged one is sent again harmlessly.
+            self.send_font(saved)  # A font or dust change shows at once; an unchanged one is sent again harmlessly.
             if say and self.voice and self.voice.returncode is None:
                 # An audition line: the owner hears the new voice, and its caption shows the new font.
                 self.voice_id = str(uuid4())
                 self.voice_texts[self.voice_id] = say
                 self.send_speech(self.speech(say))
-            saved = relay.read_settings()[0]
             self.arm_talk_keys(saved)  # A talk key change applies at once: the key reader reads these sets.
             self.speak_thoughts = relay.speak_thoughts_in_force(saved)[0]
             if self.harness is not None:
@@ -4950,7 +4999,7 @@ class Companion:
                                              "speak_thoughts_beats_pending": (self.speak_thoughts in ("beats", "both")) != self.beats_started,
                                              "recording_minutes": relay.recording_minutes_in_force(saved)[0],
                                              "talk_keys": self.talk_key_names},
-                    "said": bool(say and self.voice)}
+                    "said": bool(say and self.voice), **({"voice_unavailable": True} if voice_unavailable else {})}
 
     async def request(self, command, body):
         """Answer a relay.py request on Rook's socket. Only the owner's user can reach it: the socket is 0600."""
@@ -6158,6 +6207,7 @@ class Companion:
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def record(self, released):
+        approval_card = getattr(released, "approval_card", None)
         if self.pipeline is None:
             self.log("capture_error", error="Speech recognition is not on this system yet.")
             return
@@ -6178,7 +6228,7 @@ class Companion:
         self.recording = True
         self.recording_started.set()
         self.show("listening", level=0.0)
-        shots = self.loop.create_task(self.no_shots(in_game) if self.dark and not DARK_SCREENSHOTS else
+        shots = self.loop.create_task(self.no_shots(in_game) if approval_card or self.dark and not DARK_SCREENSHOTS else
                                       self.game_screenshots(window) if in_game else self.screenshot(window))
         result = None
         record_ms = transcribe_ms = 0
@@ -6235,7 +6285,17 @@ class Companion:
                 self.capture_finished.set()
             # From here the reply's end resumes it, or at once below when the owner said nothing.
             self.hush_hold = False
-        if result and result.text:
+        if approval_card:
+            shots.cancel()
+            answered = bool(getattr(released, "approval_submitted", False) and result
+                            and self.answer_mac_card_voice(approval_card, result.text))
+            if not answered:
+                if self.permission:
+                    self.show("permission")
+                else:
+                    self.show_resting()
+            self.maybe_restore_media_duck()
+        elif result and result.text:
             await self.submit(result.text, *await self.bounded_shots(shots, in_game), source="spoken", timing={
                 "record_ms": record_ms, "transcribe_ms": transcribe_ms,
                 "asr_loaded": getattr(result, "loaded_now", None),
@@ -7982,6 +8042,8 @@ class Companion:
         def _start(_key):
             released = asyncio.Event()
             released.cancelled = False
+            if self.permission and self.permission["request"]["tool_name"] != "AskUserQuestion":
+                released.approval_card = self.permission["card"]
             if self.start_talk(released):
                 active[0] = released
                 return True
@@ -7990,6 +8052,8 @@ class Companion:
         def _stop():
             ev, active[0] = active[0], None
             if ev is not None and not ev.is_set():
+                if getattr(ev, "approval_card", None):
+                    ev.approval_submitted = True  # A timed-out recording cannot approve a tool.
                 ev.set()
 
         def _cancel():
@@ -8007,8 +8071,43 @@ class Companion:
             is_talking=self.talking,
         )
 
+    def answer_mac_card_voice(self, card, transcript):
+        """Accept just yes or no from a push-to-talk capture tied to the currently shown card."""
+        decision = re.fullmatch(r"\s*(yes|no)[.!?]?\s*", transcript or "", re.IGNORECASE)
+        if (decision is None or self.permission is None or self.permission["card"] != card
+                or self.permission["request"]["tool_name"] == "AskUserQuestion"):
+            return False
+        allowed = decision[1].lower() == "yes"
+        if not self.answer_permission(allowed, card=card):
+            return False
+        self.log("approval_voice", allowed=allowed)
+        return True
+
+    async def reload_mac_config(self, helper):
+        """Apply valid settings through the normal live settings path and report any pending restart."""
+        try:
+            saved = relay.read_settings(strict=True, validate_current=True)[0]
+            result = await self.settings_request("apply", "", reload_from=saved)
+        except Exception as error:
+            self.log("config_reload_failed", error=str(error))
+            result = {"ok": False, "error": str(error)}
+        if result["ok"]:
+            next_start = (*relay.AGENT_SETTINGS, "owner_name", "owner_pronouns", "assistant_name", "orchestrator",
+                          "plugins", "build_threads", "recogniser_model", "recogniser_threads", "tts_threads",
+                          "smart_turn_threads", "perf_logging", "perf_log_path")
+            pending = [key for key in next_start if saved.get(key) != self.startup_settings.get(key)]
+            if result["settings"]["speak_thoughts_beats_pending"]:
+                pending.append("speak_thoughts (between-tool updates)")
+            message = "Restart to apply: " + ", ".join(pending) + "." if pending else "Live settings are up to date."
+            if result.get("voice_unavailable"):
+                message += " The voice runtime is unavailable."
+        else:
+            message = result["error"]
+        if helper.returncode is None and not helper.stdin.is_closing():
+            send(helper, {"event": "config_reload_result", "ok": result["ok"], "message": message})
+
     async def read_mac_helper(self, helper_proc):
-        """Read JSON talk_key events from RookHelper.app stdout and route them through MacTalkRouter."""
+        """Route the helper's talk keys, approval clicks, and menu actions from its private pipe."""
         router = self.make_mac_talk_router()
         while helper_proc.stdout is not None:
             raw = await helper_proc.stdout.readline()
@@ -8018,12 +8117,30 @@ class Companion:
                 event = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            if isinstance(event, dict) and event.get("type") in ("keys_ready", "keys_unavailable"):
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            if kind in ("keys_ready", "keys_unavailable"):
                 self.mac_keys = event  # relay.py verify's keys row reads it through probe keys.
-            if isinstance(event, dict) and event.get("type") == "talk_key":
+            elif kind == "talk_key":
                 self.last_key = time.monotonic()
                 self.save_presence()
                 router.handle(event)
+            elif kind == "approval":
+                card, allowed = event.get("card"), event.get("allow")
+                if not isinstance(card, str) or not isinstance(allowed, bool):
+                    continue
+                if allowed and self.permission and self.permission["request"]["tool_name"] == "AskUserQuestion":
+                    continue
+                self.answer_permission(allowed, card=card)
+            elif kind == "menu_action":
+                if event.get("action") == "quit":
+                    self.exit.set()
+                    return
+                if event.get("action") == "reload_config":
+                    pending = self.tasks.get("mac config reload")
+                    if pending is None or pending.done():
+                        self.tasks["mac config reload"] = self.loop.create_task(self.reload_mac_config(helper_proc))
 
     async def run(self):
         # Restore any music left ducked by an earlier crash first, before voice, socket, or agent launch.
@@ -8309,13 +8426,15 @@ class Companion:
             if self.phone_task is not None:
                 await self.phone_task
             if self.phone.server is not None:
-                helper_env = {**os.environ, "ROOK_PRESENCE_TOKEN": self.phone.local_presence_token}
+                helper_env = {**os.environ, "ROOK_PRESENCE_TOKEN": self.phone.local_presence_token,
+                              "ROOK_MENU_CONFIG_DIR": str(relay.settings.CONFIG.parent.absolute())}
                 helper_args = [str(mac_helper_path), "--url", f"http://127.0.0.1:{self.phone.server.port}/presence"]
                 if getattr(self.args, "keys", False):
                     helper_args.append("--enable-keys")
                 self.mac_helper = await asyncio.create_subprocess_exec(
                     *helper_args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env=helper_env
                 )
+                self.show_mac_card()
                 self.loop.create_task(self.read_mac_helper(self.mac_helper))
         # Delivery starts after the launch, so a turn cannot start a second Claude process.
         self.keep("delivery", self.deliver)
@@ -10141,12 +10260,16 @@ def check_agent():
                 saved_strict, machine.Machine.strict = machine.Machine.strict, True
                 try:
                     writes, states, rows[:] = [], [], []
+                    mac_cards = []
                     c = companion()
                     c.__dict__.update(
                         agent=SimpleNamespace(returncode=None, kill=lambda: None, stdout=None,
                                               stdin=SimpleNamespace(write=lambda raw: writes.append(json.loads(raw)))),
+                        mac_helper=SimpleNamespace(returncode=None, stdin=SimpleNamespace(
+                            is_closing=lambda: False, write=lambda raw: mac_cards.append(json.loads(raw)))),
                         capture_finished=asyncio.Event(), latest_turn="turn-c", pending_turns={"turn-c"},
                         delegating={}, turn_tools=[], voice=None, voice_id=None, voice_texts={}, voice_steps={},
+                        talking=lambda: False,
                         step_task=None, step_lit=False, step_loop=None, auditions={}, staged=None, turn_timing=None,
                         show=lambda state, **fields: states.append((state, fields.get("card"), fields.get("details"))))
                     c.capture_finished.set()
@@ -10160,6 +10283,13 @@ def check_agent():
                             for step in steps:
                                 yield step
                         return read
+
+                    async def mac_click(card, allow):
+                        stream = asyncio.StreamReader()
+                        stream.feed_data((json.dumps({"type": "approval", "card": card, "allow": allow}) + "\n").encode())
+                        stream.feed_eof()
+                        await c.read_mac_helper(SimpleNamespace(stdout=stream))
+
                     c.harness.read = card_stream(ask("a1"), ask("a2", "Edit"), ask("a3", "Write"), ask("a2", "Edit"))
                     await c.read_stream()
                     assert c.permission["request_id"] == "a1" and [m["request_id"] for m in c.card_queue] == ["a2", "a3"]
@@ -10171,14 +10301,24 @@ def check_agent():
                     assert not c.answer_permission(True)  # No id: the older desk path is closed.
                     assert not c.answer_permission(True, card="a1") and not writes  # The agent's own id is not a key.
                     assert len([row for row in rows if row[0] == "card_refused"]) == 3
-                    assert c.answer_permission(True, card=key["a1"]) and writes[-1]["response"]["request_id"] == "a1"
+                    assert len(mac_cards) == 1 and mac_cards[0]["card"] == key["a1"]
+                    assert json.loads(mac_cards[0]["details"]) == {"command": "ls"}
+                    await mac_click(key["a1"], "true")  # A malformed decision cannot answer the card.
+                    assert not writes
+                    await mac_click(key["a1"], True)
+                    assert writes[-1]["response"]["request_id"] == "a1" and mac_cards[-1]["card"] == key["a2"]
                     assert writes[-1]["response"]["response"]["behavior"] == "allow" and states[-1][:2] == ("permission", key["a2"])
-                    assert not c.answer_permission(False, card=key["a1"]) and len(writes) == 1  # Answered once.
+                    await mac_click(key["a1"], False)
+                    assert len(writes) == 1  # A late click cannot answer the replacement card.
                     c.harness.read = card_stream({"type": "control_cancel_request", "request_id": "a3"})
                     await c.read_stream()  # Taken back while it waits: it never shows.
                     assert c.permission["request_id"] == "a2" and not c.card_queue
-                    assert c.answer_permission(False, card=key["a2"]) and writes[-1]["response"]["response"]["behavior"] == "deny"
+                    assert not c.answer_mac_card_voice(key["a1"], "Yes.")  # The card changed during capture.
+                    assert not c.answer_mac_card_voice(key["a2"], "Yes, please.") and len(writes) == 1
+                    assert c.answer_mac_card_voice(key["a2"], "No!")
+                    assert writes[-1]["response"]["response"]["behavior"] == "deny"
                     assert states[-1][:2] == ("thinking", None) and c.permission is None and not c.card_states
+                    assert mac_cards[-1] == {"event": "approval", "card": None}
                     # Two waiting at Stop: both are declined, then the turn is cancelled.
                     c.harness.read = card_stream(ask("b1"), ask("b2"))
                     await c.read_stream()

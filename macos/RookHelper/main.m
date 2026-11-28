@@ -2,13 +2,17 @@
 #import <AVFoundation/AVFoundation.h>
 #import <Cocoa/Cocoa.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import <WebKit/WebKit.h>
 #include <errno.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 
 extern char **environ;
+static int kickLaunchd(void);
 
 // A press of Right Option becomes a talk only after it stays alone this long, or on a clean release.
 static const double kTalkKeySettle = 0.15;
@@ -228,7 +232,22 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate>
+@interface ApprovalPanel : NSPanel
+@end
+
+@implementation ApprovalPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface ApprovalButton : NSButton
+@end
+
+@implementation ApprovalButton
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+@end
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation>
 @property (nonatomic, copy) NSString *urlString;
 @property (nonatomic, assign) CGFloat width;
 @property (nonatomic, assign) CGFloat height;
@@ -236,12 +255,17 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 @property (nonatomic, strong) NSNumber *smokeSeconds;
 @property (nonatomic, copy) NSString *token;
 @property (nonatomic, strong) PresencePanel *panel;
+@property (nonatomic, strong) ApprovalPanel *approvalPanel;
+@property (nonatomic, copy) NSString *approvalID;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) EventTapHost *eventTap;
 @property (nonatomic, assign) BOOL finishedLoad;
 @property (nonatomic, copy) NSString *allowedScheme;
 @property (nonatomic, copy) NSString *allowedHost;
 @property (nonatomic, strong) NSNumber *allowedPort;
+@property (nonatomic, copy) NSString *configDirectory;
+@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, assign) BOOL menuBusy;
 @end
 
 static BOOL isLoopbackURL(NSURL *url) {
@@ -254,9 +278,96 @@ static BOOL isLoopbackURL(NSURL *url) {
 
 @implementation AppDelegate
 
+- (void)installStatusMenu {
+    NSString *name = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"Rook";
+    self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    NSStatusBarButton *button = self.statusItem.button;
+    NSImage *icon = [NSImage imageWithSystemSymbolName:@"infinity" accessibilityDescription:name];
+    NSImageSymbolConfiguration *style = [NSImageSymbolConfiguration configurationWithPointSize:15
+                                                                                       weight:NSFontWeightSemibold];
+    icon = [icon imageWithSymbolConfiguration:style];
+    icon.template = YES;
+    button.image = icon;
+    if (button.image == nil) button.title = @"∞";
+    button.toolTip = name;
+    [button setAccessibilityLabel:name];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:name];
+    [menu addItemWithTitle:@"Restart" action:@selector(restartRook:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Open Config" action:@selector(openConfig:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Reload Config" action:@selector(reloadConfig:) keyEquivalent:@""].target = self;
+    [menu addItem:NSMenuItem.separatorItem];
+    [menu addItemWithTitle:@"Quit" action:@selector(quitRook:) keyEquivalent:@""].target = self;
+    self.statusItem.menu = menu;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(openConfig:)) return YES;
+    if (item.action == @selector(restartRook:)) {
+        return !self.menuBusy && [NSProcessInfo.processInfo.environment[@"ROOK_LAUNCHD_LABEL"] length] > 0;
+    }
+    return !self.menuBusy;
+}
+
+- (void)showMenuMessage:(NSString *)title details:(NSString *)details error:(BOOL)error {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = details ?: @"";
+    alert.alertStyle = error ? NSAlertStyleWarning : NSAlertStyleInformational;
+    [NSApp activateIgnoringOtherApps:YES];
+    [alert runModal];
+}
+
+- (void)openConfig:(id)sender {
+    (void)sender;
+    NSURL *url = [NSURL fileURLWithPath:self.configDirectory isDirectory:YES];
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:url withIntermediateDirectories:YES
+                                                 attributes:@{NSFilePosixPermissions: @0700} error:&error]
+            || ![NSWorkspace.sharedWorkspace openURL:url]) {
+        [self showMenuMessage:@"Could not open Rook’s config folder"
+                      details:error.localizedDescription ?: self.configDirectory error:YES];
+    }
+}
+
+- (void)reloadConfig:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    emitJSON(@{@"type": @"menu_action", @"action": @"reload_config"});
+}
+
+- (void)showConfigReloadResult:(NSDictionary *)result {
+    self.menuBusy = NO;
+    BOOL ok = [result[@"ok"] isEqual:@YES];
+    NSString *message = [result[@"message"] isKindOfClass:NSString.class] ? result[@"message"] : @"";
+    [self showMenuMessage:(ok ? @"Rook configuration reloaded" : @"Could not reload Rook’s configuration")
+                  details:message error:!ok];
+}
+
+- (void)restartRook:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int status = kickLaunchd();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.menuBusy = NO;
+            if (status != 0) {
+                [self showMenuMessage:@"Could not restart Rook"
+                              details:[NSString stringWithFormat:@"launchctl exited with status %d.", status] error:YES];
+            }
+        });
+    });
+}
+
+- (void)quitRook:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    emitJSON(@{@"type": @"menu_action", @"action": @"quit"});
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    if (self.configDirectory.length > 0) [self installStatusMenu];
 
     NSRect screenFrame = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
     NSRect fullFrame = NSScreen.mainScreen ? NSScreen.mainScreen.frame : screenFrame;
@@ -373,6 +484,79 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     emitJSON(@{@"type": @"error", @"error": error.localizedDescription ?: @"Provisional navigation failed"});
 }
 
+- (void)showApproval:(NSDictionary *)message {
+    if (self.approvalPanel) {
+        [self.panel removeChildWindow:self.approvalPanel];
+        [self.approvalPanel orderOut:nil];
+    }
+    self.approvalPanel = nil;
+    self.approvalID = nil;
+    NSString *card = message[@"card"];
+    if (![card isKindOfClass:[NSString class]] || card.length == 0) return;
+    self.approvalID = card;
+
+    BOOL canAllow = [message[@"can_allow"] isEqual:@YES];
+    const CGFloat buttonSize = 36, inset = 4, gap = 4;
+    CGFloat width = 2 * inset + buttonSize + (canAllow ? buttonSize + gap : 0);
+    CGFloat height = buttonSize + 2 * inset;
+    NSRect bubble = self.panel.frame;
+    NSScreen *screen = self.panel.screen ?: NSScreen.mainScreen;
+    NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
+    CGFloat x = MIN(NSMaxX(visible) - width, MAX(NSMinX(visible), NSMidX(bubble) - width / 2));
+    CGFloat y = MAX(NSMinY(visible), NSMinY(bubble) - height + 12);
+    ApprovalPanel *panel = [[ApprovalPanel alloc]
+        initWithContentRect:NSMakeRect(x, y, width, height)
+        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+        backing:NSBackingStoreBuffered defer:NO];
+    panel.opaque = NO;
+    panel.backgroundColor = NSColor.clearColor;
+    panel.hasShadow = NO;
+    panel.level = NSFloatingWindowLevel;
+    panel.collectionBehavior = self.panel.collectionBehavior;
+    panel.hidesOnDeactivate = NO;
+
+    NSView *content = panel.contentView;
+    content.wantsLayer = YES;
+    content.layer.backgroundColor = [NSColor colorWithSRGBRed:0.09 green:0.08 blue:0.07 alpha:0.94].CGColor;
+    content.layer.borderColor = [NSColor colorWithSRGBRed:0.55 green:0.43 blue:0.26 alpha:0.75].CGColor;
+    content.layer.borderWidth = 1;
+    content.layer.cornerRadius = height / 2;
+    NSString *title = [message[@"title"] isKindOfClass:[NSString class]] ? message[@"title"] : @"Tool approval";
+    NSString *details = [message[@"details"] isKindOfClass:[NSString class]] ? message[@"details"] : @"";
+    for (NSNumber *choice in (canAllow ? @[@YES, @NO] : @[@NO])) {
+        BOOL allow = choice.boolValue;
+        NSString *action = allow ? @"Allow once" : @"Decline";
+        CGFloat left = inset + (!allow && canAllow ? buttonSize + gap : 0);
+        ApprovalButton *button = [[ApprovalButton alloc] initWithFrame:NSMakeRect(left, inset, buttonSize, buttonSize)];
+        button.identifier = card;
+        button.tag = allow;
+        button.target = self;
+        button.action = @selector(answerApproval:);
+        button.bordered = NO;
+        button.imagePosition = NSImageOnly;
+        button.image = [NSImage imageWithSystemSymbolName:(allow ? @"checkmark" : @"xmark")
+                              accessibilityDescription:action];
+        button.contentTintColor = allow
+            ? [NSColor colorWithSRGBRed:0.68 green:0.90 blue:0.69 alpha:1]
+            : [NSColor colorWithSRGBRed:0.97 green:0.73 blue:0.69 alpha:1];
+        button.accessibilityLabel = action;
+        button.toolTip = [NSString stringWithFormat:@"%@\n%@\n%@", action, title, details];
+        [content addSubview:button];
+    }
+    self.approvalPanel = panel;
+    [self.panel addChildWindow:panel ordered:NSWindowAbove];
+    [panel orderFront:nil];
+}
+
+- (void)answerApproval:(NSButton *)sender {
+    // An old button can never answer a replacement card, even if it was clicked during the switch.
+    NSString *card = sender.identifier;
+    if (sender.window != self.approvalPanel || ![card isEqualToString:self.approvalID]) return;
+    BOOL allowed = sender.tag == 1;
+    [self showApproval:@{}];
+    emitJSON(@{@"type": @"approval", @"card": card, @"allow": @(allowed)});
+}
+
 - (void)emitSmokeAndExit {
     BOOL active = NSApp.isActive;
     BOOL ignores = self.panel.ignoresMouseEvents;
@@ -384,6 +568,11 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
             @"active": @(active),
             @"ignoresMouseEvents": @(ignores),
             @"isOpaque": @(opaque),
+            @"approvalVisible": @(self.approvalPanel.isVisible),
+            @"approvalAttached": @(self.approvalPanel && self.approvalPanel.parentWindow == self.panel),
+            @"approvalAllowsKeyFocus": @(self.approvalPanel.canBecomeKeyWindow),
+            @"approvalButtons": @(self.approvalPanel.contentView.subviews.count),
+            @"menuItems": [self.statusItem.menu.itemArray valueForKey:@"title"] ?: @[],
             @"host": hostInfo ?: @{},
         });
         [NSApp terminate:nil];
@@ -402,20 +591,28 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 - (void)startStdinReader {
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), stdin) != NULL) {
-            NSString *line = [[NSString stringWithUTF8String:buf]
-                              stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (line.length == 0) continue;
-            NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        char *buf = NULL;
+        size_t capacity = 0;
+        ssize_t length;
+        while ((length = getline(&buf, &capacity, stdin)) != -1) {
+            NSData *data = [NSData dataWithBytes:buf length:(NSUInteger)length];
             id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if (![obj isKindOfClass:[NSDictionary class]]) continue;
             NSDictionary *dict = (NSDictionary *)obj;
             if ([dict[@"quit"] respondsToSelector:@selector(boolValue)] && [dict[@"quit"] boolValue]) {
                 dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+                free(buf);
                 return;
             }
             NSString *kind = [dict[@"event"] isKindOfClass:[NSString class]] ? dict[@"event"] : @"state";
+            if ([kind isEqualToString:@"approval"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showApproval:dict]; });
+                continue;
+            }
+            if ([kind isEqualToString:@"config_reload_result"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showConfigReloadResult:dict]; });
+                continue;
+            }
             NSData *kindData = [NSJSONSerialization dataWithJSONObject:@[kind] options:0 error:nil];
             NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
             if (!kindData || !jsonData) continue;
@@ -427,6 +624,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
                 [weakSelf.webView evaluateJavaScript:js completionHandler:nil];
             });
         }
+        free(buf);
         if (weakSelf.smokeSeconds == nil) {
             dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
         }
@@ -570,6 +768,7 @@ int main(int argc, const char *argv[]) {
         delegate.enableKeys = enableKeys;
         delegate.smokeSeconds = smokeSeconds;
         delegate.token = NSProcessInfo.processInfo.environment[@"ROOK_PRESENCE_TOKEN"];
+        delegate.configDirectory = NSProcessInfo.processInfo.environment[@"ROOK_MENU_CONFIG_DIR"];
         NSApp.delegate = delegate;
         [NSApp run];
     }
