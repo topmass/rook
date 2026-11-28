@@ -33,6 +33,8 @@ SUMMARY_LIMIT = 300
 # An item's detail is stored up to this size, so one item cannot flood Rook's context. A list shows this much of it.
 DETAIL_LIMIT = 2000
 DESCRIPTION_LIMIT = 240
+# A due check-in or nudge carries this much of each item's detail inline, so Rook can act without mailbox show.
+INLINE_DETAIL_LIMIT = 1000
 # An item is first named once it is this old.
 CHECKIN_AGE_SECONDS = 15 * 60
 # After each mention, the item is due again after the next of these waits. The last one repeats while it is open.
@@ -1621,11 +1623,11 @@ def format_line(item, now, *, failed_sources=None, show_state=False):
     return f"- {origin} | {short_age(item['created'], now)} | {item['summary']}{tag_text} [id {item['id']}]"
 
 
-def format_description(item):
-    """An item's detail as one indented line of at most DESCRIPTION_LIMIT characters, or "" when it has none."""
+def format_description(item, limit=DESCRIPTION_LIMIT):
+    """An item's detail as one indented line of at most limit characters, or "" when it has none."""
     text = " ".join(str(item.get("detail") or "").split())
-    if len(text) > DESCRIPTION_LIMIT:
-        text = text[:DESCRIPTION_LIMIT].rsplit(" ", 1)[0].rstrip(",;:.") + f"… (show {item['id']} has the rest)"
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(",;:.") + f"… (show {item['id']} has the rest)"
     return f"\n  {text}" if text else ""
 
 

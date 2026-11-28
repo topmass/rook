@@ -1917,7 +1917,7 @@ def nudge_text(item, others):
     """The nudge turn: one item, named whole, with a count of the rest."""
     render = relay.settings.render
     return (render(f"{OWNER_START} is free now, and this still waits on {pn('him')}: ")
-            + mailbox.format_line(item, time.time())[2:]
+            + mailbox.format_line(item, time.time())[2:] + inline_detail(item)
             + (f"\n{relay.words(others).capitalize()} more {'waits' if others == 1 else 'wait'} after it." if others else "")
             + render(f"\nBring it to {OWNER} now, in two or three sentences, as the one thing to deal with: what it is, "
                      f"and what {pn('he has', 'they have')} to do or decide, with a question's options. When "
@@ -1976,7 +1976,7 @@ def checkin_line(due, more, now):
         if item["checkin_count"] and item["kind"] != "reminder":
             reminder = f" (a reminder: it has waited {mailbox.short_age(item['created'], now).removesuffix(' ago')})"
             text = (text[:-len(suffix)] + reminder + suffix) if text.endswith(suffix) else (text + reminder)
-        parts.append(text)
+        parts.append(text + inline_detail(item))
     named = "; ".join(parts)
     named += "" if named.endswith((".", "?", "!")) else "."
     has_repeat = any(item["checkin_count"] and item["kind"] != "reminder" for item in due)
@@ -1988,6 +1988,12 @@ def checkin_line(due, more, now):
             + (" A reminder closes once spoken; put it in the first paragraph, plainly, without how long it has waited."
                if has_reminder else "")
             + " Ask nothing about them now.")
+
+
+def inline_detail(item):
+    """An item's detail for a due check-in or nudge, up to mailbox.INLINE_DETAIL_LIMIT, or "" when it has none."""
+    text = mailbox.format_description(item, mailbox.INLINE_DETAIL_LIMIT).strip()
+    return f" Detail: {text}" if text else ""
 
 
 def item_lines(items, now, failed=None):
@@ -12213,6 +12219,13 @@ def check_mailbox():
     # A held item saved with a name before owner tokens still counts as held, and so does a token one.
     assert is_held("Held while Test Owner focused on another track.\nDone.") and is_held(f"{HELD}\nDone.")
     assert not is_held("Done.")
+    # A due check-in carries each item's detail inline up to INLINE_DETAIL_LIMIT, and a longer one names show.
+    base = {"kind": "reminder", "state": "open", "created": 0, "checkin_count": 0, "summary": "Call the vet"}
+    short = checkin_line([{**base, "id": "r1", "detail": "Notes: ~/.config/rook/files/vet.md"}], 0, 60)
+    assert "Call the vet [id r1] Detail: Notes: ~/.config/rook/files/vet.md" in short, short
+    long = checkin_line([{**base, "id": "r2", "detail": "word " * 400}], 0, 60)
+    assert "(show r2 has the rest)" in long and len(long) < len(short) + mailbox.INLINE_DETAIL_LIMIT + 50, long
+    assert "Detail:" not in checkin_line([{**base, "id": "r3", "detail": ""}], 0, 60)
     import agent_inbox
     import io
     import contextlib
