@@ -220,9 +220,14 @@ COMPANION_PAIR = (240, 32, 640)
 COMPANION_HOLD = 2.0
 
 
-def _companion_column():
-    """The companion stage's caption column, in caption units: as wide as the pair's block at COMPANION_CAPTION."""
-    return round(COMPANION_PAIR[2] / COMPANION_CAPTION)
+def _companion_column(size=None):
+    """The companion stage's caption column, in caption units: from the pair's block to the stage's right margin at
+    COMPANION_CAPTION, so captions use the room the stage has before they wrap (the owner saw them cut off with room
+    to spare). The pair keeps its own size and place; only the words run on to the right."""
+    w = (size or COMPANION_STAGE)[0]
+    slot, gap, width = COMPANION_PAIR
+    block = (w - slot - gap - width) / 2 + slot + gap
+    return math.floor((w - COMPANION_MARGIN - block) / COMPANION_CAPTION)
 # The grains feel COMPANION_TRAIL of the glide's acceleration, so the presence travels as one body and trails a little.
 COMPANION_TRAIL = 0.3
 # In the panel the captions are COMPANION_CAPTION times their size, in a left-aligned column; a running tool's label is
@@ -1750,7 +1755,7 @@ class Sentence:
             attrs.insert(Pango.attr_letter_spacing_new(int(CAPTION_SPACING * Pango.SCALE)))
             layout.set_attributes(attrs)
         self.text = _safe_utf8(self.text)
-        layout.set_text(self.text, -1)
+        _caption_set_text(layout, self.text)
         if layout.get_line_count() == 2:
             # The narrowest width that still keeps two lines evens them out, so no word sits alone on the second.
             lo, hi = column // 2, column
@@ -2317,6 +2322,67 @@ class _CardFace:
                  None if t is None else t - CARD_TIMES["btn"] - (0.06 if primary else 0.0), "centre", a)
 
 
+CAPTION_GLUE = "\u2063"  # Marks a word that continues the word before it with no space (see _split_long).
+
+
+def _caption_text(words):
+    """Words as one caption page's text: a space between two words, and between two pieces of one long word a zero
+    width space, where a line may break but nothing shows."""
+    return "".join(("" if not k else "\u200b" if word.startswith(CAPTION_GLUE) else " ") + word.lstrip(CAPTION_GLUE)
+                   for k, word in enumerate(words))
+
+
+def _caption_set_text(layout, text):
+    """Set a caption's text on layout. In the companion stage's column a line breaks only between words (at a space,
+    or the zero width space between a long word's pieces), never inside one at a hyphen or a slash: each word is drawn
+    as one sprite where it starts, so a word split across two lines would run past the column and be cut off."""
+    layout.set_text(text, -1)
+    if CAPTION_COLUMN is None:
+        return
+    attrs = Pango.AttrList()
+    if CAPTION_SPACING:
+        attrs.insert(Pango.attr_letter_spacing_new(int(CAPTION_SPACING * Pango.SCALE)))
+    for match in re.finditer("[^ \u200b]+", text):  # Each word, in Pango's byte indices.
+        keep = Pango.attr_allow_breaks_new(False)
+        keep.start_index = len(text[:match.start()].encode())
+        keep.end_index = keep.start_index + len(match.group().encode())
+        attrs.insert(keep)
+    layout.set_attributes(attrs)
+
+
+def _split_long(words):
+    """In the companion stage's column (CAPTION_COLUMN), each word wider than a line split into pieces that each fit
+    one, the pieces after the first marked with CAPTION_GLUE. A long link or path then wraps inside the column instead
+    of running past it. Without a column of its own nothing changes."""
+    if CAPTION_COLUMN is None:
+        return words
+    layout = Pango.Layout.new(PangoCairo.FontMap.get_default().create_context())
+    layout.set_font_description(CAPTION_FONT)
+    if CAPTION_SPACING:
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_letter_spacing_new(int(CAPTION_SPACING * Pango.SCALE)))
+        layout.set_attributes(attrs)
+    room = (_caption_w() - 16) * Pango.SCALE
+
+    def width(text):
+        layout.set_text(_safe_utf8(text), -1)
+        return layout.get_size()[0]
+    out = []
+    for word in words:
+        if width(word) <= room:
+            out.append(word)
+            continue
+        first = True
+        while word:
+            lo, hi = 1, len(word)
+            while lo < hi:  # The longest start of the word that fits a line, at least one character.
+                mid = (lo + hi + 1) // 2
+                lo, hi = (mid, hi) if width(word[:mid]) <= room else (lo, mid - 1)
+            out.append(("" if first else CAPTION_GLUE) + word[:lo])
+            word, first = word[lo:], False
+    return out
+
+
 def _caption_pages(words):
     """Split one sentence's words into pages of at most two caption lines, so a long sentence never runs out of the
     caption area. A page ends at the last clause break (a comma, semicolon, colon, or dash) in the second half of
@@ -2333,7 +2399,7 @@ def _caption_pages(words):
         layout.set_attributes(attrs)
 
     def fits(part):
-        layout.set_text(_safe_utf8(" ".join(part)), -1)
+        _caption_set_text(layout, _safe_utf8(_caption_text(part)))
         return layout.get_line_count() <= 2
 
     def clause(word):
@@ -2386,16 +2452,17 @@ class Caption:
         total = sum(_word_weight(w) for p in parts for w in p.split())
         self.sentences, at, index = [], 0, 0
         for part in parts:
-            words = part.split(" ")
+            words = _split_long(part.split(" "))
             cut = start - index if start is not None and index < start < index + len(words) else len(words)
             index += len(words)
             for page in [p for half in (words[:cut], words[cut:]) if half for p in _caption_pages(half)]:
                 words, start = [], 0
                 for word in page:
+                    word = word.lstrip(CAPTION_GLUE)  # A piece of a long word: a zero width space before it.
                     words.append((start, start + len(word), seconds * at / total))
                     at += _word_weight(word)
                     start += len(word) + 1
-                self.sentences.append(Sentence(" ".join(page), words))
+                self.sentences.append(Sentence(_caption_text(page), words))
         for old, new in zip(self.sentences, self.sentences[1:]):
             # The old page fades once its last word is nearly in. A page break mid-sentence leaves little time, so there
             # the old page fades faster and the new one waits up to BLINK.
@@ -7783,12 +7850,22 @@ class CompanionStage:
         if not scene.captions:
             return None
         pad, column = self.CAPTION_PAD, _caption_w()
+        x, y, left = self.caption_place(scene, now)
+        size = scale * COMPANION_CAPTION
+        probe = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        probe.set_device_scale(size, size)
+        foot = 0.0
+        for c in scene.captions:  # Laid out first, so the image is as tall as its lines and READ MORE need.
+            for page, _ in c.visible():
+                if page.scale != size or page.left != left:
+                    page.build(cairo.Context(probe), size, left)
+                foot = max(foot, max(line[2] for line in page.lines))
+        tall = max(CAPTION_H, CAPTION_TOP + foot + 48)
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil((column + 2 * pad) * COMPANION_CAPTION * scale),
-                                   math.ceil(CAPTION_H * COMPANION_CAPTION * scale))
-        image.set_device_scale(scale * COMPANION_CAPTION, scale * COMPANION_CAPTION)
+                                   math.ceil(tall * COMPANION_CAPTION * scale))
+        image.set_device_scale(size, size)
         context = cairo.Context(image)
         context.translate(pad, 0)
-        x, y, left = self.caption_place(scene, now)
         scene.draw_caption(context, column, now, dim, left)
         x -= pad * COMPANION_CAPTION
         self.caption_at = (round(x * scale) / scale, round(y * scale) / scale)
@@ -12333,9 +12410,9 @@ class Overlay(Gtk.Application):
                 stage is not None and old is not None and (stage.w, stage.h) == (old.w, old.h)):
             return
         self.companion_stage, self._hud = stage, {}
-        if (stage is None) != (old is None):
-            CAPTION_LEFT = stage is not None
-            CAPTION_COLUMN = _companion_column() if stage is not None else None  # The pair's block holds them.
+        column = _companion_column((stage.w, stage.h)) if stage is not None else None
+        if (stage is None) != (old is None) or column != CAPTION_COLUMN:
+            CAPTION_LEFT, CAPTION_COLUMN = stage is not None, column  # The captions run from the block to the margin.
             self.scene.refont()
         scene = self.scene
         scene.companion_hud, scene.push, scene.diagram_room = stage is not None, (0.0, 0.0), None
@@ -14850,6 +14927,48 @@ def _check_companion_stage():
         assert x() == 308.0 and st.mode == "wide"
         run(COMPANION_GLIDE + 0.1)  # Closed at rest: home at once.
         assert x() == 770.0
+        # No caption is ever cut off: in every place and at every length, a long word, a path and a link included,
+        # each page's ink stays inside its own image and on the stage, inside its margin at the right. The column runs
+        # from the pair's block to that margin (the owner saw captions cut off with room to spare).
+        assert CAPTION_COLUMN == math.floor((st.w - COMPANION_MARGIN - bx) / COMPANION_CAPTION) == 540
+
+        def ink(image):
+            image.flush()
+            stride, data, rows = image.get_stride(), image.get_data(), []
+            for y in range(image.get_height()):
+                lit = [i for i, a in enumerate(data[y * stride + 3:y * stride + image.get_width() * 4:4]) if a > 8]
+                if lit:
+                    rows.append((lit[0], y, lit[-1]))
+            return (min(r[0] for r in rows), rows[0][1], max(r[2] for r in rows), rows[-1][1]) if rows else None
+        texts = ("The checks pass.",
+                 "The checks pass on the second try, and the three warnings from the render are gone now, so the "
+                 "branch is ready for you to look at whenever you like, and the clip is saved beside the stills.",
+                 "It is in Supercalifragilisticexpialidociousnessesfulnesseswithoutendingeveragainandagain now.",
+                 "Next I'll run scripts/release-checks with overlay-placement and rook-speech on desktop/overlay.py.",
+                 "Open https://github.com/example-owner/example-repository/pull/12345/files#diff-overlay to see it.")
+        for text in texts:
+            for place in ("pair", "title", "alone", "wide", "diagram"):
+                st2, sc2 = CompanionStage(), Scene(0.0)
+                sc2.handle({"state": "speaking", "caption": text, "seconds": 60.0}, 0.0)
+                st2.mode = {"title": "pair", "diagram": "wide"}.get(place, place)
+                if place == "title":
+                    st2.title = ["READING", "overlay.py", 0.0]
+                if place == "diagram":
+                    st2.panel_scene = Scene(0.0)
+                c = sc2.captions[0]
+                c.fade_at = math.inf
+                for page in c.sentences:
+                    c.clock = page.first + 30.0  # Every word of this page in, and only this page on screen.
+                    for other in c.sentences:
+                        other.fade_at = math.inf if other is page else -math.inf
+                    image, x0, y0 = st2.caption_image(sc2, 0.0, 1.0)
+                    box = ink(image)
+                    assert box and box[0] > 0 and box[1] > 0, (text, place, box)
+                    assert box[2] < image.get_width() - 1 and box[3] < image.get_height() - 1, (text, place, box)
+                    assert x0 + box[0] >= COMPANION_MARGIN - 1 and x0 + box[2] <= st2.w - COMPANION_MARGIN + 12, (
+                        text, place, x0 + box[2])  # 12 px: the halo's soft edge past the margin.
+                    assert y0 + box[3] <= st2.h, (text, place, y0 + box[3])
+                    assert len(page.lines) <= 2, (text, place, len(page.lines))
         # A smaller monitor shrinks the stage to fit, and the layout follows it.
         small = CompanionStage((924, 432))
         assert small.panel()[0] == round(0.3 * 924) and small.centre(0.0) == (462.0, 200.0)
