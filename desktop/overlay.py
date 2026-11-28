@@ -794,6 +794,8 @@ def _placement(display, game=False, pin=None):
     free_w, free_h = mon_w - rl - rr, mon_h - rt - rb
     bx, by = max(0.0, game_left - rl), max(0.0, window_top - rt)
     bounds = (bx, by, min(free_w, game_left - rl + area_w) - bx, min(free_h, window_top - rt + height) - by)
+    if staged:  # On the stage the loop rests where Rook works, so every form morphs in place with no rise or fall.
+        return gdk_mon, left, 0, lift + top, height, lift + top + ORB // 2, None, bounds
     return (gdk_mon, left, 0, lift + top, height, REST_PAD + top, (game_left, window_top, scale) if wow else None,
             bounds)
 
@@ -13886,8 +13888,9 @@ def _check_placement():
             hypr_state["monitors"], hypr_state["clients"] = [m_desk, m_own], []
             write_state()
             disp_own = _FakeDisplay(["DP-1", "DP-2"])
-            # The bar display: the stage fills it, the presence centred at 462 of 924, the loop REST_PAD down.
-            on_bar = ("DP-2", (92, 0, 44, 432, 48), None, (0.0, 0.0, 924.0, 432.0))
+            # The bar display: the stage fills it, the presence centred at 462 of 924, and the loop rests where Rook
+            # works (lift + ORB / 2), so it never rises or falls.
+            on_bar = ("DP-2", (92, 0, 44, 432, 44 + ORB // 2), None, (0.0, 0.0, 924.0, 432.0))
             for pin in ("DP-2", "dp-2", "graphica", "  GRAPHICA computer "):
                 assert staged(_placement(disp_own, pin=pin)) == on_bar, (pin, _placement(disp_own, pin=pin))
             # A scale a hair over 5/3 makes the screen 923.99998 wide: the presence still rounds to its centre.
@@ -13900,15 +13903,16 @@ def _check_placement():
             for pin in ("HDMI-A-9", "off", None, ""):
                 assert _placement(disp_own, pin=pin)[0].get_connector() == "DP-1", pin
                 assert _placement(disp_own, pin=pin)[1:] == got[1:], (pin, _placement(disp_own, pin=pin))
-            # On a bigger monitor the same stage floats in its middle: the same lift and loop, from the stage's top.
+            # On a bigger monitor the same stage floats in its middle: the same working spot, from the stage's top.
             assert staged(_placement(disp_own, pin="desk 27")) == (
-                "DP-1", (590, 0, 324 + 44, 432, 324 + 48), None, (498.0, 324.0, 924.0, 432.0)), _placement(
+                "DP-1", (590, 0, 324 + 44, 432, 324 + 44 + ORB // 2), None, (498.0, 324.0, 924.0, 432.0)), _placement(
                 disp_own, pin="desk 27")
             # A monitor smaller than the stage gets a stage as large as it is.
             hypr_state["monitors"] = [{**m_desk, "width": 800, "height": 400}]
             write_state()
             assert staged(_placement(_FakeDisplay(["DP-1"]), pin="DP-1")) == (
-                "DP-1", (30, 0, 40, 400, 48), None, (0.0, 0.0, 800.0, 400.0)), _placement(_FakeDisplay(["DP-1"]), pin="DP-1")
+                "DP-1", (30, 0, 40, 400, 40 + ORB // 2), None, (0.0, 0.0, 800.0, 400.0)), _placement(
+                _FakeDisplay(["DP-1"]), pin="DP-1")
             # The own screen wins over WoW's game window; with it unplugged, WoW places Rook in the game as before.
             hypr_state["monitors"] = [m_game_mon, {**m_own, "id": 4, "name": "DP-3"}]
             hypr_state["clients"] = [wow_client]
