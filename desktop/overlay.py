@@ -56,7 +56,10 @@ Protocol, stdin (one JSON object per line):
     {"stage": true} draws diagrams and the answer panel in the stage host (stage/host.py) instead of the swarm and the
     panel window, with the same messages and answers; when the host cannot start or dies, the overlay draws as before.
     {"own_screen": "DP-2"} has Rook live on a centred stage (OWN_STAGE) on that monitor, named by its connector or by
-    text in its description, whatever has focus; {"own_screen": null} follows the focused monitor again.
+    text in its description, whatever has focus; {"own_screen": null} follows the focused monitor again. On the stage
+    the presence draws at OWN_SCALE times its size, and glides to the left while a turn has something to show, which
+    shows in a panel at the right (see OwnStage). There "activity_detail", sent after "activity", is what the tool
+    works on (a file's name, a command's start or a thread's title), shown under its label.
     {"render": {"id": "7", "diagram": {"graph": "a > b", "title": ""}}} has the swarm form a constellation (see
     desktop/constellation.py); {"render": {"id": "8", "step": 2}} lights its second node (0 for none, a list for
     several), and {"render": {"id": "9", "clear": true}} ends it. A diagram sent with "stage": true is answered but not
@@ -194,9 +197,27 @@ GRAIN_INSET = 20
 # The resting loop sits near the top of the monitor. The owner chose this height.
 REST_SHARE = 0.05
 REST_PAD = 48
-# The own_screen stage, in logical px: the design size of the owner's bar display (1540 by 720 at scale 1.6667). Rook
-# lives on it centred on the monitor own_screen names, so a layout made for it looks the same on any monitor.
-OWN_STAGE = (924, 432)
+# The own_screen stage, in logical px: the owner's bar display at scale 1, 1540 by 720 (the owner's call, 2026-11-27).
+# Rook lives on it centred on the monitor own_screen names, so a layout made for it looks the same on any monitor; a
+# larger monitor floats it in its middle, and a smaller one shrinks it to fit. The rest of the own stage is OwnStage's.
+OWN_STAGE = (1540, 720)
+# On the stage the presence draws OWN_SCALE times its size: its forms, grains, glow and label (the owner asked for "two
+# times the size", 2026-11-27). The springs keep their own units, so every form keeps its motion; the picture grows.
+OWN_SCALE = 2.0
+# Once a turn has something to show, the presence glides from the stage's middle to OWN_LEFT of its width in OWN_GLIDE
+# s, and the stage from OWN_PANEL of its width, OWN_MARGIN px inside its edges, is the content panel (the owner's
+# layout, 2026-11-27: Rook moves to the left and shows the content on the right).
+OWN_LEFT, OWN_PANEL, OWN_MARGIN, OWN_GLIDE = 0.2, 0.3, 36, 0.7
+# The grains feel OWN_TRAIL of the glide's acceleration, so the presence travels as one body and trails a little.
+OWN_TRAIL = 0.3
+# In the panel the captions are OWN_CAPTION times their size, in a left-aligned column; a running tool's label is
+# OWN_TITLE times a label's size, over a gold hairline that draws on in OWN_LINE s.
+OWN_CAPTION, OWN_TITLE, OWN_LINE = 1.7, 2.8, 0.65
+# The presence's box on the stage, in scene units about its centre (x, y, width, height): every form and its label.
+OWN_BOX = (-150, -150, 300, 280)
+# A diagram or the viewer on the stage: its grains come out of the presence and fly back into it when it ends, fading
+# out over OWN_HOME s.
+OWN_HOME = 0.9
 FALLBACK_TOP, FALLBACK_LIFT = 72, 124
 # While this window is focused, Rook steps aside for WoW's own overlay.
 GAME_TITLE = "World of Warcraft"
@@ -514,6 +535,7 @@ except (OSError, ValueError, KeyError, TypeError):
 
 
 CAPTION_SPACING = 0.0  # Letter spacing of the captions, in pixels; only a pack's lettering sets it.
+CAPTION_LEFT = False  # The own stage sets its captions as a left-aligned column (see OwnStage); else they are centred.
 _FONT_ENTRY = None  # The voice font in force, or None for fonts.json's first entry, the default.
 
 # A pack's own lettering: the manifest's "text" block (themes/forge/FORMAT.md), resolved by _pack_lettering. LETTERING
@@ -783,19 +805,20 @@ def _placement(display, game=False, pin=None):
     else:
         game_left = window_top = 0.0
         area_w, height = mon_w, mon_h
-    # On the stage the presence rounds to its centre, since a fractional scale leaves a hair under a whole px, and its
-    # window never starts above the stage's top, as it never starts above a monitor's.
-    left = max(0, (round if staged else int)(game_left + area_w / 2 - WIDTH / 2))
-    top = max(int(window_top) if staged else 0, int(window_top + height * REST_SHARE - REST_PAD))
-    lift = max(0, int(window_top + height * TOP_SHARE) - GRAIN_INSET - top)
     # Layer-shell margins count from the area left free by exclusive bars; hyprctl reports them as reserved
     # [left, top, right, bottom].
     rl, rt, rr, rb = (mon.get("reserved") or [0, 0, 0, 0])[:4]
     free_w, free_h = mon_w - rl - rr, mon_h - rt - rb
     bx, by = max(0.0, game_left - rl), max(0.0, window_top - rt)
     bounds = (bx, by, min(free_w, game_left - rl + area_w) - bx, min(free_h, window_top - rt + height) - by)
-    if staged:  # On the stage the loop rests where Rook works, so every form morphs in place with no rise or fall.
-        return gdk_mon, left, 0, lift + top, height, lift + top + ORB // 2, None, bounds
+    if staged:
+        # The window covers the stage from its corner, and OwnStage places the presence and the panel inside it. The
+        # loop rests where Rook works, on the stage's horizon, so every form morphs in place with no rise or fall.
+        horizon = round(OwnStage(bounds[2:]).horizon())
+        return gdk_mon, round(bx), round(by), horizon - ORB // 2, height, horizon, None, bounds
+    left = max(0, int(game_left + area_w / 2 - WIDTH / 2))
+    top = max(0, int(window_top + height * REST_SHARE - REST_PAD))
+    lift = max(0, int(window_top + height * TOP_SHARE) - GRAIN_INSET - top)
     return (gdk_mon, left, 0, lift + top, height, REST_PAD + top, (game_left, window_top, scale) if wow else None,
             bounds)
 
@@ -1696,7 +1719,7 @@ class Sentence:
         layout.set_font_description(CAPTION_FONT)
         layout.set_width(CAPTION_W * Pango.SCALE)
         layout.set_wrap(Pango.WrapMode.WORD)
-        layout.set_alignment(Pango.Alignment.CENTER)
+        layout.set_alignment(Pango.Alignment.LEFT if CAPTION_LEFT else Pango.Alignment.CENTER)
         layout.set_line_spacing(CAPTION_LINE_SPACING)
         if CAPTION_SPACING:
             attrs = Pango.AttrList()
@@ -1711,7 +1734,8 @@ class Sentence:
                 layout.set_width((lo + hi) // 2 * Pango.SCALE)
                 lo, hi = (lo, (lo + hi) // 2) if layout.get_line_count() == 2 else ((lo + hi) // 2 + 1, hi)
             layout.set_width(hi * Pango.SCALE)
-        shift = (CAPTION_W - layout.get_width() / Pango.SCALE) / 2  # Keeps the narrowed lines centred.
+        # Keeps the narrowed lines centred; the own stage's column keeps them at its left edge.
+        shift = 0.0 if CAPTION_LEFT else (CAPTION_W - layout.get_width() / Pango.SCALE) / 2
         ink, _ = layout.get_pixel_extents()
         self.center, self.width = shift + ink.x + ink.width / 2, ink.width
         lines = []
@@ -2613,14 +2637,14 @@ def _terminal_paragraphs(blocks, ch, rule_chars):
     return out
 
 
-def _panel_rect(bounds, centre_x, anchor_y, moved=None, natural_h=None):
+def _panel_rect(bounds, centre_x, anchor_y, moved=None, natural_h=None, share=TERM_SHARE):
     """Where the last-answer panel goes, in layer-shell margin coordinates: (x, y, width, height, height cap).
     bounds is the free area of the monitor, or the game window in WoW mode. By default the panel sits centred under
     the swarm with its top where the captions start; moved is where the owner dragged it. It stays fully inside
     bounds, so a tall panel moves up as far as it must."""
     bx, by, bw, bh = bounds
     w = int(min(TERM_W, bw - 2 * TERM_MARGIN))
-    cap = int(min(TERM_SHARE * bh, bh - 2 * TERM_MARGIN))
+    cap = int(min(share * bh, bh - 2 * TERM_MARGIN))
     h = cap if natural_h is None else int(min(natural_h, cap))
     x, y = moved if moved else (centre_x - w / 2, anchor_y)
     x = min(max(x, bx + TERM_MARGIN), bx + bw - TERM_MARGIN - w)
@@ -4996,6 +5020,13 @@ class Scene:
         self.dispatch_hold = DISPATCH_HOLD
         self.monitor_width = 2000.0
         self.fanned_at = None  # The activity_at of the activity whose send fan has shown; after it, no send form.
+        # The own stage (see OwnStage): an acceleration every grain feels while the stage carries the presence, so it
+        # travels as a body that trails a little; and the room a diagram lays out in there, or None for WIDTH_MAX.
+        self.push = (0.0, 0.0)
+        self.diagram_room = None
+        self.own_hud = False  # On the own stage the panel shows a running tool's label, so the presence shows none.
+        self.own_home = None  # The panel scene's presence: its centre from the scene's own centre, and its size.
+        self.activity_detail = ""  # What the running tool works on, a file name or a command, from rook.py.
 
     def dispatch_active(self, now=None):
         """True while a multi-thread dispatch fan is animating in the active thinking turn, or tearing down after it;
@@ -5306,7 +5337,7 @@ class Scene:
 
         title, nodes, con, repairs = constellation.make(f"{title} | {graph}" if title else graph, measure,
                                                         measure_title=lambda text: measure(text, TITLE_GROW),
-                                                        shapes=shapes)
+                                                        shapes=shapes, room=self.diagram_room)
         if repairs:
             print(f"diagram repairs: {'; '.join(repairs)} in {graph[:200]!r}", file=sys.stderr, flush=True)
         if con is None:
@@ -5558,7 +5589,7 @@ class Scene:
             if state not in READING_STATES:
                 self.reading = None
             if state != "thinking":
-                self.activity = ""
+                self.activity = self.activity_detail = ""
             if state == "listening":
                 self.level = 0.0
                 self.heard[:] = [0.0] * len(self.heard)
@@ -5601,7 +5632,9 @@ class Scene:
                     ds = DispatchState(items, now, hold=self.dispatch_hold, rest_anchor=bool(self.home), lead=lead)
                     self.dispatch = ds if ds.rows else None
         if isinstance(msg.get("activity"), str) and msg["activity"] != self.activity:
-            self.activity, self.activity_at = msg["activity"], now
+            self.activity, self.activity_at, self.activity_detail = msg["activity"], now, ""
+        if isinstance(msg.get("activity_detail"), str) and self.activity:
+            self.activity_detail = " ".join(msg["activity_detail"].split())
         waiting = msg.get("waiting")
         if isinstance(waiting, str):
             self.waiting = waiting.strip()
@@ -5709,6 +5742,8 @@ class Scene:
             return self.reading_label
         if self.state == "thinking" and self.activity and not (
                 ACTIVITY_FORMS.get(self.activity) in devs_pack.SEND_FORMS and self.fanned_at == self.activity_at):
+            if self.own_hud:
+                return ""  # The own stage's panel shows it large (see OwnStage.title_text).
             return ACTIVITY_LABELS.get(self.shown_activity(now), "THINKING")  # After its fan, a send thinks on.
         return LABELS.get(self.state, "")
 
@@ -5948,10 +5983,15 @@ class Scene:
         """Where each grain belongs in a form right now: x and y lists, and a brightness factor list, fitted to the
         size system (see FORM_FIT)."""
         tx, ty, tb = self._form_targets(name, now)
-        if name not in FORM_FIT:
-            return tx, ty, tb
-        k, dx, dy = FORM_FIT[name]
-        return [x * k + dx for x in tx], [y * k + dy for y in ty], tb
+        if name in FORM_FIT:
+            k, dx, dy = FORM_FIT[name]
+            tx, ty = [x * k + dx for x in tx], [y * k + dy for y in ty]
+        if self.own_home is not None and name != "render":
+            # The own stage's panel scene: every form but its diagram is the presence's own, at its size and place, so
+            # the grains come out of the presence and go back into it (see OwnStage.open_panel).
+            hx, hy, k = self.own_home
+            tx, ty = [hx + x * k for x in tx], [hy + y * k for y in ty]
+        return tx, ty, tb
 
     def _rest_look(self, look, points, flow, tb, now):
         """REST_LOOK on the loop's brightness tb: the dim rest with its flecks, and the quiet turn's glare."""
@@ -6528,7 +6568,7 @@ class Scene:
             goals = [v for i in self.idx for v in (tx[i], ty[i], tb[i], tz[i] if i < n_tz else 0.0)]
             self.spring_steps.append((now, dt / steps, steps, pace, self.cohesion,
                                       (30 + 580 * self.loosen) * pace * pace, self.extra, self.spring_kicks,
-                                      goals, held, self.form_at, dscale, self.spring_unloose))
+                                      goals, held, self.form_at, dscale, self.spring_unloose, self.push))
             self.spring_kicks, self.spring_unloose = [], False
             # At rest the grains ride their targets (the loop has no loose grains), and once a scene has settled they
             # keep to them but for a few loose ones: then the vignette follows the targets, and the chip's grains
@@ -6547,6 +6587,7 @@ class Scene:
         sin, cos = math.sin, math.cos
         n_tz = len(tz)
         n_oz = len(old_z) if old_z is not None else 0
+        px, py = self.push
         for i in self.idx:
             since = now - start - delay[i] * dscale
             if old is not None and since < 0:
@@ -6569,8 +6610,8 @@ class Scene:
                     # Pulled along a slight curve, like filings drawn to a magnet.
                     ax -= bend * dy
                     ay += bend * dx
-                ax += jx
-                ay += jy
+                ax += jx + px
+                ay += jy + py
                 vx[i] += ax * dt
                 vy[i] += ay * dt
                 x[i] += vx[i] * dt
@@ -7281,6 +7322,328 @@ class Scene:
                 return
             cr.set_source_surface(sprite, bx + bw / 2 - (sw - LABEL_SPACING) / 2, by + bh + 22 - sh / 2)
             cr.paint_with_alpha(0.9 * hint * min(1.0, total))
+
+
+class OwnStage:
+    """The own stage (own_screen): where the presence sits, and the content panel at its right. At rest, listening and
+    plain thinking the presence sits in the stage's middle at OWN_SCALE times its size. Once a turn has something to
+    show (captions, a running tool, a diagram, the viewer, the answer panel, a card or a send fan) it glides to
+    OWN_LEFT of the width, and it holds there for the rest of the turn, so short captions never send it back and forth.
+    Once the turn is over and nothing shows, it glides back. A diagram and the viewer live in a panel scene of their
+    own, whose grains come out of the presence and go back into it. No GTK: the overlay, the renders and the checks
+    drive it the same way, from the scene and the clock."""
+
+    def __init__(self, size=OWN_STAGE):
+        self.w, self.h = size
+        self.glide = (0.0, 0.0, -math.inf)  # From and to (0 the middle, 1 the left), and when it began.
+        self.held = False  # The turn has shown something: the presence keeps to the left until the turn is over.
+        self.title = None  # The running tool's label in the panel: [text, detail, since], or None.
+        self.title_alpha = 0.0
+        self.panel_scene = None  # The diagram's or the viewer's own scene (see open_panel), or None.
+        self.panel_end = None  # When the panel scene's content ended and its grains went home.
+        self.last = None  # The last step's time.
+
+    # ---- where things are, in stage px ----
+    def side(self, now):
+        """How far the presence is to the left: 0 in the middle, 1 at OWN_LEFT, eased (smootherstep)."""
+        f, t, at = self.glide
+        if f == t:
+            return t
+        u = (now - at) / (OWN_GLIDE * max(0.4, abs(t - f)))
+        if u >= 1:
+            return t
+        u = max(0.0, u)
+        return f + (t - f) * u * u * u * (10 - 15 * u + 6 * u * u)
+
+    def centre(self, now):
+        """The presence's centre on the stage. Its label hangs under the form, so the form sits a little above the
+        middle and the two together are centred; content in the panel lines up on the same horizon."""
+        p = self.side(now)
+        return self.w / 2 + (OWN_LEFT - 0.5) * self.w * p, self.horizon()
+
+    def horizon(self):
+        return self.h / 2 - 8 * OWN_SCALE
+
+    def panel(self):
+        """The content panel (x, y, w, h) on the stage."""
+        x = round(OWN_PANEL * self.w)
+        return x, OWN_MARGIN, self.w - OWN_MARGIN - x, self.h - 2 * OWN_MARGIN
+
+    def caption_top(self, below):
+        """The top of the caption column's image: on the horizon, or with below at the panel's foot (under a diagram
+        or the viewer)."""
+        key = (CAPTION_FONT.to_string(), CAPTION_LINE_SPACING)
+        if self.__dict__.get("_two", (None,))[0] != key:  # Measured once per caption font.
+            layout = Pango.Layout.new(PangoCairo.FontMap.get_default().create_context())
+            layout.set_font_description(CAPTION_FONT)
+            layout.set_line_spacing(CAPTION_LINE_SPACING)
+            layout.set_text("Ag\nAg", -1)  # A page is at most two lines (see _caption_pages).
+            self._two = (key, layout.get_pixel_extents()[1].height)
+        two = self._two[1]
+        if below:  # A page's two lines end at the panel's foot.
+            return self.h - OWN_MARGIN - (CAPTION_TOP + two) * OWN_CAPTION
+        return self.horizon() - (CAPTION_TOP + two / 2) * OWN_CAPTION  # Two lines centred on the horizon.
+
+    def room(self):
+        """A diagram's or the viewer's room in the panel (x, y, w, h): all of it above the captions' line."""
+        x, y, w, _ = self.panel()
+        bottom = self.caption_top(True) + CAPTION_TOP * OWN_CAPTION - 14
+        return x, y, w, bottom - y
+
+    def box(self, now, scale):
+        """The presence's picture on the stage: its rect (x, y, w, h) in stage px on whole device pixels, and the
+        presence's centre inside it in scene units. The picture is OWN_BOX at OWN_SCALE."""
+        cx, cy = self.centre(now)
+        bx, by, bw, bh = OWN_BOX
+        x, y = round((cx + bx * OWN_SCALE) * scale) / scale, round((cy + by * OWN_SCALE) * scale) / scale
+        return (x, y, bw * OWN_SCALE, bh * OWN_SCALE), ((cx - x) / OWN_SCALE, (cy - y) / OWN_SCALE)
+
+    # ---- the turn ----
+    def content(self, scene, now, extra=False):
+        """True while the turn shows something besides the presence. extra is what only the overlay knows: the answer
+        panel or a card is open."""
+        ps = self.panel_scene
+        return bool(extra or scene.state == "speaking" or any(c.visible() for c in scene.captions)
+                    or (scene.state == "thinking" and scene.activity and not scene.quiet)
+                    or scene.dispatch_active(now) or scene.view is not None
+                    or (ps is not None and self.panel_end is None))
+
+    def step(self, scene, now, extra=False):
+        """Before scene.step: where the presence goes, the push its grains feel on the way, the panel's title, and
+        the panel scene's state, home and end."""
+        dt, self.last = (0.0 if self.last is None else max(0.0, now - self.last)), now
+        showing = self.content(scene, now, extra)
+        if scene.state == "listening" and not showing:
+            self.held = False  # A new turn starts in the middle.
+        if showing:
+            self.held = True
+        elif scene.home:
+            self.held = False
+        want = 1.0 if self.held else 0.0
+        if want != self.glide[1]:
+            self.glide = (self.side(now), want, now)
+        f, t, at = self.glide
+        span = OWN_GLIDE * max(0.4, abs(t - f))
+        u = (now - at) / span
+        if f != t and 0 <= u < 1:
+            # The presence's acceleration across the stage, in scene units: smootherstep's second derivative.
+            a = (t - f) * (OWN_LEFT - 0.5) * self.w * (60 * u - 180 * u * u + 120 * u * u * u) / span / span
+            scene.push = (-OWN_TRAIL * a / OWN_SCALE, 0.0)
+        else:
+            scene.push = (0.0, 0.0)
+        scene.own_hud = True
+        # The title waits until the presence has nearly cleared the panel, so the two never cross.
+        goal = self.title_text(scene, now) if self.side(now) > 0.85 else None
+        if self.title is None or goal is None or goal[:2] != tuple(self.title[:2]):
+            self.title_alpha = max(0.0, self.title_alpha - dt / 0.18) if self.title else 0.0
+            if self.title_alpha <= 0.0:
+                self.title = None if goal is None else [*goal, now]
+        else:
+            self.title_alpha = min(1.0, self.title_alpha + dt / 0.3)
+        ps = self.panel_scene
+        if ps is not None:
+            if ps.state != scene.state:
+                ps.handle({"state": scene.state}, now)
+            (px, py), (qx, qy) = self.centre(now), self.panel_centre()
+            ps.own_home = (px - qx, py - qy, OWN_SCALE)
+            if self.panel_end is None and ps.render is None and ps.view is None:
+                self.panel_end = now  # Its grains fly home into the presence and fade there.
+            if self.panel_end is not None and now - self.panel_end > OWN_HOME:
+                self.panel_scene = self.panel_end = None
+
+    def title_text(self, scene, now):
+        """The panel's title for a running tool: its label and detail, or None."""
+        if scene.state != "thinking" or not scene.activity or scene.quiet or scene.dispatch_active(now) or (
+                ACTIVITY_FORMS.get(scene.activity) in devs_pack.SEND_FORMS and scene.fanned_at == scene.activity_at):
+            return None
+        return ACTIVITY_LABELS.get(scene.shown_activity(now), "THINKING"), scene.activity_detail
+
+    # ---- the panel scene: a diagram, or the viewer ----
+    def panel_centre(self):
+        x, y, w, h = self.room()
+        return x + w / 2, y + h / 2
+
+    def open_panel(self, presence, now):
+        """The panel scene, made now if there is none: its grains start where the presence's are, at their size, so
+        what it draws comes out of the presence."""
+        if self.panel_scene is not None and self.panel_end is None:
+            return self.panel_scene
+        ps = Scene(now)
+        ps.lift = 10 ** 4  # A diagram sits on the scene's centre, never moved down for the canvas's top.
+        ps.rest_pad = ps.lift + ORB / 2
+        ps.monitor_width = float(self.w)
+        x, y, w, h = self.room()
+        ps.diagram_room = (w, h)
+        ps.handle({"state": presence.state}, now)
+        ps.own_home = None
+        tx, ty, _ = presence._targets(presence.form, now)
+        (px, py), (qx, qy) = self.centre(now), self.panel_centre()
+        n = min(len(tx), len(ps.x))
+        ps.x[:n] = [px - qx + v * OWN_SCALE for v in tx[:n]]
+        ps.y[:n] = [py - qy + v * OWN_SCALE for v in ty[:n]]
+        ps.form = ps.prev = presence.form
+        ps.own_home = (px - qx, py - qy, OWN_SCALE)
+        self.panel_scene, self.panel_end = ps, None
+        return ps
+
+    def render(self, presence, spec, now):
+        """A render request on the stage: a diagram, a step or a clear, answered as Scene.render_command answers."""
+        ps = self.panel_scene if self.panel_end is None else None
+        if ps is None:
+            if not isinstance(spec, dict) or "diagram" not in spec:
+                return presence.render_command(spec, now)  # Nothing on screen: the scene's own answer.
+            ps = self.open_panel(presence, now)
+        answer = ps.render_command(spec, now)
+        if ps.render is None and ps.view is None:
+            self.panel_end = self.panel_end or now
+        return answer
+
+    def answer_rect(self, natural_h=None, moved=None):
+        """The answer panel in the panel (x, y, w, h, cap) on the stage, as _panel_rect gives it: as tall as the
+        panel allows, centred on the horizon, or where the owner dragged it."""
+        bounds = self.panel()
+        x, _, w, h, cap = _panel_rect(bounds, bounds[0] + bounds[2] / 2, 0, None, natural_h, share=1.0)
+        return _panel_rect(bounds, bounds[0] + bounds[2] / 2, self.horizon() - h / 2, moved, natural_h, share=1.0)
+
+    def panel_alpha(self, now):
+        """The panel scene's opacity: whole until its content ends, then gone over OWN_HOME as its grains go home."""
+        if self.panel_end is None:
+            return 1.0
+        return _ease_away((now - self.panel_end - 0.25 * OWN_HOME) / (0.75 * OWN_HOME))
+
+    def panel_rect(self, now):
+        """Where the panel scene draws: the whole stage while its grains fly between the presence and the panel, else
+        the room alone, which is all a settled diagram needs."""
+        ps = self.panel_scene
+        settled = (ps is not None and ps.form == "render" and ps.render_end is None and now - ps.form_at > 1.6
+                   and self.panel_end is None)
+        return self.room() if settled else (0, 0, self.w, self.h)
+
+    # ---- the panel's text ----
+    def hud_rect(self):
+        """Where paint_hud draws, on the stage: the panel and a margin at its left for the captions' plates."""
+        x = self.panel()[0] - 48
+        return x, 0, self.w - x, self.h
+
+    def hud_key(self, scene, now, dim=0.0):
+        """A key for what paint_hud draws. Equal keys paint the same pixels."""
+        title = None
+        if self.title and self.title_alpha > 0.0:
+            since = now - self.title[2]
+            title = (tuple(self.title[:2]), round(self.title_alpha, 3),
+                     round(min(since, OWN_LINE + 0.5 + REVEAL_SECONDS), 3))
+        return title, scene.caption_key(CAPTION_W, now, dim), self.panel_scene is not None and self.panel_end is None, \
+            id(PALETTE), id(LETTERING)
+
+    def paint_hud(self, cr, scene, now, dim=0.0):
+        """The panel's text on the stage: the running tool's label over its hairline and detail, and the captions as a
+        left-aligned column OWN_CAPTION times their size, under a diagram or the viewer when one shows."""
+        scale = cr.get_target().get_device_scale()[0]
+        self.paint_title(cr, now)
+        shown = self.caption_image(scene, now, scale, dim)
+        if shown is not None:
+            image, x, y = shown
+            cr.save()
+            cr.translate(x, y)
+            cr.scale(OWN_CAPTION, OWN_CAPTION)
+            cr.set_source_surface(image, 0, 0)
+            cr.paint()
+            cr.restore()
+
+    def caption_image(self, scene, now, scale, dim=0.0):
+        """The captions as their own image, set at OWN_CAPTION times their size so every word is crisp, and where its
+        top-left corner goes on the stage, on whole device pixels; None with no captions. Its logical size is
+        OWN_CAPTION times its own."""
+        if not scene.captions:
+            return None
+        pad = 24  # Room at the column's left for the light theme's caption plates and the halo.
+        image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil((CAPTION_W + 2 * pad) * OWN_CAPTION * scale),
+                                   math.ceil(CAPTION_H * OWN_CAPTION * scale))
+        image.set_device_scale(scale * OWN_CAPTION, scale * OWN_CAPTION)
+        context = cairo.Context(image)
+        context.translate(pad, 0)
+        scene.draw_caption(context, CAPTION_W, now, dim)
+        x = self.panel()[0] - pad * OWN_CAPTION
+        y = self.caption_top(self.panel_scene is not None and self.panel_end is None)
+        return image, round(x * scale) / scale, round(y * scale) / scale
+
+    def paint_title(self, cr, now):
+        """The running tool's title, its hairline and its detail, on the stage."""
+        if self.title and self.title_alpha > 0.0:
+            self._paint_title(cr, cr.get_target().get_device_scale()[0], self.panel()[0], now)
+
+    def _paint_title(self, cr, scale, x0, now):
+        text, detail, since = self.title
+        t, alpha = now - since, LABEL_ALPHA * _ease_out(self.title_alpha)
+        key = ("own title", text, scale)
+        cache = self.__dict__.setdefault("_sprites", {})
+        if key not in cache:
+            if len(cache) > 32:
+                cache.clear()
+            if LETTERING:
+                kind = LETTERING["label"]
+                font, spacing = _grown(kind["font"], OWN_TITLE), kind["spacing"] * OWN_TITLE
+                sprite = _lettering_sprite(cr, _cased(text, "label"), scale, "label", grow=OWN_TITLE)[0]
+            else:
+                font, spacing = _grown(LABEL_FONT, OWN_TITLE), LABEL_SPACING * OWN_TITLE
+                sprite = _word_sprite(cr, text, scale, font, PALETTE["label"], spacing, PALETTE["label_halos"],
+                                      PALETTE["label_halo"], (PALETTE["label_outline"][0] * 1.6,
+                                                              PALETTE["label_outline"][1]))[0]
+            cache[key] = (sprite, _type_geometry(_cased(text, "label") if LETTERING else text, font, spacing))
+        sprite, geometry = cache[key]
+        ix, iy, iw, ih = geometry[0]
+        dkey = ("own detail", detail, scale)
+        if detail and dkey not in cache:
+            mono = _font(_terminal_family(), 17)
+            cache[dkey] = _word_sprite(cr, detail, scale, mono, filament.CHAMP if PALETTE is THEMES["dark"]
+                                       else PALETTE["label"], 0.0, PALETTE["text_halos"], PALETTE["text_halo"])
+        gap_line, gap_detail = 20, 18
+        dh = 17 * 1.3 if detail else 0
+        top = self.horizon() - (ih + gap_line + (gap_detail + dh if detail else 0)) / 2
+        sx, sy = _device_round(cr, x0 - ix, top - iy)
+        cr.set_source_surface(sprite, sx, sy)
+        if LETTERING and LETTERING["reveal"] == "spread" and t < REVEAL_SECONDS:
+            cr.mask(_reveal_mask(geometry[0], t, "left", sx, sy, alpha))
+            _paint_reveal_rows(cr, _reveal_rows(geometry, t, "left", sx, sy))
+        else:
+            cr.paint_with_alpha(alpha)
+        # The hairline: a filament line that draws on from the title's left edge, brightest at its head while it
+        # runs, and fading out towards its far end.
+        line_y = round((top + ih + gap_line) * scale) / scale + 0.5 / scale
+        run = _ease_out((t - 0.12) / OWN_LINE)
+        length = 0.62 * self.panel()[2]
+        if run > 0.0:
+            dark = PALETTE is THEMES["dark"]
+            gold = filament.GOLD if dark else filament.LIGHT[filament.GOLD]
+            hot = filament.HOT if dark else filament.LIGHT[filament.HOT]
+            end = x0 + length * run
+            fade = _ease_out(self.title_alpha)
+            for width, a in ((7.0, 0.06), (3.0, 0.14), (1.0 / scale, 0.95)):
+                grad = cairo.LinearGradient(x0, 0, x0 + length, 0)
+                grad.add_color_stop_rgba(0.0, *gold, a * fade)
+                grad.add_color_stop_rgba(0.55, *gold, a * 0.7 * fade)
+                grad.add_color_stop_rgba(1.0, *gold, 0.0)
+                cr.set_source(grad)
+                cr.set_line_width(width)
+                cr.set_line_cap(cairo.LINE_CAP_ROUND if width > 1.5 else cairo.LINE_CAP_BUTT)
+                cr.move_to(x0, line_y)
+                cr.line_to(end, line_y)
+                cr.stroke()
+            if run < 1.0:  # The head: a short white-hot run that cools as the line finishes.
+                head = cairo.LinearGradient(end - 60, 0, end, 0)
+                head.add_color_stop_rgba(0.0, *hot, 0.0)
+                head.add_color_stop_rgba(1.0, *hot, 0.9 * (1 - run) * fade)
+                cr.set_source(head)
+                cr.set_line_width(1.6)
+                cr.move_to(max(x0, end - 60), line_y)
+                cr.line_to(end, line_y)
+                cr.stroke()
+        if detail:
+            dsprite, baseline, pad = cache[dkey]
+            k = _ease_out((t - 0.35) / 0.35) * _ease_out(self.title_alpha)
+            if k > 0.0:
+                cr.set_source_surface(dsprite, *_device_round(cr, x0 - pad, line_y + gap_detail - 14))
+                cr.paint_with_alpha(0.8 * k)
 
 
 def _view_media_rect(rect, p):
@@ -8178,6 +8541,7 @@ layout(std430, binding = 3) buffer Rows { float row[]; };  // Instance rows for 
 layout(std430, binding = 4) buffer Kicks { vec4 kick[]; };  // instance, dvx, dvy, loose until
 layout(std430, binding = 5) buffer Targets { vec4 target[]; };  // x, y, glow, straight per grain; then the old form's
 uniform float now_t, dt, pace, cohesion, jitter, extra, start_t, dscale;
+uniform vec2 push;  // Scene.push: an acceleration every grain feels, as the own stage's glide carries the presence.
 uniform int steps, count, kicks, rest_every, has_old, unloose;
 // Scene._move: each grain's spring pulls it to its target, after its own delay (the old form's target until then),
 // along a slight curve at first, with its own shimmer of jitter; a grain kicked loose has a weak spring for a while.
@@ -8197,7 +8561,7 @@ void main() {
     vec2 jit = jitter * vec2(sin(now_t * g.spring.y + g.spring.z), cos(2.0 * now_t * g.spring.y + g.spring.w));
     for (int n = 0; n < steps; n++) {
         vec2 d = goal.xy - g.pos.xy;
-        vec2 a = k * d - 1.1 * w * g.pos.zw + bend * vec2(-d.y, d.x) + jit;
+        vec2 a = k * d - 1.1 * w * g.pos.zw + bend * vec2(-d.y, d.x) + jit + push;
         g.pos.zw += a * dt;
         g.pos.xy += g.pos.zw * dt;
     }
@@ -8986,7 +9350,8 @@ class _DustGL:
         place = None
         count, epoch = len(self.spring_idx), self.spring_epoch
         self._set(prog, count=count, rest_every=_rest_every())
-        for now, dt, steps, pace, cohesion, jitter, extra, kicks, targets, old, start, dscale, unloose in scene.spring_steps:
+        for (now, dt, steps, pace, cohesion, jitter, extra, kicks, targets, old, start, dscale, unloose,
+             push) in scene.spring_steps:
             if kicks:
                 place = place or {i: k for k, i in enumerate(self.spring_idx)}
                 self._upload(self.kick_buf, [v for i, kx, ky, until in kicks
@@ -8995,7 +9360,7 @@ class _DustGL:
             self._set(prog, now_t=float(now - epoch), dt=float(dt), steps=steps, pace=float(pace),
                       cohesion=float(cohesion), jitter=float(jitter), extra=float(extra), kicks=len(kicks),
                       start_t=float(start - epoch), dscale=float(dscale), has_old=1 if old else 0,
-                      unloose=1 if unloose else 0)
+                      unloose=1 if unloose else 0, push=(float(push[0]), float(push[1])))
             gl.DispatchCompute((count + 63) // 64, 1, 1)
             gl.MemoryBarrier(0xFFFFFFFF)
         scene.spring_steps.clear()
@@ -10425,6 +10790,8 @@ class Overlay(Gtk.Application):
         self._focus_why = ""
         self._focus_move = None
         self.own_screen = None  # The own_screen setting: the monitor Rook lives on alone, or None to follow focus.
+        # While it is connected, its stage (OwnStage): the window covers it, and the presence and the panel live in it.
+        self.own_stage, self._panel_gl, self._hud = None, None, {}
         # The media viewer: its window, the media showing, the one it replaces while that leaves, the line under the
         # box, the file being checked and decoded in a worker thread, and when a video ended.
         self.viewer = None
@@ -10636,7 +11003,9 @@ class Overlay(Gtk.Application):
         in_game = self.wow and self.game_focused
         monitor, left, top, lift, height, self.scene.rest_pad, game, self.bounds = _placement(
             self.win.get_display(), in_game, self.own_screen)
-        in_game = in_game and not self._pinned()  # The own screen wins over the game window.
+        pinned = self._pinned()
+        in_game = in_game and not pinned  # The own screen wins over the game window.
+        self._use_stage(OwnStage(self.bounds[2:]) if pinned and self.bounds else None)
         old = self.monitor.get_connector() if self.monitor is not None else None
         new = monitor.get_connector() if monitor is not None else None
         if new != old:
@@ -10656,8 +11025,9 @@ class Overlay(Gtk.Application):
         # At home on the desktop Rook sits at the centre of the free area, where the compositor centres a window that
         # only the top edge anchors. A send's fan then widens the window about Rook in the commit that draws the new
         # width, and no margin moves while it shows (see _size_canvas). Elsewhere the left margin places it.
-        self._centred = left is None or (game is None and self.bounds is not None
-                                         and abs(left + WIDTH / 2 - (self.bounds[0] + self.bounds[2] / 2)) <= 0.5)
+        self._centred = self.own_stage is None and (left is None or (
+            game is None and self.bounds is not None
+            and abs(left + WIDTH / 2 - (self.bounds[0] + self.bounds[2] / 2)) <= 0.5))
         if self._centred:
             self._dispatch_cx = None
         elif self._dispatch_cx is not None:  # A fan's wide window: the margin puts Rook home, not the window's edge.
@@ -10667,7 +11037,8 @@ class Overlay(Gtk.Application):
             LayerShell.set_margin(self.win, LayerShell.Edge.LEFT, self.left)
         if lift != self.scene.lift:
             self.scene.lift = lift
-            self.area.set_content_height(lift + ORB_H)
+            if self.own_stage is None:
+                self.area.set_content_height(lift + ORB_H)
         if self.answer_open:
             self._answer_keyboard()
             self._place_answer()
@@ -10837,7 +11208,10 @@ class Overlay(Gtk.Application):
     def _canvas_cx(self, w):
         """The presence's x in the main area, w wide and centred in the window: its x in the window, less the area's.
         From the window's laid-out width, so a frame that GTK draws before a resize lands keeps the presence in place.
-        A window the compositor centres has the presence at its centre, and the area is centred in it."""
+        A window the compositor centres has the presence at its centre, and the area is centred in it. On the own
+        stage the area is the stage, and the presence is where the stage has it."""
+        if getattr(self, "own_stage", None) is not None:  # The send checks drive this with a stand-in window.
+            return self.own_stage.centre(self.scene.last)[0]
         if self._centred:
             return w / 2.0
         x = float(self._dispatch_cx) if self._dispatch_cx is not None else WIDTH / 2.0
@@ -11315,7 +11689,8 @@ class Overlay(Gtk.Application):
     def _surface_drawing(self):
         """True while the dust surface draws the main window's dust: it is up, the chip runs the grains (or flipbook),
         and the window shows them whole (no viewer fade, no reading surface, no fade)."""
-        return (self._surface is not None and (self.scene.springs_on_gpu or self.scene.pack_kind == "flipbook")
+        return (self._surface is not None and self.own_stage is None
+                and (self.scene.springs_on_gpu or self.scene.pack_kind == "flipbook")
                 and self.opacity == 1.0 and self.scene.swarm_vis >= 1.0
                 and not (self.reader_box is not None and self.reader_ready) and not self._viewer_drawing())
 
@@ -11366,6 +11741,8 @@ class Overlay(Gtk.Application):
         the grains in one GL texture, as draw_swarm paints them, and the labels in Cairo over them. False when Cairo
         draws the area instead: a turn, the viewer or the reading surface drawing the grains, or no GL."""
         scene = self.scene
+        if self.own_stage is not None:
+            return self._snapshot_stage(snap, self._monitor_scale())
         if self._surface is not None and self._surface_drawing():
             # The dust surface draws the dust; GTK draws only the text over it.
             self._append_labels(snap, w, h, self._monitor_scale())
@@ -11671,6 +12048,134 @@ class Overlay(Gtk.Application):
         else:
             self._regather("the own_screen setting changed")
 
+    def _use_stage(self, stage):
+        """Live on the own stage (an OwnStage), or leave it (None): the window covers the stage, the captions move into
+        its panel as a left-aligned column, and the presence draws at OWN_SCALE. A stage of the same size keeps its
+        place in the turn."""
+        global CAPTION_LEFT
+        old = self.own_stage
+        if stage is None and old is None or (
+                stage is not None and old is not None and (stage.w, stage.h) == (old.w, old.h)):
+            return
+        self.own_stage, self._hud = stage, {}
+        if (stage is None) != (old is None):
+            CAPTION_LEFT = stage is not None
+            self.scene.refont()
+        scene = self.scene
+        scene.own_hud, scene.push, scene.diagram_room = stage is not None, (0.0, 0.0), None
+        if stage is None:
+            self._win_width = WIDTH
+            self.column.set_size_request(WIDTH, -1)
+            self.area.set_content_width(ORB_W)
+            self.area.set_content_height(scene.lift + ORB_H)
+            self.caption_area.set_visible(True)
+            return
+        scene.diagram_room = stage.room()[2:]
+        self._win_width = round(stage.w)
+        self.column.set_size_request(round(stage.w), -1)
+        self.area.set_content_width(round(stage.w))
+        self.area.set_content_height(round(stage.h))
+        self.caption_area.set_visible(False)  # The captions draw in the stage's panel (see _snapshot_stage).
+
+    def _panel_dust(self):
+        """The panel scene's own GL frame, made on first use; None without GL."""
+        if self._panel_gl is None and self._gl() is not None:
+            try:
+                self._panel_gl = _DustGL(self.viewer.get_display())
+            except Exception as error:
+                print(f"the stage panel's GL frame failed: {error}", file=sys.stderr, flush=True)
+                self._panel_gl = False
+        return self._panel_gl or None
+
+    def _step_stage(self, now):
+        """Before the scene steps: the stage's choreography, and the panel scene's own step."""
+        stage = self.own_stage
+        stage.step(self.scene, now, extra=self.answer_open or self.card.get_visible())
+        ps, gl = stage.panel_scene, self._panel_dust()
+        if ps is None:
+            return
+        if gl is not None and ps.spring_back is None:
+            ps.spring_back = lambda: gl.read_springs(ps)
+        ps.spring_gl = gl is not None and ps.view is None
+        if ps.springs_on_gpu and ps.spring_gl:
+            gl.follow(ps)
+        ps.step(now)
+
+    def _snapshot_stage(self, snap, scale):
+        """The own stage's frame: the panel scene's dust and names, the presence at OWN_SCALE and its label, then the
+        panel's title and captions, each a texture drawn again only when it changes. False when Cairo must draw."""
+        stage, scene, gl = self.own_stage, self.scene, self._gl()
+        if gl is None or not scene.springs_on_gpu or scene.swarm_vis <= 0.002:
+            return False
+        now = scene.last
+        self._shown_at = time.monotonic()
+        ps, pgl = stage.panel_scene, self._panel_dust()
+        if ps is not None and ps.view is None and pgl is not None and (alpha := stage.panel_alpha(now)) > 0.002:
+            x, y, w, h = stage.panel_rect(now)
+            qx, qy = stage.panel_centre()
+            texture = pgl.draw_main(ps, w, h, (qx - x, qy - y), scale, ps.main_scrim(scale, qx - x, qy - y))
+            snap.push_opacity(alpha)
+            snap.append_texture(texture, Graphene.Rect().init(x, y, texture.get_width() / scale,
+                                                               texture.get_height() / scale))
+            for text, nx, ny, a, grow in ps.diagram_names(now):
+                key = (text, scale, grow, id(LETTERING), id(PALETTE))
+                if key not in self._name_textures:
+                    if len(self._name_textures) > 64:
+                        self._name_textures.clear()
+                    sprite = ps._diagram_sprite(self._probe_cr, text, scale, grow)
+                    self._name_textures[key] = (DispatchState._surface_to_texture(sprite),
+                                                sprite.get_width() / scale, sprite.get_height() / scale)
+                texture, tw, th = self._name_textures[key]
+                snap.push_opacity(min(1.0, a))
+                snap.append_texture(texture, Graphene.Rect().init(round((qx + nx - 14) * scale) / scale, round(
+                    (qy + ps.render["dy"] + ny - 14) * scale) / scale, tw, th))
+                snap.pop()
+            snap.pop()
+        (bx, by, bw, bh), centre = stage.box(now, scale)
+        k = OWN_SCALE
+        self._springs_to(gl)
+        texture = gl.draw_main(scene, bw / k, bh / k, centre, scale * k, scene.main_scrim(scale * k, *centre))
+        snap.append_texture(texture, Graphene.Rect().init(bx, by, bw, bh))
+        hud = self._hud
+
+        def layer(name, key, paint, rect):
+            """A texture of rect on the stage, painted again only when its key changes."""
+            if hud.get(name, (None,))[0] != key:
+                x, y, w, h = rect
+                image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(w * scale), math.ceil(h * scale))
+                image.set_device_scale(scale, scale)
+                cr = cairo.Context(image)
+                cr.translate(-x, -y)
+                paint(cr)
+                image.flush()
+                hud[name] = (key, DispatchState._surface_to_texture(image), rect)
+            if hud[name][1] is not None:
+                snap.append_texture(hud[name][1], Graphene.Rect().init(*hud[name][2]))
+        label_key = (scene.label, round(scene.label_alpha, 3), min(REVEAL_SECONDS, round(now - scene.label_at, 3)),
+                     id(PALETTE), id(scene.label_sprites), scale, round(centre[0], 2), round(centre[1], 2))
+        if scene.label and scene.label_alpha > 0.01:
+            def label(cr):
+                cr.translate(bx, by)
+                cr.scale(k, k)  # The label at the presence's size, set at that size so it stays crisp.
+                image = cairo.ImageSurface(cairo.FORMAT_ARGB32, math.ceil(bw * scale), math.ceil(bh * scale))
+                image.set_device_scale(scale * k, scale * k)
+                scene._label(cairo.Context(image), *centre)
+                cr.set_source_surface(image, 0, 0)
+                cr.paint()
+            layer("label", label_key, label, (bx, by, bw, bh))
+        title, captions = stage.hud_key(scene, now)[:2]
+        if title is not None:
+            layer("title", (title, id(PALETTE), id(LETTERING), scale), lambda cr: stage.paint_title(cr, now),
+                  stage.hud_rect())
+        if captions is not None:
+            if hud.get("captions", (None,))[0] != (captions, scale):
+                shown = stage.caption_image(scene, now, scale)
+                shown[0].flush()
+                hud["captions"] = ((captions, scale), DispatchState._surface_to_texture(shown[0]), (
+                    shown[1], shown[2], shown[0].get_width() / scale, shown[0].get_height() / scale))
+            snap.append_texture(hud["captions"][1], Graphene.Rect().init(*hud["captions"][2]))
+        return True
+
     def _pinned(self):
         """The connected monitor the own_screen setting names, from Hyprland's list, or None."""
         return desk.own_screen_monitor(_hypr_socket("j/monitors"), self.own_screen) if self.own_screen else None
@@ -11873,14 +12378,22 @@ class Overlay(Gtk.Application):
                 self._emit({"event": "rendered", "id": req_id, **self.scene.render_said(scene, form)})
             else:
                 self._emit({"event": "rendered", "id": req_id,
-                            **self.scene.render_commit(scene, form, time.monotonic())})
+                            **self._diagram_scene().render_commit(scene, form, time.monotonic())})
                 self._apply_state()
             return
         try:
-            answer = self.scene.render_command(spec, time.monotonic())
+            if self.own_stage is not None:
+                answer = self.own_stage.render(self.scene, spec, time.monotonic())
+            else:
+                answer = self.scene.render_command(spec, time.monotonic())
         except Exception as error:  # A diagram that could not be drawn; Rook goes on.
             answer = {"ok": False, "error": f"The diagram could not be drawn: {error!r}. Simplify it and try again."}
         self._emit({"event": "rendered", "id": req_id, **answer})
+
+    def _diagram_scene(self):
+        """The scene a diagram shows in: the own stage's panel scene, whose grains come out of the presence, or the
+        presence itself."""
+        return self.own_stage.open_panel(self.scene, time.monotonic()) if self.own_stage is not None else self.scene
 
     def _drain_render(self, seq):
         """Run the queued step commands, unless a cancel came first."""
@@ -11897,7 +12410,7 @@ class Overlay(Gtk.Application):
         self._staged = None
         now = time.monotonic()
         try:
-            self.scene.render_commit(scene, form, now)
+            self._diagram_scene().render_commit(scene, form, now)
             self._apply_state()
         except Exception as error:
             self._drop_bad_scene("reveal", error, now)
@@ -12187,14 +12700,23 @@ class Overlay(Gtk.Application):
         bounds = self.bounds or (0, 0, 1920, 1080)
         centre = (self.left or 0) + WIDTH / 2
         anchor = (self.top or 0) + self.scene.lift + ORB_H
-        w, cap = _panel_rect(bounds, centre, anchor)[2], _panel_rect(bounds, centre, anchor)[4]
+        stage = self.own_stage
+
+        def rect(natural=None, moved=None):
+            if stage is None:
+                return _panel_rect(bounds, centre, anchor, moved, natural)
+            # On the own stage it sits in the panel, never over the presence (stage px from the stage's corner).
+            moved = None if moved is None else (moved[0] - self.left, moved[1] - self.top)
+            x, y, w, h, cap = stage.answer_rect(natural, moved)
+            return x + self.left, y + self.top, w, h, cap
+        w, cap = rect()[2], rect()[4]
         key = (self.answer, w)
         if self._answer_size is None or self._answer_size[0] != key:
             page = Page(self.answer)
             page.lay_out(self.answer_view.get_pango_context(), w - 2)
             self._answer_size = (key, page.height)
         content = int(min(self._answer_size[1], cap - TERM_HEAD_H - 2))
-        x, y, w, h, cap = _panel_rect(bounds, centre, anchor, self.panel_pos, TERM_HEAD_H + 2 + content)
+        x, y, w, h, cap = rect(TERM_HEAD_H + 2 + content, self.panel_pos)
         self.answer_scroll.set_min_content_height(-1)  # GTK wants min <= max at every step.
         self.answer_scroll.set_max_content_height(content)
         self.answer_scroll.set_min_content_height(content)
@@ -12624,6 +13146,8 @@ class Overlay(Gtk.Application):
                     raise
                 self._surface_down("following the grains failed", error)
         self.scene.view_still = self.scene.view_video and not self.scene.dust_gl
+        if self.own_stage is not None:
+            self._step_stage(now)
         try:
             self.scene.step(now, self._held())
         except Exception as error:
@@ -12726,6 +13250,8 @@ class Overlay(Gtk.Application):
 
     def _size_canvas(self, now):
         """A scene or active dispatch fan gets the width it needs without ever shifting the presence on screen."""
+        if getattr(self, "own_stage", None) is not None:
+            return  # The window covers the own stage, which has room for all of it (see _use_stage).
         if self.carry is not None or self.flight is not None:
             # Never resize or shift margins mid-drag or mid-flight; apply once the drag/flight completes.
             return
@@ -12865,7 +13391,10 @@ class Overlay(Gtk.Application):
         # While the viewer shows, the swarm is at its box, so the home spot takes no input; the viewer's window does.
         working = scene.state in ("thinking", "speaking") and not scene.home and scene.view is None
         loop = scene.home and (bool(self.answer) or not self.in_game) and scene.view is None
-        if (working or loop) and (area := origin(self.area)):
+        if (working or loop) and self.own_stage is not None and (area := origin(self.area)):
+            (bx, by, bw, bh), _ = self.own_stage.box(scene.last, self._monitor_scale())
+            rects.append((area[0] + bx, area[1] + by, bw, bh))  # The presence's own box, at its size.
+        elif (working or loop) and (area := origin(self.area)):
             x, y, w, _ = area
             cx_a = self._canvas_cx(w)
             if working:
@@ -13705,6 +14234,124 @@ def _note(cr, text, x, y):
     PangoCairo.show_layout(cr, layout)
 
 
+def _check_own_stage():
+    """The own stage (OwnStage), with no window: its size and the presence's scale; the glide to the left when a turn
+    has something to show, the hold through the turn, the push its grains feel on the way, and the glide home; the
+    panel's title; the places of the captions, a diagram, the viewer and the answer panel in the panel; and nothing
+    of it once own_screen is off."""
+    global CAPTION_LEFT
+    kept = CAPTION_LEFT
+    CAPTION_LEFT = True
+    try:
+        st, sc = OwnStage(), Scene(0.0)
+        sc.lift, sc.rest_pad = round(st.horizon()) - ORB // 2, round(st.horizon())
+        t = [0.0]
+
+        def run(seconds, extra=False):
+            end = t[0] + seconds
+            pushed = 0.0
+            while t[0] < end - 1e-9:
+                t[0] += 1 / 60
+                st.step(sc, t[0], extra)
+                pushed = max(pushed, abs(sc.push[0]))
+                if st.panel_scene is not None:  # As Overlay._step_stage steps it.
+                    st.panel_scene.step(t[0])
+                sc.step(t[0])
+            return pushed
+
+        # The stage is the owner's bar at scale 1; the presence draws at twice its size, in the middle, on the horizon.
+        assert (st.w, st.h) == OWN_STAGE == (1540, 720) and OWN_SCALE == 2.0
+        assert st.centre(0.0) == (770.0, 344.0) and st.box(0.0, 1.0) == ((470.0, 44.0, 600.0, 560.0), (150.0, 150.0))
+        px, py, pw, ph = st.panel()
+        assert (px, py, px + pw, py + ph) == (462, 36, 1504, 684), st.panel()
+        sc.handle({"state": "ready"}, 0.0)
+        run(1.0)
+        sc.handle({"state": "listening"}, t[0])
+        run(1.0)
+        sc.handle({"state": "thinking"}, t[0])
+        assert run(1.0) == 0.0 and st.centre(t[0])[0] == 770.0  # Listening and plain thinking stay in the middle.
+        assert st.title is None and sc.label == "THINKING"
+        # A tool runs: the presence glides to the left in OWN_GLIDE s, its grains feel the push on the way, and the
+        # panel shows the tool's label once the presence has cleared it; the presence shows none of its own.
+        sc.handle({"activity": "WebSearch"}, t[0])
+        start = t[0]
+        pushed = run(OWN_GLIDE / 2)
+        assert 308.0 < st.centre(t[0])[0] < 770.0 and pushed > 100 and st.title is None, (st.centre(t[0]), pushed)
+        run(OWN_GLIDE / 2 + 0.6)
+        assert st.centre(t[0])[0] == OWN_LEFT * st.w == 308.0 and sc.push == (0.0, 0.0), st.centre(t[0])
+        assert st.title[:2] == ["SEARCHING THE WEB", ""] and sc.label == "", (st.title, sc.label)
+        reach = max(sc._targets(sc.form, t[0])[0]) * OWN_SCALE + st.centre(t[0])[0]
+        assert reach < px, reach  # The presence's form keeps out of the panel.
+        sc.handle({"activity": "Read"}, t[0])
+        sc.handle({"activity_detail": "constellation.py"}, t[0])
+        run(0.6)
+        assert st.title[:2] == ["READING", "constellation.py"], st.title
+        # Between tools, and in a gap between short captions, it holds at the left for the whole turn.
+        sc.handle({"state": "thinking", "activity": ""}, t[0])
+        assert run(1.0) == 0.0 and st.centre(t[0])[0] == 308.0 and st.title is None
+        sc.handle({"state": "speaking", "caption": "Done.", "seconds": 0.5}, t[0])
+        run(0.5)
+        sc.handle({"caption": ""}, t[0])
+        run(2.0)
+        assert not sc.captions and st.centre(t[0])[0] == 308.0
+        sc.handle({"state": "speaking", "caption": "Here is how Rook runs.", "seconds": 1.5}, t[0])
+        run(0.5)
+        # The captions: a left-aligned column at the panel's left edge, set OWN_CAPTION times their size.
+        image, cx, cy = st.caption_image(sc, t[0], 1.0)
+        assert abs(cx + 24 * OWN_CAPTION - px) <= 0.5 and py < cy < st.horizon() and image.get_width() >= CAPTION_W * OWN_CAPTION
+        assert min(x for s in sc.captions[-1].sentences for _, x, _, _ in s.sprites) < 20  # Left, not centred.
+        # A diagram: a panel scene of its own, laid out for the panel's room, whose grains start at the presence.
+        answer = st.render(sc, {"diagram": {"title": "What Rook runs", "graph": "agent:rook* > threads:terminal, "
+                                            "timers:clock, mailbox:mail, phone, work list:file"}}, t[0])
+        ps = st.panel_scene
+        assert answer["ok"] and ps is not None and ps.render is not None, answer
+        rx, ry, rw, rh = st.room()
+        size = ps.render_form["size"]
+        assert size[0] <= rw and size[1] <= rh and rx >= px and ry + rh <= st.caption_top(True) + 61, (size, st.room())
+        qx, qy = st.panel_centre()
+        mean = sum(ps.x[:GRAINS]) / GRAINS + qx
+        assert abs(mean - st.centre(t[0])[0]) < 40, mean  # Out of the presence, not out of thin air.
+        assert st.caption_image(sc, t[0], 1.0)[2] + CAPTION_TOP * OWN_CAPTION > ry + rh  # The captions go under it.
+        for k in range(1, 7):
+            assert st.render(sc, {"step": k}, t[0] + 0.1 * k)["ok"]
+        run(3.0)
+        assert st.panel_rect(t[0]) == st.room()  # A settled diagram draws in its room alone.
+        # The turn ends while the diagram holds: the presence stays at the left until it clears.
+        sc.handle({"caption": ""}, t[0])
+        sc.handle({"state": "ready"}, t[0])
+        run(3.0)
+        assert st.centre(t[0])[0] == 308.0 and st.panel_scene is ps
+        assert st.render(sc, {"clear": True}, t[0])["ok"]
+        run(RENDER_FADE + 0.2)
+        assert st.panel_end is not None and st.panel_alpha(t[0]) > 0.9  # Its grains go home into the presence.
+        run(OWN_GLIDE + OWN_HOME)
+        assert st.panel_scene is None and st.centre(t[0])[0] == 770.0 and sc.push == (0.0, 0.0)
+        # The viewer: its box fits the panel's room. The answer panel: in the panel, never over the presence.
+        box = _view_layout(st.room(), (1280, 400), 1.0)[0]
+        assert rx <= box[0] and box[0] + box[2] <= rx + rw and ry <= box[1] and box[1] + box[3] <= ry + rh, box
+        x, y, w, h, cap = st.answer_rect(5000)
+        assert (x, y, w, h) == (px + (pw - TERM_W) // 2, py + TERM_MARGIN, TERM_W, ph - 2 * TERM_MARGIN), (x, y, w, h)
+        x, y, w, h, cap = st.answer_rect(200)
+        assert abs(y + h / 2 - st.horizon()) <= 1 and h == 200
+        # A card or the answer panel holds the presence at the left too, even at rest.
+        run(0.2, extra=True)
+        run(OWN_GLIDE, extra=True)
+        assert st.centre(t[0])[0] == 308.0
+        run(OWN_GLIDE + 0.1)
+        assert st.centre(t[0])[0] == 770.0
+        # A smaller monitor shrinks the stage to fit, and the layout follows it.
+        small = OwnStage((924, 432))
+        assert small.panel()[0] == round(0.3 * 924) and small.centre(0.0) == (462.0, 200.0)
+    finally:
+        CAPTION_LEFT = kept
+    # Off the own stage nothing of it runs: no push, no panel scene, no room, centred captions.
+    plain = Scene(0.0)
+    assert plain.push == (0.0, 0.0) and plain.own_home is None and plain.diagram_room is None and not plain.own_hud
+    assert not CAPTION_LEFT
+    print("own stage (1540 x 720, 2x presence, glide left on content and hold, glide home, panel title, captions, "
+          "diagram, viewer and answer in the panel): ok")
+
+
 def _check_placement():
     """Characterisation check of Hyprland placement, focus following, and start-order behaviour.
 
@@ -13883,35 +14530,37 @@ def _check_placement():
                 return got[0] and got[0].get_connector(), got[1:6], got[6], tuple(round(v, 3) for v in got[7])
             m_desk = {"id": 0, "name": "DP-1", "x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1.0,
                       "focused": True, "reserved": [0, 0, 0, 0], "description": "Example Desk 27"}
-            m_own = {"id": 3, "name": "DP-2", "x": 7120, "y": 0, "width": 1540, "height": 720, "scale": 1.6666666,
+            m_own = {"id": 3, "name": "DP-2", "x": 7120, "y": 0, "width": 1540, "height": 720, "scale": 1.0,
                      "focused": False, "reserved": [0, 0, 0, 0], "description": "Graphica Computer 12.3FHD"}
             hypr_state["monitors"], hypr_state["clients"] = [m_desk, m_own], []
             write_state()
             disp_own = _FakeDisplay(["DP-1", "DP-2"])
-            # The bar display: the stage fills it, the presence centred at 462 of 924, and the loop rests where Rook
-            # works (lift + ORB / 2), so it never rises or falls.
-            on_bar = ("DP-2", (92, 0, 44, 432, 44 + ORB // 2), None, (0.0, 0.0, 924.0, 432.0))
+            # The bar display at scale 1: the window covers the 1540 by 720 stage from its corner, and the loop rests
+            # where Rook works, on the stage's horizon (OwnStage.horizon, 344), so it never rises or falls.
+            on_bar = ("DP-2", (0, 0, 344 - ORB // 2, 720, 344), None, (0.0, 0.0, 1540.0, 720.0))
             for pin in ("DP-2", "dp-2", "graphica", "  GRAPHICA computer "):
                 assert staged(_placement(disp_own, pin=pin)) == on_bar, (pin, _placement(disp_own, pin=pin))
-            # A scale a hair over 5/3 makes the screen 923.99998 wide: the presence still rounds to its centre.
+            # At its old scale of 5/3 (a hair over) the bar is 924 by 432 logical px: the stage shrinks to fit it all.
             m_own["scale"] = 1.6666667
             write_state()
-            assert staged(_placement(disp_own, pin="DP-2"))[1][0] == 92, _placement(disp_own, pin="DP-2")
-            m_own["scale"] = 1.6666666
+            got_small = staged(_placement(disp_own, pin="DP-2"))
+            assert (*got_small[1][:3], round(got_small[1][3]), got_small[1][4]) == (0, 0, 200 - ORB // 2, 432, 200) \
+                and got_small[3][2] > 923.99, got_small
+            m_own["scale"] = 1.0
             write_state()
             # No such monitor, or off: the focused monitor as before.
             for pin in ("HDMI-A-9", "off", None, ""):
                 assert _placement(disp_own, pin=pin)[0].get_connector() == "DP-1", pin
                 assert _placement(disp_own, pin=pin)[1:] == got[1:], (pin, _placement(disp_own, pin=pin))
-            # On a bigger monitor the same stage floats in its middle: the same working spot, from the stage's top.
+            # On a bigger monitor the same stage floats in its middle, the window at its corner.
             assert staged(_placement(disp_own, pin="desk 27")) == (
-                "DP-1", (590, 0, 324 + 44, 432, 324 + 44 + ORB // 2), None, (498.0, 324.0, 924.0, 432.0)), _placement(
+                "DP-1", (190, 180, 344 - ORB // 2, 720, 344), None, (190.0, 180.0, 1540.0, 720.0)), _placement(
                 disp_own, pin="desk 27")
             # A monitor smaller than the stage gets a stage as large as it is.
             hypr_state["monitors"] = [{**m_desk, "width": 800, "height": 400}]
             write_state()
             assert staged(_placement(_FakeDisplay(["DP-1"]), pin="DP-1")) == (
-                "DP-1", (30, 0, 40, 400, 40 + ORB // 2), None, (0.0, 0.0, 800.0, 400.0)), _placement(
+                "DP-1", (0, 0, 184 - ORB // 2, 400, 184), None, (0.0, 0.0, 800.0, 400.0)), _placement(
                 _FakeDisplay(["DP-1"]), pin="DP-1")
             # The own screen wins over WoW's game window; with it unplugged, WoW places Rook in the game as before.
             hypr_state["monitors"] = [m_game_mon, {**m_own, "id": 4, "name": "DP-3"}]
@@ -14005,7 +14654,11 @@ def _check_placement():
                     set_visible=lambda v: vis.__setitem__(0, v),
                     set_opacity=lambda v: None,
                 )
-                ov.area = types.SimpleNamespace(set_content_height=lambda h: None)
+                ov.own_stage, ov._hud, ov._panel_gl, ov._win_width = None, {}, None, WIDTH
+                ov.widths, ov.captions_shown = [], [True]
+                ov.column = types.SimpleNamespace(set_size_request=lambda w, _h: ov.widths.append(w))
+                ov.area = types.SimpleNamespace(set_content_height=lambda h: None, set_content_width=lambda w: None)
+                ov.caption_area = types.SimpleNamespace(set_visible=lambda v: ov.captions_shown.__setitem__(0, v))
                 return ov
 
             saved_glib = (GLib.timeout_add, GLib.timeout_add_seconds, GLib.source_remove, GLib.unix_fd_add_full)
@@ -14185,6 +14838,11 @@ def _check_placement():
                     write_state()
                     ov._set_own_screen("graphica")
                     assert ov.own_screen == "graphica" and ov.monitor.get_connector() == "DP-2"
+                    # The window covers the stage, floating in the 2560 x 1440 monitor's middle, and the captions
+                    # move into its panel as a left-aligned column.
+                    assert (ov.own_stage.w, ov.own_stage.h, ov.left, ov.top) == (1540, 720, 510, 360), (
+                        ov.own_stage and (ov.own_stage.w, ov.own_stage.h), ov.left, ov.top)
+                    assert ov.widths[-1] == 1540 and not ov.captions_shown[0] and CAPTION_LEFT and ov.scene.own_hud
                     timers.clear()
                     assert ov._check_focus() is True and ov._focus_move is None and not timers, timers
                     ov.scene.handle({"state": "thinking"}, 1.0)
@@ -14206,6 +14864,9 @@ def _check_placement():
                     # Off: Rook follows the focused monitor again at once.
                     ov._set_own_screen(None)
                     assert ov.own_screen is None and ov.monitor.get_connector() == "DP-1"
+                    # Off: the window, the captions and the presence are as they were before the stage.
+                    assert ov.own_stage is None and ov.widths[-1] == WIDTH and ov.captions_shown[0]
+                    assert not CAPTION_LEFT and not ov.scene.own_hud and ov.scene.diagram_room is None
                     # _monitors_changed coalesces bursts into one 300ms timer calling _monitors_settled -> _replace.
                     timers.clear()
                     ov._monitors_changed()
@@ -14239,6 +14900,7 @@ def _check_placement():
                 else:
                     os.environ[k] = v
     print("placement and focus following (monitors, fractional scale, reserved, follow, start order): ok")
+    _check_own_stage()
 
 
 def _check_render():
@@ -15352,6 +16014,25 @@ def _check_render():
         REST_LOOK = saved
     print(f"resting looks ({', '.join(n for n in REST_LOOKS if n != 'today')}: brightness only, "
           "flecks, glare, fall back, wake): ok")
+    # The own stage's glide in the engine: the grains feel the push, so the presence trails a little as one body,
+    # and catches up once the glide ends; with no glide the springs run exactly as before.
+    sc, st = Scene(0.0), OwnStage()
+    for msg, at in (({"state": "ready"}, 0.0), ({"state": "thinking"}, 1.0)):
+        sc.handle(msg, at)
+    t, lags = 0.0, []
+    while t < 4.0:
+        t += 1 / 60
+        if 2.0 <= t < 2.0 + 1 / 60:
+            sc.handle({"activity": "Grep"}, t)
+        st.step(sc, t)
+        sc.step(t)
+        if t > 2.0:  # How far the grains are from their places, on average across the glide: the trail.
+            tx = sc._targets(sc.form, t)[0]
+            lags.append((t, sum(x - g for x, g in zip(sc.x, tx)) / GRAINS))
+    during = max(abs(v) for at, v in lags if at < 2.0 + OWN_GLIDE)
+    after = max(abs(v) for at, v in lags if at > 2.0 + OWN_GLIDE + 1.0)
+    assert 2.0 < during < 60.0 and after < 0.5, (during, after)
+    _check_own_stage()
     print("render scenes in the engine: ok")
 
 

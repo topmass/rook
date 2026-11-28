@@ -267,10 +267,26 @@ def _need(r, a, b):
     return r[a] + r[b] + 2 * GAP + MIN_THREAD
 
 
-def _place(kind, extra, n, links, r, s):
-    """Node centres for kind at spread s (1 is comfortable; smaller packs it tighter, never under the shortest thread)."""
+def _place(kind, extra, n, links, r, s, wide=False):
+    """Node centres for kind at spread s (1 is comfortable; smaller packs it tighter, never under the shortest thread).
+    A wide star (a room much wider than tall) fans its spokes out to the right and the left of the hub, clockwise from
+    the top right, so no spoke stands above or below it."""
     pos = [(0.0, 0.0)] * n
-    if kind == "star":
+    if kind == "star" and wide:
+        hub = extra
+        spokes = [k for k in range(n) if k != hub]
+        right = (len(spokes) + 1) // 2
+        sides = [(spokes[:right], 0.0, 1), (spokes[right:], math.pi, -1)]
+        angles = {}
+        for side, mid, turn in sides:
+            span = math.radians(min(60.0, 25.0 * (len(side) - 1)))
+            for j, k in enumerate(side):
+                angles[k] = mid + turn * (span * (2 * j / (len(side) - 1) - 1) if len(side) > 1 else 0.0)
+        wx = max(1.0, 1.5 * s)  # The fan's width against its height; each spoke keeps the star's own reach.
+        ry = max((_need(r, hub, k) + 24) / math.hypot(wx * math.cos(angles[k]), math.sin(angles[k])) for k in spokes)
+        for k in spokes:
+            pos[k] = (wx * ry * math.cos(angles[k]), ry * math.sin(angles[k]))
+    elif kind == "star":
         hub = extra
         spokes = [k for k in range(n) if k != hub]
         ry = max(_need(r, hub, k) for k in spokes) + 24
@@ -385,20 +401,33 @@ def _names(kind, pos, r, curves, sizes, hub):
     return boxes
 
 
-def layout(nodes, links, measure=_estimate):
+def layout(nodes, links, measure=_estimate, room=None):
     """Place parsed nodes and links. measure(text) gives a name's ink width and height in px. Returns a plan: kind,
     node centres pos and glyph radii r, thread curves, name and title boxes, and the canvas size; (0, 0) is the
-    centre of the canvas, so the overlay centres it on Rook."""
+    centre of the canvas, so the overlay centres it on Rook. room, the drawing's width and height in px with no title
+    or PAD, is the space a stage gives it: the layout fits that instead of WIDTH_MAX, and a room much wider than tall
+    fans a star out sideways (see _place). Without room nothing changes."""
     n = len(nodes)
     kind, extra = _kind(n, links)
     labels = [nd["label"].upper() for nd in nodes]
     sizes = [measure(t) for t in labels]
+    width_max, height_max = room if room else (WIDTH_MAX, math.inf)
+    wide = bool(room) and room[0] > 1.6 * room[1]
+
+    def ys(pos, names):
+        return (min(min(p[1] - 1.25 * rr for p, rr in zip(pos, r)), min(b[1] for b in names)),
+                max(max(p[1] + 1.25 * rr for p, rr in zip(pos, r)), max(b[1] + b[3] for b in names)))
+
+    def fits(pos, names, x0, x1):
+        y0, y1 = ys(pos, names)
+        return x1 - x0 <= width_max and y1 - y0 <= height_max
+
     for shrink in (1.0, 0.9, 0.8):  # Smaller glyphs only when the spokes cannot pack any tighter.
         base = (44.0 if n <= 6 else 36.0) * shrink
         r = [round(base * 1.3) if nd["lead"] else base for nd in nodes]
         s, last = 1.0, None
         for _ in range(10):  # Pack it tighter until it fits WIDTH_MAX, but never under the shortest thread.
-            pos = _place(kind, extra, n, links, r, s)
+            pos = _place(kind, extra, n, links, r, s, wide)
             curves = _threads(pos, r, links)
             if last and any(math.dist(c[0], c[2]) < MIN_THREAD for c in curves):
                 pos, curves, names, x0, x1 = last
@@ -406,10 +435,10 @@ def layout(nodes, links, measure=_estimate):
             names = _names(kind, pos, r, curves, sizes, extra if kind == "star" else None)
             x0 = min(min(p[0] - 1.25 * rr for p, rr in zip(pos, r)), min(b[0] for b in names))
             x1 = max(max(p[0] + 1.25 * rr for p, rr in zip(pos, r)), max(b[0] + b[2] for b in names))
-            if x1 - x0 <= WIDTH_MAX:
+            if fits(pos, names, x0, x1):
                 break
             last, s = (pos, curves, names, x0, x1), s * 0.93
-        if x1 - x0 <= WIDTH_MAX:
+        if fits(pos, names, x0, x1):
             break
     cx = (x0 + x1) / 2
     pos = [(x - cx, y) for x, y in pos]
@@ -652,12 +681,16 @@ class Constellation:
         return tx, ty, tb, tz
 
 
-def make(line, measure=_estimate, budget=BUDGET, measure_title=None, shapes=None):
-    """parse, layout, finish and build in one: (title, nodes, Constellation or None, repairs)."""
+def make(line, measure=_estimate, budget=BUDGET, measure_title=None, shapes=None, room=None):
+    """parse, layout, finish and build in one: (title, nodes, Constellation or None, repairs). room is the canvas a
+    stage gives the whole drawing, title and PAD included, as (width, height) in px; None keeps WIDTH_MAX."""
     title, nodes, links, repairs = parse(line, shapes)
     if not nodes:
         return title, nodes, None, repairs
-    plan = finish(layout(nodes, links, measure), title, measure_title or measure)
+    if room:
+        title_h = (30 + (measure_title or measure)(title.upper())[1]) if title else 0  # As finish puts it.
+        room = (room[0] - 2 * PAD, room[1] - 2 * PAD - title_h)
+    plan = finish(layout(nodes, links, measure, room), title, measure_title or measure)
     return title, nodes, Constellation(plan, nodes, build(plan, nodes, budget)), repairs
 
 
@@ -750,6 +783,22 @@ def _check():
     check("you > app > api > db; api > cache; api > queue > worker", "layers")
     check("a > b, c, d; b > e; c > e; d > e; e > f", "layers")
     check("hub - a, b, c; a - b", "star")
+    # A stage's wide, short room: every layout fits it whole, threads keep their length, and a star fans out sideways
+    # with no spoke straight above or below its hub. Without a room nothing changes (the checks above).
+    room = (1040, 540)
+    for line in ("agent:rook* > threads:terminal, mailbox:mail, work list:file, phone, timers:clock",
+                 "hub - a, b, c", "hub - a, b, c, d, e, f, g", "you > app > api > db; api > cache; api > queue > worker",
+                 "a > b, c, d; b > e; c > e; d > e; e > f", "browser > dns:globe > server* > data:database > cache:chip",
+                 "one > two > three > four > five > six > seven > eight", "plan > build > test > ship > plan"):
+        for title in ("", "What Rook runs"):
+            _, nodes, con, _ = make(f"{title} | {line}" if title else line, room=room)
+            plan = con.plan
+            assert plan["size"][0] <= room[0] + 2 and plan["size"][1] <= room[1] + 2, (line, title, plan["size"])
+            assert all(math.dist(c[0], c[2]) >= MIN_THREAD - 1e-6 for c in plan["curves"]), line
+            if plan["kind"] == "star":
+                hub = max(range(len(nodes)), key=lambda k: sum(k in (a, b) for a, b, _ in plan["links"]))
+                assert all(abs(x - plan["pos"][hub][0]) > 40 for k, (x, _) in enumerate(plan["pos"]) if k != hub), line
+    assert make("a > b > c")[2].plan == make("a > b > c", room=None)[2].plan
     for size in range(2, 9):  # The budget holds for every size.
         con = check(" > ".join(f"node {k}" for k in range(size)), "chain")
         assert sum(1 for rec in con.recs if rec[0] == G) >= 0.6 * BUDGET

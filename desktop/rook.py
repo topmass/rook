@@ -3671,6 +3671,17 @@ class Companion:
                         else:  # An answer to a thread's question is a send to it; listing or reading them only reads.
                             self.show(None, activity="t3_pending_request" if args.get("action") == "respond"
                                       else "t3_thread_read")
+                if (getattr(self, "own_screen_on", False) and message.get("parent_tool_use_id") is None
+                        and not self.warming and self.latest_turn in self.pending_turns
+                        and self.capture_finished.is_set()):
+                    # The own stage's panel shows what the tool works on: the phone's own detail, a file's name, a
+                    # command's first 80 characters or a thread's title (session.tool_activity).
+                    title_of = self.phone.title_of if self.phone else (lambda _thread: None)
+                    for block in message["message"]["content"]:
+                        found = session.tool_activity(block.get("name") or "", block.get("input"), title_of) \
+                            if block.get("type") == "tool_use" else None
+                        if found and found[1]:
+                            self.show(None, activity_detail=found[1])
                 for block in message["message"]["content"]:
                     if (block.get("type") == "tool_use"
                             and "relay.py dark on" in str((block.get("input") or {}).get("command"))):
@@ -4767,6 +4778,7 @@ class Companion:
         theme_pack = relay.theme_pack_in_force(saved)[0]
         stage = relay.stage_in_force(saved)[0]
         own_screen = relay.own_screen_in_force(saved)[0]
+        self.own_screen_on = own_screen != "off"  # The own stage's panel shows what a running tool works on.
         if self.overlay and self.overlay.returncode is None and (font or dust or theme_pack or self.dark or self.held_waiting):
             waiting = ("TIMER WAITING" if self.held_waiting["kind"] == "timer" else "WAITING") if self.held_waiting else ""
             send(self.overlay, {**({"font": font} if font else {}), **({"light_dust": dust} if dust else {}),
