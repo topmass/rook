@@ -2658,6 +2658,7 @@ class Companion:
         self.exit = asyncio.Event()
         # The main agent, chosen once per start by the agent settings. With none, it is Claude Code as always.
         saved_settings = relay.read_settings()[0]
+        self.startup_settings = saved_settings
         self.perf_logging = saved_settings.get("perf_logging", relay.settings.PERF_LOGGING)
         self.perf_log_path = relay.settings.perf_log_path_in_force(saved_settings)[0]
         self.recogniser_threads = saved_settings.get("recogniser_threads", 2)
@@ -4865,10 +4866,11 @@ class Companion:
                 answers.append(row["text"])
         send(self.overlay, {"answers": answers[-10:]})
 
-    def send_font(self):
+    def send_font(self, saved=None):
         """Tell the overlay which font to show Rook's text in, which dust its light theme draws, how diagrams enter and
         dance, and that Rook is dark when it is. With no fonts.json it keeps its usual font."""
-        saved = relay.read_settings()[0]
+        if saved is None:
+            saved = relay.read_settings()[0]
         font, dust = relay.font_in_force(saved)[0], relay.light_dust_in_force(saved)[0]
         theme_pack = relay.theme_pack_in_force(saved)[0]
         entrance = relay.diagram_entrance_in_force(saved)[0]
@@ -4884,9 +4886,10 @@ class Companion:
                                 **({"dark": True} if self.dark else {}),
                                 **({"waiting": waiting} if waiting else {})})
 
-    def voice_values(self):
+    def voice_values(self, saved=None):
         """The voice settings in force, each as (value, source): the settings file over the flags."""
-        saved, _ = relay.read_settings()
+        if saved is None:
+            saved = relay.read_settings()[0]
         flags = {"voice": self.args.voice or "Miles", "voice_pace": self.args.voice_pace,
                  "voice_volume": self.args.voice_volume, "voice_temperature": self.args.voice_temperature,
                  "voice_engine": relay.VOICE_ENGINES[0], "voice_medium": relay.MEDIUM_VOICES[0]}
@@ -4912,7 +4915,7 @@ class Companion:
         self.loop.create_task(self.read_voice(voice))
         return voice
 
-    async def settings_request(self, command, say):
+    async def settings_request(self, command, say, *, reload_from=None):
         """Answer relay.py's settings requests: get the values in force, or apply the settings file."""
         if command == "get":
             saved = relay.read_settings()[0]
@@ -4986,12 +4989,14 @@ class Companion:
         if command != "apply":
             return {"ok": False, "error": f"Unknown settings request {command!r}."}
         async with self.voice_lock:
-            values = {key: value for key, (value, _) in self.voice_values().items()}
-            med_url = relay.MEDIUM_VOICE_URL or relay.medium_voice_url()
+            saved = relay.read_settings()[0] if reload_from is None else reload_from
+            values = {key: value for key, (value, _) in self.voice_values(saved).items()}
+            med_url = relay.MEDIUM_VOICE_URL or relay.medium_voice_url(saved)
             values["medium_voice_url"] = med_url
             engine, was = values.get("voice_engine"), (self.voice_settings or {}).get("voice_engine")
             was_url = (self.voice_settings or {}).get("medium_voice_url", "")
-            if engine == "medium" and med_url and (was != "medium" or med_url != was_url):
+            voice_unavailable = reload_from is not None and not self.voice and relay.voice_python(DATA.parent) is None
+            if not voice_unavailable and engine == "medium" and med_url and (was != "medium" or med_url != was_url):
                 # Warm the medium voice first, up to its 8 to 11 second cold load. The old voice keeps speaking.
                 # An offline voice server answers no /health. The switch then goes on after 3 s, and the worker falls back.
                 health = await self.loop.run_in_executor(None, relay.medium_voice, "/health", 3)
@@ -5006,7 +5011,8 @@ class Companion:
                 medium = settings.get("voice_engine") == "medium"
                 return (settings.get("voice_engine"), settings.get("voice_medium" if medium else "voice"),
                         settings.get("voice_pace"))
-            if worker(values) != worker(self.voice_settings) or not self.voice or self.voice.returncode is not None:
+            if not voice_unavailable and (
+                    worker(values) != worker(self.voice_settings) or not self.voice or self.voice.returncode is not None):
                 # The new worker loads beside the old one, which keeps speaking, so Rook stays responsive.
                 new = await self.start_voice(values)
                 if new is None:
@@ -5045,13 +5051,12 @@ class Companion:
                 self.log("voice_change", settings=values)
                 if was == "medium" and engine != "medium":
                     self.loop.run_in_executor(None, relay.medium_voice, "/unload")  # Frees nimbus-pc's graphics card.
-            self.send_font()  # A font or dust change shows at once; an unchanged one is sent again harmlessly.
+            self.send_font(saved)  # A font or dust change shows at once; an unchanged one is sent again harmlessly.
             if say and self.voice and self.voice.returncode is None:
                 # An audition line: the owner hears the new voice, and its caption shows the new font.
                 self.voice_id = str(uuid4())
                 self.voice_texts[self.voice_id] = say
                 self.send_speech(self.speech(say))
-            saved = relay.read_settings()[0]
             self.arm_talk_keys(saved)  # A talk key change applies at once: the key reader reads these sets.
             self.speak_thoughts = relay.speak_thoughts_in_force(saved)[0]
             if self.harness is not None:
@@ -5071,7 +5076,7 @@ class Companion:
                                              "speak_thoughts_beats_pending": (self.speak_thoughts in ("beats", "both")) != self.beats_started,
                                              "recording_minutes": relay.recording_minutes_in_force(saved)[0],
                                              "talk_keys": self.talk_key_names},
-                    "said": bool(say and self.voice)}
+                    "said": bool(say and self.voice), **({"voice_unavailable": True} if voice_unavailable else {})}
 
     async def request(self, command, body):
         """Answer a relay.py request on Rook's socket. Only the owner's user can reach it: the socket is 0600."""
@@ -8249,8 +8254,31 @@ class Companion:
         except OSError:
             pass  # A closing helper cannot interrupt speech.
 
+    async def reload_mac_config(self, helper):
+        """Apply valid settings through the normal live settings path and report any pending restart."""
+        try:
+            saved = relay.read_settings(strict=True, validate_current=True)[0]
+            result = await self.settings_request("apply", "", reload_from=saved)
+        except Exception as error:
+            self.log("config_reload_failed", error=str(error))
+            result = {"ok": False, "error": str(error)}
+        if result["ok"]:
+            next_start = (*relay.AGENT_SETTINGS, "owner_name", "owner_pronouns", "assistant_name", "orchestrator",
+                          "plugins", "build_threads", "recogniser_model", "recogniser_threads", "tts_threads",
+                          "smart_turn_threads", "perf_logging", "perf_log_path")
+            pending = [key for key in next_start if saved.get(key) != self.startup_settings.get(key)]
+            if result["settings"]["speak_thoughts_beats_pending"]:
+                pending.append("speak_thoughts (between-tool updates)")
+            message = "Restart to apply: " + ", ".join(pending) + "." if pending else "Live settings are up to date."
+            if result.get("voice_unavailable"):
+                message += " The voice runtime is unavailable."
+        else:
+            message = result["error"]
+        if helper.returncode is None and not helper.stdin.is_closing():
+            send(helper, {"event": "config_reload_result", "ok": result["ok"], "message": message})
+
     async def read_mac_helper(self, helper_proc):
-        """Route the helper's talk keys, approval clicks and diagnostics from its private pipe."""
+        """Route the helper's talk keys, approval clicks, menu actions and diagnostics from its private pipe."""
         router = self.make_mac_talk_router()
         while helper_proc.stdout is not None:
             raw = await helper_proc.stdout.readline()
@@ -8276,6 +8304,14 @@ class Companion:
                 if allowed and self.permission and self.permission["request"]["tool_name"] == "AskUserQuestion":
                     continue
                 self.answer_permission(allowed, card=card)
+            elif kind == "menu_action":
+                if event.get("action") == "quit":
+                    self.exit.set()
+                    return
+                if event.get("action") == "reload_config":
+                    pending = self.tasks.get("mac config reload")
+                    if pending is None or pending.done():
+                        self.tasks["mac config reload"] = self.loop.create_task(self.reload_mac_config(helper_proc))
             elif self.perf_log is not None and kind in (
                     "mac_focus_changed", "mac_speech_focus", "mac_event_tap_disabled"):
                 fields = ("reason", "native_at", "speech_id", "turn", "request_id", "frontmost_bundle", "frontmost_pid",
@@ -8571,7 +8607,8 @@ class Companion:
             if self.phone_task is not None:
                 await self.phone_task
             if self.phone.server is not None:
-                helper_env = {**os.environ, "ROOK_PRESENCE_TOKEN": self.phone.local_presence_token}
+                helper_env = {**os.environ, "ROOK_PRESENCE_TOKEN": self.phone.local_presence_token,
+                              "ROOK_MENU_CONFIG_DIR": str(relay.settings.CONFIG.parent.absolute())}
                 helper_args = [str(mac_helper_path), "--url", f"http://127.0.0.1:{self.phone.server.port}/presence"]
                 if getattr(self.args, "keys", False):
                     helper_args.append("--enable-keys")

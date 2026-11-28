@@ -14,8 +14,9 @@ macos_dir="$out/Contents/MacOS"
 bundle_id="com.rook.helper"
 entitlements="$here/Rook.entitlements"
 
-mkdir -p "$macos_dir"
+mkdir -p "$macos_dir" "$out/Contents/Resources"
 cp "$here/Info.plist" "$out/Contents/Info.plist"
+cp "$here/RookIcon.icns" "$out/Contents/Resources/"
 
 clang -O2 -fobjc-arc -Wall -Wextra \
   -framework Cocoa -framework WebKit -framework CoreGraphics \

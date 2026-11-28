@@ -8,6 +8,10 @@ Opening the installed `Rook.app` in Finder loads and starts its login agent if n
 
 `RookHelper --check-access` prints each grant without a prompt. `RookHelper --request-access microphone|input|screen|accessibility` shows Apple's prompt. Run them through `relay.py mac-access`, so the answer is Rook.app's.
 
+## Rook in the menu bar
+
+The Rook infinity icon in the menu bar opens **Restart**, **Open Config**, **Reload Config**, and **Quit**. **Open Config** opens this instance’s config directory in Finder. After editing `settings.json`, use **Reload Config** to apply live settings and see which changes require a restart. **Restart** restarts this instance’s launchd job. **Quit** stops Rook. Open Rook from Finder to start it again.
+
 ## Herdr with the Claude sandbox
 
 Rook's Claude session allows its own local relay socket. To connect Rook to an existing Herdr instance, export `HERDR_SOCKET_PATH` with the absolute path of the running socket before generating the LaunchAgent with `launchd/install.sh`. Set `HERDR_CONFIG_PATH` to your Herdr config file to use its saved machines. Export `ROOK_ALLOW_HERDR_SOCKET=1` to let Rook's Claude session use the configured Herdr socket. This grants access to Herdr's control API, including writes. Reload the launch job after updating its plist.

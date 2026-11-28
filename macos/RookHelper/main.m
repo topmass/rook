@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 
 extern char **environ;
+static int kickLaunchd(void);
 
 // A press of Right Option becomes a talk only after it stays alone this long, or on a clean release.
 static const double kTalkKeySettle = 0.15;
@@ -264,7 +265,7 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation>
 @property (nonatomic, copy) NSString *urlString;
 @property (nonatomic, assign) CGFloat width;
 @property (nonatomic, assign) CGFloat height;
@@ -282,6 +283,9 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 @property (nonatomic, copy) NSString *allowedScheme;
 @property (nonatomic, copy) NSString *allowedHost;
 @property (nonatomic, strong) NSNumber *allowedPort;
+@property (nonatomic, copy) NSString *configDirectory;
+@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, assign) BOOL menuBusy;
 @end
 
 static BOOL isLoopbackURL(NSURL *url) {
@@ -293,6 +297,92 @@ static BOOL isLoopbackURL(NSURL *url) {
 }
 
 @implementation AppDelegate
+
+- (void)installStatusMenu {
+    NSString *name = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"Rook";
+    self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    NSStatusBarButton *button = self.statusItem.button;
+    NSImage *icon = [NSImage imageWithSystemSymbolName:@"infinity" accessibilityDescription:name];
+    NSImageSymbolConfiguration *style = [NSImageSymbolConfiguration configurationWithPointSize:15
+                                                                                       weight:NSFontWeightSemibold];
+    icon = [icon imageWithSymbolConfiguration:style];
+    icon.template = YES;
+    button.image = icon;
+    if (button.image == nil) button.title = @"∞";
+    button.toolTip = name;
+    [button setAccessibilityLabel:name];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:name];
+    [menu addItemWithTitle:@"Restart" action:@selector(restartRook:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Open Config" action:@selector(openConfig:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Reload Config" action:@selector(reloadConfig:) keyEquivalent:@""].target = self;
+    [menu addItem:NSMenuItem.separatorItem];
+    [menu addItemWithTitle:@"Quit" action:@selector(quitRook:) keyEquivalent:@""].target = self;
+    self.statusItem.menu = menu;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(openConfig:)) return YES;
+    if (item.action == @selector(restartRook:)) {
+        return !self.menuBusy && [NSProcessInfo.processInfo.environment[@"ROOK_LAUNCHD_LABEL"] length] > 0;
+    }
+    return !self.menuBusy;
+}
+
+- (void)showMenuMessage:(NSString *)title details:(NSString *)details error:(BOOL)error {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = details ?: @"";
+    alert.alertStyle = error ? NSAlertStyleWarning : NSAlertStyleInformational;
+    [NSApp activateIgnoringOtherApps:YES];
+    [alert runModal];
+}
+
+- (void)openConfig:(id)sender {
+    (void)sender;
+    NSURL *url = [NSURL fileURLWithPath:self.configDirectory isDirectory:YES];
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:url withIntermediateDirectories:YES
+                                                 attributes:@{NSFilePosixPermissions: @0700} error:&error]
+            || ![NSWorkspace.sharedWorkspace openURL:url]) {
+        [self showMenuMessage:@"Could not open Rook’s config folder"
+                      details:error.localizedDescription ?: self.configDirectory error:YES];
+    }
+}
+
+- (void)reloadConfig:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    emitJSON(@{@"type": @"menu_action", @"action": @"reload_config"});
+}
+
+- (void)showConfigReloadResult:(NSDictionary *)result {
+    self.menuBusy = NO;
+    BOOL ok = [result[@"ok"] isEqual:@YES];
+    NSString *message = [result[@"message"] isKindOfClass:NSString.class] ? result[@"message"] : @"";
+    [self showMenuMessage:(ok ? @"Rook configuration reloaded" : @"Could not reload Rook’s configuration")
+                  details:message error:!ok];
+}
+
+- (void)restartRook:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int status = kickLaunchd();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.menuBusy = NO;
+            if (status != 0) {
+                [self showMenuMessage:@"Could not restart Rook"
+                              details:[NSString stringWithFormat:@"launchctl exited with status %d.", status] error:YES];
+            }
+        });
+    });
+}
+
+- (void)quitRook:(id)sender {
+    (void)sender;
+    self.menuBusy = YES;
+    emitJSON(@{@"type": @"menu_action", @"action": @"quit"});
+}
 
 - (void)emitFocus:(NSString *)reason type:(NSString *)type {
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -353,6 +443,7 @@ static BOOL isLoopbackURL(NSURL *url) {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    if (self.configDirectory.length > 0) [self installStatusMenu];
 
     NSRect screenFrame = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame : NSMakeRect(0, 0, 1280, 800);
     NSRect fullFrame = NSScreen.mainScreen ? NSScreen.mainScreen.frame : screenFrame;
@@ -559,6 +650,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
             @"approvalAttached": @(self.approvalPanel && self.approvalPanel.parentWindow == self.panel),
             @"approvalAllowsKeyFocus": @(self.approvalPanel.canBecomeKeyWindow),
             @"approvalButtons": @(self.approvalPanel.contentView.subviews.count),
+            @"menuItems": [self.statusItem.menu.itemArray valueForKey:@"title"] ?: @[],
             @"host": hostInfo ?: @{},
         });
         [NSApp terminate:nil];
@@ -597,6 +689,10 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
             }
             if ([kind isEqualToString:@"focus_snapshot"]) {
                 dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf speechFocusBoundary:dict]; });
+                continue;
+            }
+            if ([kind isEqualToString:@"config_reload_result"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf showConfigReloadResult:dict]; });
                 continue;
             }
             NSData *kindData = [NSJSONSerialization dataWithJSONObject:@[kind] options:0 error:nil];
@@ -772,6 +868,7 @@ int main(int argc, const char *argv[]) {
         delegate.focusDiagnostics = focusDiagnostics;
         delegate.smokeSeconds = smokeSeconds;
         delegate.token = NSProcessInfo.processInfo.environment[@"ROOK_PRESENCE_TOKEN"];
+        delegate.configDirectory = NSProcessInfo.processInfo.environment[@"ROOK_MENU_CONFIG_DIR"];
         NSApp.delegate = delegate;
         [NSApp run];
     }
