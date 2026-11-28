@@ -63,7 +63,7 @@ relay.py threads [--json]   List Rook's thread roster: every open, unsettled or 
                             at once. It needs a running Rook.
 relay.py herdr agents       List every Herdr agent here and on the saved Herdr machines: name, kind, state
                             (working, blocked, done, idle or unknown), folder and machine.
-relay.py herdr read AGENT [--machine NAME] [--lines N]
+relay.py herdr read AGENT [--machine NAME] [--lines N] [--source visible|recent-unwrapped]
                             Print a Herdr agent's state and the last N lines of its screen, 40 by default.
 relay.py herdr send AGENT [--machine NAME] TEXT|-
                             Prompt a Herdr agent once, only when it is idle or done, and watch it. A send whose
@@ -1912,11 +1912,13 @@ def herdr_command(argv):
         return
     if verb == "read" and args:
         lines = take_count(args, "--lines", 40)
-        if len(args) != 1:
-            leave("Usage: relay.py herdr read AGENT [--machine NAME] [--lines N]")
+        source = take_option(args, "--source")
+        if len(args) != 1 or source not in (None, "recent-unwrapped", "visible"):
+            leave("Usage: relay.py herdr read AGENT [--machine NAME] [--lines N] [--source visible|recent-unwrapped]")
         try:
             info = herdr.call(machine, "agent", "get", args[0])["agent"]
-            screen = herdr.read_screen(machine, args[0], lines)
+            screen = herdr.read_screen(machine, args[0], lines, source=source,
+                                       blocked=info.get("agent_status") == "blocked")
         except herdr.Failed as error:
             leave(f"Rook could not read {args[0]}: {error}")
         print(f"{herdr.target(info)} ({info.get('agent') or '?'}) is {info.get('agent_status') or 'unknown'} in "
@@ -1942,7 +1944,7 @@ def herdr_command(argv):
             except herdr.Failed as error:
                 if error.code == "agent_not_ready":
                     try:
-                        held = herdr.dialog(herdr.read_screen(machine, error.name, 15))
+                        held = herdr.dialog(herdr.read_screen(machine, error.name, 32, blocked=True))
                     except herdr.Failed:
                         held = None
                     leave(f"Herdr started {error.name}, but it " + ("asks whether its folder is trusted" if held ==
@@ -3305,7 +3307,11 @@ if verb in (["agent", "get"], ["agent", "prompt"]) and args[2] not in agents:
 if verb == ["agent", "get"]:
     out({"agent": agents[args[2]], "type": "agent_info"})
 if verb == ["agent", "read"]:  # Like Herdr, only the last --lines lines.
-    screen = state.get("screens", {}).get(args[2], state.get("screen", "")).split("\\n")
+    source = args[args.index("--source") + 1]
+    if source == "recent-unwrapped" and args[2] in state.get("blocked_reads", []):
+        err("agent_not_idle", "the pane is blocked")
+    default = state.get("screens", {}).get(args[2], state.get("screen", ""))
+    screen = (state.get("visible_screens", {}).get(args[2], default) if source == "visible" else default).split("\\n")
     print("\\n".join(screen[-int(args[args.index("--lines") + 1]):]))
     sys.exit(0)
 if verb == ["agent", "prompt"]:
@@ -3324,6 +3330,10 @@ if verb == ["workspace", "create"]:
 if verb == ["pane", "split"]:
     out({"pane": {"pane_id": "w1:p9", "cwd": args[args.index("--cwd") + 1]}})
 if verb == ["agent", "start"]:
+    if state.get("start_busy", 0):
+        state["start_busy"] -= 1
+        (base / "state.json").write_text(json.dumps(state))
+        err("agent_pane_busy", "agent target pane is not an available shell")
     agents[args[2]] = {"name": args[2], "agent": args[args.index("--kind") + 1], "agent_status": "idle",
                        "state_change_seq": 1, "pane_id": args[args.index("--pane") + 1], "cwd": "/tmp/proj"}
     out({"agent": agents[args[2]], "type": "agent_started"})
@@ -3415,13 +3425,14 @@ def check_herdr():
         fake(prompt="ok", screen="line one\n\n\n\nline two   \n\n")
         code, out = run("herdr", "read", "fake3", "--lines", "5")
         assert code == 0 and out == "fake3 (pi) is done in /tmp/proj.\nline one\n\nline two\n", repr(out)
-        # A start opens a new workspace for a new folder, never takes focus, and sends through the guard.
+        # A new pane can report busy before its shell reaches the prompt. Reuse the pane and send only once.
+        fake(start_busy=1)
         code, out = run("herdr", "start", "/tmp/new-proj", "--kind", "pi", "--model", "m-1", "Begin.")
         assert code == 0 and "Started pi-new-proj (pi)" in out and "Sent to pi-new-proj." in out, out
         assert "Rook is not running, so its result waits in Herdr." in out, out  # No Rook runs in this check.
         made = [json.loads(line) for line in calls.read_text().splitlines()]
-        assert ["agent", "start", "pi-new-proj", "--kind", "pi", "--pane", "w9:p1", "--", "--model", "m-1"] in made, made
-        assert ["workspace", "create", "--cwd", "/tmp/new-proj", "--label", "new-proj", "--no-focus"] in made, made
+        assert made.count(["agent", "start", "pi-new-proj", "--kind", "pi", "--pane", "w9:p1", "--", "--model", "m-1"]) == 2, made
+        assert made.count(["workspace", "create", "--cwd", "/tmp/new-proj", "--label", "new-proj", "--no-focus"]) == 1, made
         assert not any("focus" in word and word != "--no-focus" for line in made for word in line), made
         assert prompts("pi-new-proj") == 1
         assert not any(line[:2] == ["pane", "split"] for line in made), made  # Never a pane the owner looks at.
@@ -3455,10 +3466,18 @@ def check_herdr():
             assert key not in watcher.entries
             watcher.add("herdr:fake2", here, "fake2")
             assert poll(fake2=agent("fake2", "working", 7)) is None and watcher.entries[(here, "herdr:fake2")]["since"] == 7
+            fake(screens={"fake2": ""}, visible_screens={"fake2": ""})
             text, delivered, _ = poll(fake2=agent("fake2", "blocked", 8))
-            assert text.startswith(settings.render(watch.ANSWER)) and " it in Herdr" in text and "Never send it keys" in text, text
+            assert text.startswith(settings.render(watch.ANSWER)) and "nothing readable yet" in text, text
             delivered()
             assert poll(fake2=agent("fake2", "blocked", 8)) is None and (here, "herdr:fake2") in watcher.entries
+            modal = "Would you like to run the following command?\n  git status\n\n› 1. Yes\n  2. No"
+            fake(visible_screens={"fake2": modal + "\n" * 50})
+            text, delivered, source = poll(fake2=agent("fake2", "blocked", 8))
+            assert "git status" in text and "Never send it keys" in text and source["report"] == modal, text
+            delivered()
+            assert poll(fake2=agent("fake2", "blocked", 8)) is None
+            fake(screens={}, visible_screens={})
             text, delivered, _ = poll(fake2=agent("fake2", "done", 10))
             assert "finished its turn" in text
             delivered()
@@ -3530,6 +3549,15 @@ def check_herdr():
         code, out = run("herdr", "read", "cx", "--lines", "3")
         assert code == 0 and out.endswith("• The current branch is main.\n  Worked for 4s • 3:36 PM\n"), repr(out)
         assert "Yes, I trust this folder" in herdr.screen_tail(trust, 15)  # A dialog is kept whole.
+        fake(machines={"local": {"cl": agent("cl", "blocked", 4, "claude")}},
+             visible_screens={"cl": "Old history\n" + modal + pad}, blocked_reads=["cl"])
+        code, out = run("herdr", "read", "cl", "--lines", "3", "--source", "recent-unwrapped")
+        assert code == 0 and "git status" in out and "Old history" not in out, out
+        fake(visible_screens={"cl": ""}, screens={"cl": modal})
+        assert "git status" in run("herdr", "read", "cl", "--lines", "3")[1]
+        assert json.loads(calls.read_text().splitlines()[-1])[4] == "detection"
+        fake(machines={"local": {"cl": agent("cl", "idle", 3, "claude"), "cx": agent("cx", "done", 3, "codex")}},
+             screens={"cl": claude_idle, "cx": codex_idle}, visible_screens={}, blocked_reads=[])
         # Bugs 2 and 7: an idle agent at a dialog is blocked. A send types nothing into it and records no intent.
         rows = len(herdr.records(sends))
         for screen, words in ((trust, "asks whether its folder is trusted"), (auto_modal, "waits at a dialog")):
