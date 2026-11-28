@@ -106,12 +106,16 @@ SPEAK_THOUGHTS_MODES = ("off", "beats", "thoughts", "both")
 SPEAK_THOUGHTS = "off"
 # 0.75 avoids coin-flip mid-clause cutoffs while keeping finished turns fast.
 SMART_TURN_THRESHOLD = 0.75
+SMART_TURN_THREADS = 2  # ONNX threads within a single Smart Turn inference.
 # Longest single recording in minutes before Rook stops and sends it. Applies to the next recording.
 RECORDING_MINUTES_RANGE = (1, 30)
 RECORDING_MINUTES = 10
 # Rook's two voices: small is Phonon on this computer, and medium is a remote Qwen3-TTS GPU server.
 # No default server address is shipped in code: configure medium_voice_url in settings.json or ROOK_MEDIUM_VOICE_URL.
 VOICE_ENGINES = ("small", "medium")
+TTS_THREADS = 2  # Local speech synthesis, including the medium voice's fallback.
+RECOGNISER_THREADS = 4  # AirType's normal CPU thread count.
+PERF_LOGGING = "off"
 MEDIUM_VOICE_URL = os.environ.get("ROOK_MEDIUM_VOICE_URL", "").strip().rstrip("/")
 # The two speech-to-text models a public install offers, by AirType model name. Unset keeps AirType's own choice.
 RECOGNISER_MODELS = {"en": "parakeet-unified-en-0.6b-int8", "multi": "parakeet-tdt-0.6b-v3-int8"}
@@ -123,7 +127,7 @@ SETTINGS = ("voice", "voice_engine", "voice_medium", "font", "light_dust", "them
             "thread_milestones", "debug_replay", "update_check", "speak_thoughts",
             "recording_minutes", *RANGES, *AGENT_SETTINGS,
             "owner_name", "owner_pronouns", "talk_keys", "orchestrator", "projects_folder", "screenshots", "assistant_name",
-            "recogniser_model")
+            "recogniser_model", "recogniser_threads", "tts_threads", "smart_turn_threads", "perf_logging", "perf_log_path")
 CONFIG_SETTINGS = ("medium_voice_url", "github_user", "build_threads", "plugins")
 # The text fields a build thread entry may hold when it is an object: its id, and what started it.
 BUILD_THREAD_FIELDS = ("thread", "machine", "provider", "model", "effort", "subagents")
@@ -181,6 +185,13 @@ def valid(data):
         elif (key == "recording_minutes" and isinstance(value, int) and not isinstance(value, bool)
               and RECORDING_MINUTES_RANGE[0] <= value <= RECORDING_MINUTES_RANGE[1]):
             found[key] = value
+        elif key in ("recogniser_threads", "tts_threads", "smart_turn_threads") and type(value) is int and 1 <= value <= 16:
+            found[key] = value
+        elif key == "perf_logging" and value in ("on", "off"):
+            found[key] = value
+        elif key == "perf_log_path":
+            if (path := perf_path_in_state(value)) is not None:
+                found[key] = str(path)
         elif (key in RANGES and isinstance(value, (int, float)) and not isinstance(value, bool)
               and RANGES[key][0] <= value <= RANGES[key][1]):
             found[key] = float(value)
@@ -567,6 +578,26 @@ def medium_voice(path, timeout=3):
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def perf_state_dir():
+    return Path(os.path.abspath(desk.state_dir() / "rook"))
+
+
+def perf_path_in_state(value):
+    if not isinstance(value, str) or not value or value.endswith("/") or any(c in value for c in "\x00\r\n"):
+        return None
+    root = perf_state_dir()
+    path = root / Path(os.path.expanduser(value))
+    if path != root and path.is_relative_to(root) and ".." not in path.parts:
+        return path
+    return None
+
+
+def perf_log_path_in_force(saved):
+    if (path := perf_path_in_state(saved.get("perf_log_path"))) is not None:
+        return path, "settings file"
+    return perf_state_dir() / "perf.jsonl", "default"
 
 
 def listen_after_in_force(saved):

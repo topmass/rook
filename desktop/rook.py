@@ -2364,6 +2364,13 @@ def _build_threads_prompt_section():
 
 
 class Companion:
+    perf_log = None
+    perf_log_path = None
+    perf_logging = relay.settings.PERF_LOGGING
+    recogniser_threads = relay.settings.RECOGNISER_THREADS
+    tts_threads = relay.settings.TTS_THREADS
+    smart_turn_threads = relay.settings.SMART_TURN_THREADS
+    mac_focus_item = None
     diagram_names = ()  # The labels of the diagram shown in this turn, for lighting each node as the voice names it.
     diagram_seen = frozenset()  # The nodes the voice has named so far.
     mailbox_down = False  # Whether the last mailbox call failed, so an outage logs one line.
@@ -2677,6 +2684,26 @@ class Companion:
         self.exit = asyncio.Event()
         # The main agent, chosen once per start by the agent settings. With none, it is Claude Code as always.
         saved_settings = relay.read_settings()[0]
+        self.perf_logging = saved_settings.get("perf_logging", relay.settings.PERF_LOGGING)
+        self.perf_log_path = relay.settings.perf_log_path_in_force(saved_settings)[0]
+        self.recogniser_threads = saved_settings.get("recogniser_threads", relay.settings.RECOGNISER_THREADS)
+        self.tts_threads = saved_settings.get("tts_threads", relay.settings.TTS_THREADS)
+        self.smart_turn_threads = saved_settings.get("smart_turn_threads", relay.settings.SMART_TURN_THREADS)
+        if "recogniser_threads" in saved_settings:
+            os.environ["AIRTYPE_SHERPA_THREADS"] = str(self.recogniser_threads)
+        else:
+            try:
+                self.recogniser_threads = int(os.environ.get("AIRTYPE_SHERPA_THREADS", self.recogniser_threads))
+            except ValueError:
+                pass  # AirType reports an invalid environment override when its model loads.
+        if self.perf_logging == "on":
+            import perf
+            try:
+                self.perf_log = perf.PerfLog(self.perf_log_path, self.session, self.perf_workers,
+                                            lambda error: self.log("perf_write_failed", error=error), self.perf_event,
+                                            state_dir=relay.settings.perf_state_dir())
+            except (OSError, AttributeError) as error:
+                self.log("perf_init_failed", error=str(error))
         self.agent_choice = {key: value for key, value in saved_settings.items() if key in relay.AGENT_SETTINGS}
         self.harness, problem = harness.pick(self.agent_choice)
         self.speak_thoughts = relay.speak_thoughts_in_force(saved_settings)[0]
@@ -2707,6 +2734,10 @@ class Companion:
     def level_changed(self, value):
         self.level, self.level_at = value, time.monotonic()
         self.level_peak = max(getattr(self, "level_peak", None) or 0.0, value)  # The loudest block of this recording.
+
+    def perf_workers(self):
+        return {"recogniser": os.getpid(), "tts": getattr(self.voice, "pid", None),
+                "agent": getattr(self.agent, "pid", None), "wow": getattr(self.game, "window_pid", None)}
 
     async def watch_stuck(self):
         """The stuck-state watchdog: see RECORDING_STALL_SECONDS and TURN_QUIET_SECONDS. It logs loudly and recovers
@@ -2819,9 +2850,29 @@ class Companion:
                     self.speech_gap_handle = self.loop.call_later(0.15, self.keep_speaking_level)
             send(self.overlay, payload)
 
+    def perf_event(self, trace, event, status=None, audio_status=None):
+        failed = status in ("agent_error", "agent_closed", "dispatch_failed", "recognition_failed", "capture_failed",
+                            "not_dispatched", "queue_timeout", "timed_out", "capacity") or audio_status in ("error", "worker_closed")
+        fields = {"request_id": trace.request_id, "turn": trace.turn}
+        if status:
+            fields.update(status=status, audio_status=audio_status, level="error" if failed else "info")
+        self.log(event, **fields)
+        if failed:
+            print(f"rook: request_id={trace.request_id} event={event} status={status} audio={audio_status}",
+                  file=sys.stderr)
+
     def log(self, event, **fields):
+        if self.perf_log is not None and "request_id" not in fields:
+            if turns := fields.get("turns"):
+                ids = [self.perf_log.turns[turn].request_id for turn in turns if turn in self.perf_log.turns]
+                if ids:
+                    fields["request_id" if len(ids) == 1 else "request_ids"] = ids[0] if len(ids) == 1 else ids
+            elif trace := self.perf_log.turns.get(fields.get("turn")):
+                fields["request_id"] = trace.request_id
+        level = ("error" if fields.get("error") or event.endswith("_error") else
+                 "warning" if event.endswith(("_failed", "_stalled", "_dropped", "_late", "_disabled")) else "info")
         row = {"at": datetime.now(timezone.utc).isoformat(), "session": self.session,
-               "event": event, **fields}
+               "level": level, "event": event, **fields}
         try:
             STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
             flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
@@ -3292,6 +3343,11 @@ class Companion:
         The owner's phone, whose command already chose the turn: its answer is not spoken here, and it is not presence
         at the desk. A device's request returns False, unsent, when a turn started while it waited here: it never
         joins another turn."""
+        trace = None
+        if self.perf_log is not None:
+            trace = (timing or {}).get("perf") or self.perf_log.begin(source or "internal", "request")
+            if ("queue", None) not in trace.active:
+                trace.begin("queue")
         report, mail, release, carried, checkin_ids, lines, prefs_update = None, None, False, [], [], "", ""
         given = text  # As it came, for the watchdog to give again: the held report and fresh lines are added anew.
         spend = []  # What the mailbox lines use up, such as a check-in: it runs only once the turn really goes.
@@ -3299,12 +3355,17 @@ class Companion:
         if source == "spoken" and not client and turn is None:  # A device's stop is heard in its own command.
             heeded = await self.heed_stop(text)
             if heeded is True:
+                if trace:
+                    trace.finish("stopped")
                 return "stopped"
             if heeded:
                 note = f"{heeded}\n{note}" if note else heeded
         if (self.replay_armed and source in ("spoken", "typed") and not client and turn is None
                 and not self.pending_turns):  # The armed debug replay: the words are ignored and never sent.
             self.replay_armed, self.replay_task = False, self.loop.create_task(self.debug_replay(self.replay_tape))
+            if trace:
+                trace.end("queue")
+                trace.finish("replayed")
             return "replayed"
         asked = time.monotonic()
         # A device's request takes none of what waits for the desk: the held report, the check-in, the focus line.
@@ -3333,7 +3394,9 @@ class Companion:
             self.prefs_stamp, prefs_update = await asyncio.to_thread(read_preferences, updated=True)
         if self.cut_at > asked and source in ("spoken", "typed") and not client:  # A stop came while it waited.
             self.prefs_stamp = prefs_before if prefs_update else self.prefs_stamp
-            self.log("stop_dropped", source=source)
+            self.log("stop_dropped", source=source, **({"request_id": trace.request_id} if trace else {}))
+            if trace:
+                trace.finish("stopped")
             return "stopped"
         for act in spend:
             act()
@@ -3348,13 +3411,20 @@ class Companion:
         if client and self.pending_turns:  # A spoken turn or an event started in an await above.
             if prefs_update:  # The next turn carries the preferences update instead.
                 self.prefs_stamp = prefs_before
+            if trace and not (timing or {}).get("perf"):
+                trace.finish("deferred")
             return False  # Nothing registered: its row stays queued, and its sender waits for idle again.
         steer = bool(self.pending_turns)  # A turn is running: this one folds into it.
         prior_tools = len(self.turn_tools) if steer else 0
         self.finish_deferred(heard=False)
         turn = turn or str(uuid4())
         inbox_ids = self.inbox.ids_for(inbox_entries) if inbox_entries else ()
+        if trace:
+            self.perf_log.bind(trace, turn)
+            trace.begin("journal")
         journal_ms = self.accept_request(turn, source, text, inbox_ids=inbox_ids, client=client)  # Durable first.
+        if trace:
+            trace.end("journal")
         if client:
             self.phone_turns.add(turn)
         if inbox_entries:
@@ -3449,8 +3519,18 @@ class Companion:
             now += "\n" + prefs_update
         # Every part passes as it is: whoever made it filled the owner tokens in Rook's own words, and the data inside,
         # such as a thread's message, a mailbox line, the preferences file, a window title or game data, is never rendered.
-        self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
-                          steer)
+        if trace:
+            self.perf_log.dispatch(trace, self.latest_turn)
+            trace.begin("dispatch")
+        try:
+            self.harness.turn(self.agent, self.session, self.latest_turn, f"{label}\n{now}\n{text}", shots,
+                              steer)
+        except Exception:
+            if trace:
+                trace.finish("dispatch_failed")
+            raise
+        if trace:
+            trace.end("dispatch")
         silent = (self.latest_turn, given, label, shots, source, once, client, report, time.monotonic())
         if not steer:
             self.silent_turns = [silent]
@@ -3489,6 +3569,8 @@ class Companion:
             self.silent_turns = ()  # The agent is working: the first-output watchdog stands down.
             self.agent_heard_at = time.monotonic()
             self.note_first_output(message)
+            if self.perf_log is not None:
+                self.perf_log.agent_message(self.latest_turn, message)
             kind = message.get("type")
             if kind == "system" and message.get("subtype") == "init":
                 self.t3_status = next((server.get("status") for server in message.get("mcp_servers") or ()
@@ -3555,12 +3637,17 @@ class Companion:
                         waiter.set_result({"ok": not message.get("is_error"), "answer": answer,
                                            "spoken": spoken_lead(answer) if answer else ""})
                 self.journal_write("clear_wait", None, None, None, list(completed))
+                perf_status = "agent_error" if message.get("is_error") else "completed"
                 if self.latest_turn not in completed or self.latest_turn is None:
+                    if self.perf_log is not None:
+                        self.perf_log.finish_turns(completed, perf_status)
                     self.settle_stamp(completed, False)
                     self.settle_request(completed, answer, message.get("is_error"), False)
                     continue
                 self.close_cards("turn ended")
                 if not self.capture_finished.is_set():
+                    if self.perf_log is not None:
+                        self.perf_log.finish_turns(completed, perf_status)
                     self.settle_stamp(completed, False)  # The owner talks: the answer is not spoken.
                     self.settle_request(completed, answer, message.get("is_error"), False)
                     self.finish_turn_timing(completed)
@@ -3591,6 +3678,8 @@ class Companion:
                 self.settle_request(completed, answer, message.get("is_error"),
                                     speaking and self.voice is not None and self.voice.returncode is None)
                 self.finish_turn_timing(completed)
+                if self.perf_log is not None:
+                    self.perf_log.finish_turns(completed, perf_status)
                 rec, self.replay_rec = self.replay_rec, None
                 if rec and speaking and not failed and any(kind == "say" for _, kind, _ in rec["events"]):
                     self.replay_tape = {**rec, "reply": dict(self.last_reply)}
@@ -3778,7 +3867,8 @@ class Companion:
         try:
             await self.read_stream()
         except Exception as exc:
-            self.log("agent_read_failed", error=repr(exc))
+            self.log("agent_read_failed", error=repr(exc),
+                     **({"turns": list(self.pending_turns)} if self.perf_log is not None else {}))
             if agent.returncode is None:
                 try:
                     agent.kill()
@@ -3790,6 +3880,9 @@ class Companion:
         if self.pending_turns and not self.exit.is_set():  # The owner sees the error card for these.
             self.journal_write("close", list(self.pending_turns), "interrupted",
                                "stop" if stopped else "stalled" if stall else "agent")
+        if self.perf_log is not None:
+            retrying = {entry[0] for entry in stall[1]} if stall and not stopped else set()
+            self.perf_log.finish_turns(self.pending_turns - retrying, "agent_closed")
         self.pending_turns.clear()
         self.silent_turns = ()
         self.stream_text = None
@@ -3807,6 +3900,8 @@ class Companion:
             self.journal_write("clear_wait")
             self.log("agent_closed", turn=self.latest_turn)
             self.session = str(uuid4())
+            if self.perf_log is not None:
+                self.perf_log.session = self.session
             if stall and not stopped:
                 self.say_stalled(*stall, gone=CARDS_GONE if lost else "")
             elif not stall:
@@ -3943,12 +4038,14 @@ class Companion:
 
     async def resubmit(self, stuck):
         """Give a stalled agent's silent requests to a new agent, through submit like any request, with a new turn."""
-        for _, text, label, shots, source, note, _, report, _ in stuck:
+        for prior_turn, text, label, shots, source, note, _, report, _ in stuck:
             turn = str(uuid4())
             self.redone = self.redone | {turn}
             if report is not None and self.held_note is None:  # The held report goes along as it did, not as words.
                 self.held_note = report
-            await self.submit(text, label, shots, source=source, note=note or None, turn=turn)
+            trace = self.perf_log.retry(prior_turn) if self.perf_log is not None else None
+            await self.submit(text, label, shots, source=source, note=note or None, turn=turn,
+                              **({"timing": {"perf": trace}} if trace else {}))
 
     def answer_permission(self, allowed, answers=None, card=None):
         """Answer the shown card. card is the id of the card the answer was given to, on every client: an answer
@@ -3962,6 +4059,8 @@ class Companion:
             return False
         message, self.permission = self.permission, None
         self.card_move(message.get("request_id") or "", Card.ANSWERED, "allowed" if allowed else "declined")
+        if self.perf_log is not None:
+            self.perf_log.approval_done(message.get("request_id"))
         self.harness.permit(self.agent, message, allowed, answers)
         self.journal_write("clear_wait", card, None, "card")
         self.next_card(thinking=True)
@@ -4066,6 +4165,8 @@ class Companion:
         self.spoke_turn = self.answered = None  # Cut speech never counts as heard, and opens no listen window.
         self.staged_item = self.stream_ended = None  # Stopped speech never starts. The turn's end or the timeout reveals the scene.
         self.clear_thought_state()
+        if self.perf_log is not None:
+            self.perf_log.cancel_audio("stopped")
         if isinstance(self.thought_items, set):
             self.thought_items.clear()
         self.flush_pending_timing()
@@ -4115,6 +4216,8 @@ class Companion:
         """Stop the voice and cancel the turn in progress: the overlay's Stop control, and Rook's own shutdown."""
         self.stop_voice()
         self.end_listen_after()
+        if self.perf_log is not None:
+            self.perf_log.close("interrupted")
         self.turn_timing = None
         if self.staged:  # The owner pressed Stop, so the staged scene never shows.
             self.show(None, render={"reveal": self.staged, "drop": True})
@@ -4152,7 +4255,10 @@ class Companion:
             elif loop and self.scene_steps and len(parts) == 1 and not self.diagram_seen:
                 seconds = max(STEP_LOOP_SECONDS, len(text) * self.speech_rate / self.scene_steps)
                 self.step_loop = (self.voice_id, seconds)
-            self.send_speech(self.speech(text))
+            message = self.speech(text)
+            if self.perf_log is not None and self.perf_log.queue_audio(self.latest_turn, self.voice_id):
+                message["perf"] = True
+            self.send_speech(message)
 
     def take_diagram(self):
         """Take every diagram mark out of the streamed text and stage it. A mark still open at the text's end stays,
@@ -4589,6 +4695,12 @@ class Companion:
                 continue
             if voice is not self.voice:
                 continue
+            if self.perf_log is not None and message.get("event") in (None, "start", "tts_begin", "tts_pcm"):
+                if message.get("event") in (None, "start"):
+                    self.mac_focus_boundary(message.get("id"), starting=message.get("event") == "start")
+                self.perf_log.speech_event(message)
+                if message.get("event") in ("tts_begin", "tts_pcm"):
+                    continue
             if message.get("event") == "level":
                 level = message.get("level")
                 if (isinstance(level, (int, float)) and not isinstance(level, bool) and math.isfinite(level)
@@ -4686,6 +4798,9 @@ class Companion:
         if voice is self.voice and self.staged_item is not None:  # The closed worker never starts that speech.
             self.reveal_scene(self.staged, fallback=True)
         if voice is self.voice:
+            if self.perf_log is not None:
+                self.mac_focus_boundary(self.mac_focus_item, starting=False)
+                self.perf_log.cancel_audio("worker_closed")
             self.flush_pending_timing()
         if voice is self.voice and self.playing:  # A worker that closed plays nothing more.
             self.playing.clear()
@@ -4796,7 +4911,7 @@ class Companion:
         engine = (["--engine", "qwen", "--url", med_url, "--voice-medium", values["voice_medium"]]
                   if values.get("voice_engine") == "medium" and med_url else ["--engine", "phonon"])
         voice = await asyncio.create_subprocess_exec(
-            str(voice_python), str(ROOT / "desktop/speech.py"), *engine,
+            str(voice_python), str(ROOT / "desktop/speech.py"), *engine, "--threads", str(self.tts_threads),
             "--volume", str(values["voice_volume"]), "--pace", str(values["voice_pace"]),
             "--temperature", str(values["voice_temperature"]), *model,
             "--voice", values["voice"], stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
@@ -4837,6 +4952,13 @@ class Companion:
                                                     f"Rook started. The last: {self.medium_problems[1].rstrip('.')}. Check the "
                                                     "network and that the medium voice server is running")
             return {"ok": True, "settings": {**voice,
+                                             "perf_logging": {"value": self.perf_logging, "source": "running"},
+                                             "perf_log_path": {"value": str(self.perf_log_path or STATE / "perf.jsonl"),
+                                                               "source": "running"},
+                                             "recogniser_threads": {"value": self.recogniser_threads,
+                                                                    "source": "running"},
+                                             "tts_threads": {"value": self.tts_threads, "source": "running"},
+                                             "smart_turn_threads": {"value": self.smart_turn_threads, "source": "running"},
                                              "font": {"value": font, "source": source},
                                              "light_dust": {"value": dust, "source": dust_source},
                                              "theme": {"value": theme_pack, "source": theme_source},
@@ -4912,6 +5034,8 @@ class Companion:
                 while (self.voice_id or self.voice_texts) and time.monotonic() - waited < 60:
                     await asyncio.sleep(0.1)
                 self.stop_voice()
+                if self.mac_focus_item is not None:
+                    self.mac_focus_boundary(self.mac_focus_item, starting=False)
                 old, self.voice = self.voice, new
                 if self.playing:  # The old worker's end reports go unread now, so its speech ends here.
                     self.playing.clear()
@@ -5862,18 +5986,27 @@ class Companion:
         A test from the build thread is labelled as one, so Claude and the replay never take it for the owner."""
         if not text:
             return {"ok": False, "error": "Give the request text."}
+        trace = self.perf_log.begin("test" if test else "typed", "relay") if self.perf_log is not None else None
+        if trace:
+            trace.begin("queue")
         deadline = time.monotonic() + ASK_SECONDS
         queue_seconds = 0.0
         lock_wait = time.monotonic()
         async with self.turn_lock:
             queue_seconds += time.monotonic() - lock_wait
             while True:
+                if trace:
+                    trace.begin("agent_ready")
                 await self.ensure_agent()
+                if trace:
+                    trace.end("agent_ready")
                 idle_wait = time.monotonic()
                 while time.monotonic() <= deadline and not self.idle():
                     await asyncio.sleep(0.25)
                 queue_seconds += time.monotonic() - idle_wait
                 if time.monotonic() > deadline:
+                    if trace:
+                        trace.finish("queue_timeout")
                     return {"ok": False, "error": "Rook stayed busy for five minutes, so the request was not sent."}
                 window = await self.hyprctl("activewindow") or {}
                 in_game = self.game and window.get("title", "").startswith("World of Warcraft")
@@ -5882,14 +6015,21 @@ class Companion:
                 elif not image:
                     label, shots = "Images: none. Typed with no image.", []
                 else:
+                    if trace:
+                        trace.begin("screenshot")
                     label, shots = await self.bounded_shots(
                         self.game_screenshots(window) if in_game else self.screenshot(window), in_game)
+                    if trace:
+                        trace.end("screenshot")
                 if self.idle():  # The owner may have spoken while the window was captured.
                     break
             if test:
                 label = f"{relay.settings.render(TEST_LABEL)}\n{label}"
+            timing = {"queue_ms": round(queue_seconds * 1000)}
+            if trace:
+                timing["perf"] = trace
             sent = await self.submit(text, label, shots, source="test" if test else "typed",
-                                     timing={"queue_ms": round(queue_seconds * 1000)})
+                                     timing=timing)
             if sent == "replayed":
                 return {"ok": True, "answer": self.replay_tape["reply"].get("details"),
                         "spoken": self.replay_tape["reply"].get("spoken")}
@@ -6158,12 +6298,17 @@ class Companion:
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def record(self, released):
+        trace = self.perf_log.begin("spoken", "talk_key") if self.perf_log is not None else None
         if self.pipeline is None:
+            if trace:
+                trace.finish("capture_failed")
             self.log("capture_error", error="Speech recognition is not on this system yet.")
             return
         window = await self.hyprctl("activewindow") or {}
         in_game = bool(self.game and window.get("title", "").startswith("World of Warcraft"))
         if released.is_set():
+            if trace:
+                trace.finish("cancelled")
             return
         limit_seconds = self.recording_seconds()
         speaking = bool(self.voice_id or self.voice_texts or self.playing)
@@ -6178,6 +6323,9 @@ class Companion:
         self.recording = True
         self.recording_started.set()
         self.show("listening", level=0.0)
+        if trace:
+            trace.begin("capture")
+            trace.begin("screenshot")
         shots = self.loop.create_task(self.no_shots(in_game) if self.dark and not DARK_SCREENSHOTS else
                                       self.game_screenshots(window) if in_game else self.screenshot(window))
         result = None
@@ -6195,6 +6343,8 @@ class Companion:
                             released.set()
                         record_ms = round((time.monotonic() - record_began) * 1000)
                         self.recording = False
+                        if trace:
+                            trace.end("capture")
                         if getattr(released, "cancelled", False):
                             capture, self.capture = self.capture, None
                             if capture is not None:
@@ -6203,16 +6353,28 @@ class Companion:
                             self.restore_media_duck()
                             shots.cancel()  # A chord means typing: no screenshot is taken or kept.
                             self.show_resting()
+                            if trace:
+                                trace.finish("cancelled")
                             return
                         self.show("transcribing")
                         transcribe_began = time.monotonic()
+                        if trace:
+                            trace.input_at = getattr(released, "perf_at", transcribe_began)
+                            if shots.done():
+                                trace.end("screenshot", complete=not shots.cancelled())
+                            trace.begin("recognition", when=trace.input_at)
                         if reservation is not None:
                             await reservation.wait()
                         capture, self.capture = self.capture, None
                         await self.wait_tail_text()
                         result = await asyncio.to_thread(self.pipeline.stop_recording, capture)
                         transcribe_ms = round((time.monotonic() - transcribe_began) * 1000)
+                        if trace:
+                            trace.end("recognition")
+                            trace.begin("queue")
                 except BaseException:
+                    if trace:
+                        trace.finish("recognition_failed")
                     capture, self.capture = self.capture, None
                     if capture is not None:
                         await asyncio.to_thread(discard_recording, capture)
@@ -6236,11 +6398,16 @@ class Companion:
             # From here the reply's end resumes it, or at once below when the owner said nothing.
             self.hush_hold = False
         if result and result.text:
-            await self.submit(result.text, *await self.bounded_shots(shots, in_game), source="spoken", timing={
+            images = await self.bounded_shots(shots, in_game)
+            if trace:
+                trace.end("screenshot", complete=not shots.cancelled())
+            await self.submit(result.text, *images, source="spoken", timing={
                 "record_ms": record_ms, "transcribe_ms": transcribe_ms,
-                "asr_loaded": getattr(result, "loaded_now", None),
+                "asr_loaded": getattr(result, "loaded_now", None), "perf": trace,
             })
         else:
+            if trace:
+                trace.finish("empty_transcript")
             self.log("empty_transcript")
             # A press with nothing said silences Rook. It never cancels the turn: a press can be an accident.
             self.silence(speaking)  # Its stop_voice() also resumes a video Rook paused: no reply follows.
@@ -6300,7 +6467,7 @@ class Companion:
         if turn_end is None:
             return None, "unavailable:module_missing"
         if self.turn_detector is None:
-            self.turn_detector = turn_end.SmartTurnDetector()
+            self.turn_detector = turn_end.SmartTurnDetector(intra_op_num_threads=self.smart_turn_threads)
         det = self.turn_detector
         if not isinstance(det, turn_end.SmartTurnDetector):
             return (det, "on") if det.available() else (det, "unavailable:detector_unavailable")
@@ -6366,6 +6533,7 @@ class Companion:
         cancelled, callers, ended, peak, spoke = False, [], None, 0.0, False
         loud_since = speech_since = None  # When the level last rose to the quiet floor and to speech level.
         decider = st_warm_task = smart_turn_p = smart_turn_ms = None
+        trace = None
         smart_turn_status = "off"
         try:
             if self.pipeline is None:
@@ -6468,7 +6636,12 @@ class Companion:
                                             max_tail_s=0.20,
                                             rms_threshold=LISTEN_AFTER_QUIET,
                                         )
+                                        if self.perf_log is not None:
+                                            trace = trace or self.perf_log.begin("spoken", "listen_after")
+                                            trace.begin("smart_turn")
                                         decision = await asyncio.to_thread(decider.check, now, audio_fn)
+                                        if trace:
+                                            trace.end("smart_turn")
                                         if decision.probability is not None:
                                             smart_turn_p = round(decision.probability, 4)
                                         if decision.elapsed_ms is not None:
@@ -6509,13 +6682,21 @@ class Companion:
                             else:
                                 self.show("transcribing")
                                 transcribe_began = time.monotonic()
+                                if self.perf_log is not None:
+                                    trace = trace or self.perf_log.begin("spoken", "listen_after")
+                                    trace.begin("recognition")
                                 if reservation is not None:
                                     await reservation.wait()
                                 capture, self.capture = self.capture, None
                                 await self.wait_tail_text()
                                 result = await asyncio.to_thread(self.pipeline.stop_recording, capture)
                                 transcribe_ms = round((time.monotonic() - transcribe_began) * 1000)
+                                if trace:
+                                    trace.end("recognition")
+                                    trace.begin("queue")
                     except BaseException:
+                        if trace:
+                            trace.finish("recognition_failed")
                         capture, self.capture = self.capture, None
                         if capture is not None:  # Never leave the microphone open after an error.
                             await asyncio.to_thread(discard_recording, capture)
@@ -6547,9 +6728,11 @@ class Companion:
         if outcome == "spoke":
             await self.submit(result.text, *await self.bounded_shots(shots, in_game), source="spoken", timing={
                 "record_ms": record_ms, "transcribe_ms": transcribe_ms,
-                "asr_loaded": getattr(result, "loaded_now", None),
+                "asr_loaded": getattr(result, "loaded_now", None), "perf": trace,
             })
             return
+        if trace:
+            trace.finish(outcome)
         if shots:
             shots.cancel()
         if self.latest_turn in self.pending_turns:  # A new turn closed the window, and shows its own state.
@@ -7990,6 +8173,8 @@ class Companion:
         def _stop():
             ev, active[0] = active[0], None
             if ev is not None and not ev.is_set():
+                if self.perf_log is not None:
+                    ev.perf_at = time.monotonic()
                 ev.set()
 
         def _cancel():
@@ -8007,8 +8192,28 @@ class Companion:
             is_talking=self.talking,
         )
 
+    def mac_focus_boundary(self, item, *, starting):
+        helper = getattr(self, "mac_helper", None)
+        if helper is None or item is None:
+            return
+        if starting:
+            self.mac_focus_item = item
+        elif self.mac_focus_item == item:
+            self.mac_focus_item = None
+        else:
+            return
+        if helper.returncode is not None or helper.stdin.is_closing():
+            return
+        trace = self.perf_log.audio.get(item) if self.perf_log is not None and starting else None
+        try:
+            send(helper, {"event": "focus_snapshot", "phase": "speech_start" if starting else "speech_end",
+                          "speech_id": item, "turn": trace.turn if trace else None,
+                          "request_id": trace.request_id if trace else None})
+        except OSError:
+            pass  # A closing helper cannot interrupt speech.
+
     async def read_mac_helper(self, helper_proc):
-        """Read JSON talk_key events from RookHelper.app stdout and route them through MacTalkRouter."""
+        """Route the helper's talk keys and diagnostics from its private pipe."""
         router = self.make_mac_talk_router()
         while helper_proc.stdout is not None:
             raw = await helper_proc.stdout.readline()
@@ -8018,12 +8223,25 @@ class Companion:
                 event = json.loads(raw.decode("utf-8", "replace"))
             except ValueError:
                 continue
-            if isinstance(event, dict) and event.get("type") in ("keys_ready", "keys_unavailable"):
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            if kind in ("keys_ready", "keys_unavailable"):
                 self.mac_keys = event  # relay.py verify's keys row reads it through probe keys.
-            if isinstance(event, dict) and event.get("type") == "talk_key":
+            elif kind == "talk_key":
                 self.last_key = time.monotonic()
                 self.save_presence()
                 router.handle(event)
+            elif self.perf_log is not None and kind in (
+                    "mac_focus_changed", "mac_speech_focus", "mac_event_tap_disabled"):
+                fields = ("reason", "native_at", "speech_id", "turn", "request_id", "frontmost_bundle", "frontmost_pid",
+                          "rook_active", "rook_key_window", "rook_main_window", "panel_key", "panel_visible", "tap_enabled")
+                details = {key: event[key] for key in fields if key in event}
+                if kind == "mac_event_tap_disabled" and (item := self.mac_focus_item):
+                    details["speech_id"] = item
+                    if trace := self.perf_log.audio.get(item):
+                        details["turn"], details["request_id"] = trace.turn, trace.request_id
+                self.log(kind, **details)
 
     async def run(self):
         # Restore any music left ducked by an earlier crash first, before voice, socket, or agent launch.
@@ -8313,6 +8531,8 @@ class Companion:
                 helper_args = [str(mac_helper_path), "--url", f"http://127.0.0.1:{self.phone.server.port}/presence"]
                 if getattr(self.args, "keys", False):
                     helper_args.append("--enable-keys")
+                if self.perf_log is not None:
+                    helper_args.append("--focus-diagnostics")
                 self.mac_helper = await asyncio.create_subprocess_exec(
                     *helper_args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env=helper_env
                 )
@@ -8332,7 +8552,9 @@ class Companion:
             start_state["hyprland"] and start_state["capture"] and (not want_overlay or start_state["overlay"])
         ):
             self.keep("desktop start", lambda: self.watch_desktop_start(start_state), optional=True)
-        self.log("service_started", agent=self.agent_name, model=self.harness.model, effort=self.harness.effort)
+        self.log("service_started", agent=self.agent_name, model=self.harness.model, effort=self.harness.effort,
+                 perf_logging=self.perf_logging, recogniser_threads=self.recogniser_threads,
+                 tts_threads=self.tts_threads, smart_turn_threads=self.smart_turn_threads)
         print(f"Rook is ready. {hint}", flush=True)
         if _desk.IS_MAC:
             start_limit.cleared()  # A good start: the failed ones before it no longer count.

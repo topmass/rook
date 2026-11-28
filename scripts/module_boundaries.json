@@ -21,6 +21,7 @@
       "desktop/speech.py",
       "desktop/turn_end.py",
       "desktop/memory.py",
+      "desktop/perf.py",
       "desktop/media.py"
     ],
     "platform": [

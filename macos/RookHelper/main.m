@@ -147,13 +147,27 @@ static int runKeyTestMode(void) {
 
 @interface EventTapHost : NSObject
 @property (nonatomic, strong) TalkKeyMachine *machine;
+@property (nonatomic, assign) BOOL focusDiagnostics;
 - (BOOL)startIfAuthorized;
+- (NSNumber *)enabledStatus;
 @end
 
 static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     (void)proxy;
     if (!userInfo) return event;
     EventTapHost *host = (__bridge EventTapHost *)userInfo;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (host.focusDiagnostics) {
+            double at = NSDate.date.timeIntervalSince1970;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                emitJSON(@{@"type": @"mac_event_tap_disabled",
+                           @"reason": type == kCGEventTapDisabledByTimeout ? @"timeout" : @"user_input",
+                           @"native_at": @(at)});
+            });
+        }
+        return event;
+    }
+    if (!event) return event;
     int64_t keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
     double ts = [[NSProcessInfo processInfo] systemUptime];
     NSArray<NSDictionary *> *emitted = @[];
@@ -213,6 +227,10 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
     return YES;
 }
 
+- (NSNumber *)enabledStatus {
+    return _tap ? @(CGEventTapIsEnabled(_tap)) : nil;
+}
+
 - (void)dealloc {
     if (_source) CFRelease(_source);
     if (_tap) CFRelease(_tap);
@@ -233,6 +251,8 @@ static CGEventRef eventTapCallback(CGEventTapProxy proxy, CGEventType type, CGEv
 @property (nonatomic, assign) CGFloat width;
 @property (nonatomic, assign) CGFloat height;
 @property (nonatomic, assign) BOOL enableKeys;
+@property (nonatomic, assign) BOOL focusDiagnostics;
+@property (nonatomic, copy) NSDictionary *speechFocus;
 @property (nonatomic, strong) NSNumber *smokeSeconds;
 @property (nonatomic, copy) NSString *token;
 @property (nonatomic, strong) PresencePanel *panel;
@@ -253,6 +273,62 @@ static BOOL isLoopbackURL(NSURL *url) {
 }
 
 @implementation AppDelegate
+
+- (void)emitFocus:(NSString *)reason type:(NSString *)type {
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    NSMutableDictionary *focus = [@{
+        @"type": type, @"reason": reason, @"native_at": @(NSDate.date.timeIntervalSince1970),
+        @"frontmost_bundle": front.bundleIdentifier ?: (id)NSNull.null,
+        @"frontmost_pid": front ? @(front.processIdentifier) : (id)NSNull.null,
+        @"rook_active": @(NSApp.isActive),
+        @"rook_key_window": @(NSApp.keyWindow != nil),
+        @"rook_main_window": @(NSApp.mainWindow != nil),
+        @"panel_key": @(self.panel.isKeyWindow),
+        @"panel_visible": @(self.panel.isVisible),
+        @"tap_enabled": [self.eventTap enabledStatus] ?: (id)NSNull.null,
+    } mutableCopy];
+    [focus addEntriesFromDictionary:self.speechFocus ?: @{}];
+    emitJSON(focus);
+}
+
+- (void)focusChanged:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self focusChanged:notification]; });
+        return;
+    }
+    if (self.speechFocus) [self emitFocus:notification.name type:@"mac_focus_changed"];
+}
+
+- (void)observeFocus {
+    NSNotificationCenter *workspace = NSWorkspace.sharedWorkspace.notificationCenter;
+    for (NSString *name in @[NSWorkspaceDidActivateApplicationNotification,
+                             NSWorkspaceActiveSpaceDidChangeNotification]) {
+        [workspace addObserver:self selector:@selector(focusChanged:) name:name object:nil];
+    }
+    NSNotificationCenter *app = NSNotificationCenter.defaultCenter;
+    for (NSString *name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification,
+                             NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification,
+                             NSWindowDidBecomeMainNotification, NSWindowDidResignMainNotification]) {
+        [app addObserver:self selector:@selector(focusChanged:) name:name object:nil];
+    }
+}
+
+- (void)speechFocusBoundary:(NSDictionary *)message {
+    if (!self.focusDiagnostics) return;
+    NSString *phase = message[@"phase"];
+    BOOL start = [phase isEqual:@"speech_start"];
+    if (!start && ![phase isEqual:@"speech_end"]) return;
+    NSString *item = message[@"speech_id"];
+    if (![item isKindOfClass:NSString.class]) return;
+    if (start) {
+        self.speechFocus = @{@"speech_id": item, @"turn": message[@"turn"] ?: NSNull.null,
+                             @"request_id": message[@"request_id"] ?: NSNull.null};
+    } else if (![self.speechFocus[@"speech_id"] isEqual:item]) {
+        return;
+    }
+    [self emitFocus:phase type:@"mac_speech_focus"];
+    if (!start) self.speechFocus = nil;
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
@@ -299,10 +375,12 @@ static BOOL isLoopbackURL(NSURL *url) {
 
     if (self.enableKeys) {
         EventTapHost *tap = [[EventTapHost alloc] init];
+        tap.focusDiagnostics = self.focusDiagnostics;
         [tap startIfAuthorized];
         self.eventTap = tap;
     }
 
+    if (self.focusDiagnostics) [self observeFocus];
     [self startStdinReader];
 
     if (self.smokeSeconds != nil) {
@@ -416,6 +494,10 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
                 return;
             }
             NSString *kind = [dict[@"event"] isKindOfClass:[NSString class]] ? dict[@"event"] : @"state";
+            if ([kind isEqualToString:@"focus_snapshot"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf speechFocusBoundary:dict]; });
+                continue;
+            }
             NSData *kindData = [NSJSONSerialization dataWithJSONObject:@[kind] options:0 error:nil];
             NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
             if (!kindData || !jsonData) continue;
@@ -538,6 +620,7 @@ int main(int argc, const char *argv[]) {
         CGFloat width = 220.0;
         CGFloat height = 220.0;
         BOOL enableKeys = NO;
+        BOOL focusDiagnostics = NO;
         BOOL testKeys = NO;
         NSNumber *smokeSeconds = nil;
 
@@ -551,6 +634,8 @@ int main(int argc, const char *argv[]) {
                 height = atof(argv[++i]);
             } else if ([arg isEqualToString:@"--enable-keys"]) {
                 enableKeys = YES;
+            } else if ([arg isEqualToString:@"--focus-diagnostics"]) {
+                focusDiagnostics = YES;
             } else if ([arg isEqualToString:@"--test-keys"]) {
                 testKeys = YES;
             } else if ([arg isEqualToString:@"--smoke-seconds"] && i + 1 < argc) {
@@ -568,6 +653,7 @@ int main(int argc, const char *argv[]) {
         delegate.width = width;
         delegate.height = height;
         delegate.enableKeys = enableKeys;
+        delegate.focusDiagnostics = focusDiagnostics;
         delegate.smokeSeconds = smokeSeconds;
         delegate.token = NSProcessInfo.processInfo.environment[@"ROOK_PRESENCE_TOKEN"];
         NSApp.delegate = delegate;

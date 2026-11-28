@@ -477,6 +477,14 @@ def settings_command(argv):
                                "source": "settings file" if key in saved_file else "default"}
             values["recogniser_model"] = {"value": saved_file.get("recogniser_model"), "source": "settings file"
                                           if "recogniser_model" in saved_file else "not set; AirType's own model"}
+            values["perf_logging"] = {"value": saved_file.get("perf_logging", settings.PERF_LOGGING),
+                                      "source": "settings file" if "perf_logging" in saved_file else "default"}
+            perf_path, perf_source = settings.perf_log_path_in_force(saved_file)
+            values["perf_log_path"] = {"value": str(perf_path), "source": perf_source}
+            for key, default in (("recogniser_threads", settings.RECOGNISER_THREADS), ("tts_threads", settings.TTS_THREADS),
+                                 ("smart_turn_threads", settings.SMART_TURN_THREADS)):
+                values[key] = {"value": saved_file.get(key, default),
+                               "source": "settings file" if key in saved_file else "default"}
             for key, default in (("voice_engine", VOICE_ENGINES[0]), ("voice_medium", MEDIUM_VOICES[0])):
                 if key not in saved_file:
                     values[key] = {"value": default, "source": "default"}
@@ -688,6 +696,38 @@ def settings_command(argv):
         write_settings({**saved, key: value}, {**previous, **({key: saved[key]} if key in saved else {})})
         utter(f"Saved {key} = {value}. Rook uses it from its next start. Rook never restarts itself. "
               "The owner or the build thread restarts it with relay.py restart, or the daily restart at 04:30 does.")
+        return
+    if key == "perf_log_path":
+        old = {key: saved[key]} if key in saved else {}
+        if value.lower() == "default":
+            save_checked({k: v for k, v in saved.items() if k != key}, {**previous, **old},
+                         updated={key}, removed={key})
+            value = str(settings.perf_log_path_in_force({})[0])
+        else:
+            if value.lower() == "previous":
+                value = previous.get(key)
+            if not (path := valid({key: value}).get(key)):
+                leave("perf_log_path must name a file under Rook's state directory.")
+            save_checked({**saved, key: path}, {**previous, **old}, updated={key})
+            value = path
+        utter(f"Saved perf log path {value}. Rook uses it from its next start.")
+        return
+    if key in ("perf_logging", "recogniser_threads", "tts_threads", "smart_turn_threads"):
+        if value.lower() == "previous":
+            value = previous.get(key)
+        elif key != "perf_logging":
+            try:
+                value = int(value)
+            except ValueError:
+                pass
+        else:
+            value = value.lower()
+        if not valid({key: value}):
+            leave("perf_logging must be on or off." if key == "perf_logging" else
+                  f"{key} must be an integer from 1 to 16.")
+        old = {key: saved[key]} if key in saved else {}
+        save_checked({**saved, key: value}, {**previous, **old}, updated={key})
+        utter(f"Saved {key} = {value}. Rook uses it from its next start.")
         return
     if key == "recogniser_model":  # AirType loads its model once, so the choice takes effect at Rook's next start.
         value = value.strip().lower()

@@ -261,11 +261,10 @@ def respell(text, engine="small"):
 
 def load(args):
     """Return the sample rate and a function that yields s16 audio chunks for a text until stopped."""
-    # Two threads each, so speech does not steal CPU from the game.
     if args.engine in ("phonon", "qwen"):
         import numpy as np
         import ptts
-        ptts.set_num_threads(2)
+        ptts.set_num_threads(args.threads)
         model = ptts.TTS(args.model, quant="q8", lang="en",  # None is the runtime's pinned phonon-31m-en.
                          temperature=args.temperature, conditions={"duration_delta": args.pace} if args.pace else None)
         voice = args.voice or "Miles"
@@ -283,7 +282,7 @@ def load(args):
         return model.sample_rate, generate
     import torch
     from pocket_tts import TTSModel
-    torch.set_num_threads(2)
+    torch.set_num_threads(args.threads)
     model = TTSModel.load_model(language=args.model or "english_7m_2026-10", quantize=args.int8)
     voice = model.get_state_for_audio_prompt(args.voice or "alba")
 
@@ -1107,6 +1106,8 @@ def main():
     parser.add_argument("--check-warm", action="store_true", help="Check the medium voice warm-up and exit.")
     parser.add_argument("--engine", choices=("pocket", "phonon", "qwen"), default="pocket",
                         help="qwen speaks through the medium voice server, with Phonon and --voice as its fallback.")
+    parser.add_argument("--threads", type=int, choices=range(1, 17), default=2,
+                        help="Local speech synthesis threads for Phonon, Pocket TTS and the qwen fallback.")
     parser.add_argument("--url", help="qwen only. The medium voice server, such as https://voice.example:8090.")
     parser.add_argument("--voice-medium", default="jarvis-poe", help="qwen only. The medium voice server's voice.")
     parser.add_argument("--model", help="Default: english_7m_2026-10 for Pocket TTS, phonon-31m-en for Phonon.")
@@ -1263,6 +1264,24 @@ def main():
             continue
         error = None
         played = [0, 0, 0]
+        measure = message.get("perf") is True
+        first_pcm = True
+
+        def voice_event(event=None, **fields):
+            if measure:
+                fields.update(perf_at=time.monotonic(), perf_cpu_ms=time.process_time_ns() / 1e6)
+            emit({"id": message["id"], **({"event": event} if event else {}), **fields})
+
+        def measured_generate(text, stopped):
+            nonlocal first_pcm
+            if first_pcm:
+                voice_event("tts_begin")
+            for chunk in generate(text, stopped, message.get("voices")):
+                if chunk and first_pcm:
+                    first_pcm = False
+                    voice_event("tts_pcm")
+                yield chunk
+
         try:
             # An item may carry its own volume: a voice swap's silent probe speaks at 0.
             volume = message.get("volume", args.volume)
@@ -1270,18 +1289,18 @@ def main():
                 levels = LevelMeter(message["id"], sample_rate, stop, emit=emit)
                 error = desk.play_pcm(
                     # An item's own voices, such as an audition line's, reach generate with it.
-                    sample_rate, volume, lambda text, stop: generate(text, stop, message.get("voices")),
+                    sample_rate, volume, measured_generate if measure else
+                    lambda text, stop: generate(text, stop, message.get("voices")),
                     message["text"], stop, voiced,
-                    lambda: emit({"id": message["id"], "event": "start"}),
+                    lambda: voice_event("start"),
                     lambda secs: emit({"id": message["id"], "event": "length", "seconds": secs}),
                     played, levels=levels,
                 )
         except Exception as exc:
             error = str(exc)
         problem, generate.__dict__["problem"] = getattr(generate, "problem", None), None
-        emit({"id": message["id"], "volume": volume, "error": error,
-              "seconds": round(max(0, played[2] - played[1]) / sample_rate, 2),
-              **({"medium_voice": problem} if problem else {})})
+        voice_event(volume=volume, error=error, seconds=round(max(0, played[2] - played[1]) / sample_rate, 2),
+                    **({"medium_voice": problem} if problem else {}))
     encoders.shutdown(wait=True)
 
 

@@ -36,6 +36,9 @@ You may change exactly the settings in this table yourself. Everything else abou
 | `orchestrator` | The coding tool a hand-off goes to when it names none. It takes effect at your next start | `t3` (T3 Code, the default), `herdr`, `pi`, or `none` |
 | `projects_folder` | Where a new project starts on this machine | A folder path. Unset means the machine table's code folder |
 | `screenshots` | Whether each request carries a screenshot of the focused window | `on` (the default) or `off` |
+| `recogniser_threads` | CPU threads for speech recognition. Applies at the next start | 1 to 16. Default is 4 |
+| `tts_threads` | CPU threads for local speech synthesis, including the medium voice fallback. Applies at the next start | 1 to 16. Default is 2 |
+| `smart_turn_threads` | CPU threads for Smart Turn inference. Applies at the next start | 1 to 16. Default is 2 |
 | `recogniser_model` | Which speech-to-text model hears ⟦owner⟧. `en` is Parakeet English, `multi` is Parakeet in 25 European languages. It takes effect at the next start | `en` or `multi` |
 | `talk_keys` | The keys ⟦owner⟧ holds to talk. It applies at once | A comma list, such as `RightCtrl,F15,F14`, or `none`. `+F13` adds a key and `-F13` drops one. Right Alt waits a moment, so typing with it does not start you listening |
 
