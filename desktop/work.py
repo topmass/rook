@@ -55,8 +55,6 @@ NEEDS_LINE = re.compile(r"(?:⟦owner⟧|[^\n]{1,40}?)'s answer or approval in T
 def asks(waits_on):
     """Whether an entry waits on the owner's answer to a thread's question, whatever name it was saved with."""
     return waits_on == LAPSED or bool(NEEDS_LINE.fullmatch(waits_on or ""))
-# The startup turn names at most this many entries in each group.
-CATCH_UP = 5
 
 
 class Unreadable(Exception):
@@ -216,6 +214,14 @@ def thread_news(data, machine, thread, state, news, outcome, now):
             change(entry, fields, "watcher", now)
 
 
+def thread_told(data, machine, thread, now):
+    """A thread reported to Rook with tell or note: its running entries are done. A thread that ships often forgets
+    work update, so its report closes the work it ran. An entry it marked live keeps that state."""
+    for entry in data["entries"]:
+        if is_open(entry) and entry["state"] == "running" and entry["machine"] == machine and entry["thread"] == thread:
+            change(entry, {"state": "done"}, f"thread {thread}", now)
+
+
 def thread_quiet(data, machine, thread, since, now):
     """The watcher's silent mark on a running entry: since when its thread has shown nothing new, or None. Nothing
     else changes, so the entry keeps its state and its place in the list."""
@@ -287,7 +293,7 @@ def listing(data, now, everything=False, since=None):
 
 def catch_up(data, since, now):
     """The startup turn's lines from the list, or "" when nothing is open: what waits on the owner, what finished since they
-    were last here, and what still runs, at most CATCH_UP entries each."""
+    were last here, and what still runs. Each line is short, so every entry shows."""
     shown = listing(data, now)
     groups = ((settings.render(f"Waits on {OWNER}"), [e for e in shown if e["state"] in ("waiting", "drafted")]),
               (settings.render(f"Finished since {OWNER} was last here"), [e for e in shown if e["state"] in FINISHED and e["finished"] >= since]),
@@ -296,9 +302,7 @@ def catch_up(data, since, now):
     for name, entries in groups:
         if entries:
             lines.append(f"{name}:")
-            lines += [f"- {line(e, now)}" for e in entries[:CATCH_UP]]
-            if len(entries) > CATCH_UP:
-                lines.append(f"- And {len(entries) - CATCH_UP} more, in relay.py work list.")
+            lines += [f"- {line(e, now)}" for e in entries]
     return "\n".join(lines)
 
 
@@ -357,6 +361,15 @@ def check():
     a["closed"] = now + 10
     assert [e["id"] for e in listing(data, now + 9 + WEEK)] == [] and len(listing(data, now, everything=True)) == 3
     assert catch_up(data, 0, now + 9 + WEEK) == ""
+    # A thread's tell or note closes its running entries, and the catch-up shows every one.
+    data = empty()
+    many = [add(data, {"wish": f"job {n}", "project": "zz-shop", "thread": "t-9"}, "thread t-9", now) for n in range(7)]
+    other = add(data, {"wish": "other job", "project": "zz-shop", "thread": "t-8"}, "thread t-8", now)
+    assert catch_up(data, now, now + 1).count("- zz-shop: job") == 7
+    many[0]["state"] = "live"
+    thread_told(data, many[1]["machine"], "t-9", now + 2)
+    assert [e["state"] for e in many] == ["live"] + ["done"] * 6 and other["state"] == "running"
+    assert many[1]["changed_by"] == "thread t-9"
     # The watcher's rules for code days, on one entry.
     data = empty()
     d = add(data, {"wish": "pick a chart style", "project": "acme-demo", "thread": "t-4"}, "rook", now)
