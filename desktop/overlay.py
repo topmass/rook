@@ -55,6 +55,8 @@ Protocol, stdin (one JSON object per line):
     turn shows nothing while Rook is dark.
     {"stage": true} draws diagrams and the answer panel in the stage host (stage/host.py) instead of the swarm and the
     panel window, with the same messages and answers; when the host cannot start or dies, the overlay draws as before.
+    {"own_screen": "DP-2"} has Rook live on a centred stage (OWN_STAGE) on that monitor, named by its connector or by
+    text in its description, whatever has focus; {"own_screen": null} follows the focused monitor again.
     {"render": {"id": "7", "diagram": {"graph": "a > b", "title": ""}}} has the swarm form a constellation (see
     desktop/constellation.py); {"render": {"id": "8", "step": 2}} lights its second node (0 for none, a list for
     several), and {"render": {"id": "9", "clear": true}} ends it. A diagram sent with "stage": true is answered but not
@@ -153,6 +155,7 @@ import cairo
 import devs_pack  # Data-driven Devs theme pack manifest and 3D form registry.
 import pack_player  # Switchable theme pack loader and flipbook atlas player (FORMAT.md).
 import constellation  # A diagram the model writes as one line, drawn by the presence's own grains.
+import desk  # The own_screen monitor match, shared with relay.py.
 import filament  # How a constellation looks: filament lines its grains build, light and carry home.
 import render as scenes  # The dust scene format; the overlay reads its label type and timings.
 import stage_link  # The stage host's link, for diagrams and the panel when the stage setting is on.
@@ -191,6 +194,9 @@ GRAIN_INSET = 20
 # The resting loop sits near the top of the monitor. The owner chose this height.
 REST_SHARE = 0.05
 REST_PAD = 48
+# The own_screen stage, in logical px: the design size of the owner's bar display (1540 by 720 at scale 1.6667). Rook
+# lives on it centred on the monitor own_screen names, so a layout made for it looks the same on any monitor.
+OWN_STAGE = (924, 432)
 FALLBACK_TOP, FALLBACK_LIFT = 72, 124
 # While this window is focused, Rook steps aside for WoW's own overlay.
 GAME_TITLE = "World of Warcraft"
@@ -739,7 +745,7 @@ def _hypr(*args):
         return None
 
 
-def _placement(display, game=False):
+def _placement(display, game=False, pin=None):
     """Monitor, left and top margins, lift (how far below the window top the working canvas starts),
     the logical height of the focused monitor, rest pad (how far below the window top the resting loop's
     centre sits), the game window's top-left corner and scale on its monitor (or None), and the bounds the
@@ -747,11 +753,14 @@ def _placement(display, game=False):
     left free by bars, or the game window within it.
     One window covers rest and work without resizing. It starts at the top edge, so grains that
     overshoot the loop on their way home are not cut off; the loop and the working forms keep their places.
-    With game (WoW mode, the game focused) everything is placed inside the game window on its monitor, as
-    WoWFriend placed it; otherwise as if a full-screen window filled the focused monitor."""
+    With pin (the own_screen setting) and a connected monitor it names, everything is placed on OWN_STAGE, centred on
+    that monitor, whatever has focus, the game too. Otherwise, with game (WoW mode, the game focused) everything is
+    placed inside the game window on its monitor, as WoWFriend placed it; else as if a full-screen window filled the
+    focused monitor."""
     monitors = _hypr("monitors") or []
-    wow = next((c for c in _hypr("clients") or [] if c.get("title") == GAME_TITLE), None) if game else None
-    mon = None
+    mon = desk.own_screen_monitor(monitors, pin)
+    staged = mon is not None
+    wow = next((c for c in _hypr("clients") or [] if c.get("title") == GAME_TITLE), None) if game and not staged else None
     if wow:
         mon = next((m for m in monitors if m.get("id") == wow.get("monitor")), None)
     if mon is None:
@@ -764,19 +773,27 @@ def _placement(display, game=False):
         if items.get_item(i).get_connector() == mon["name"]:
             gdk_mon = items.get_item(i)
     scale = mon.get("scale") or 1
-    at = wow["at"] if wow else (mon["x"], mon["y"])
-    size = wow["size"] if wow else (mon["width"], mon["height"])
-    game_left, window_top = (at[0] - mon["x"]) / scale, (at[1] - mon["y"]) / scale
-    left = max(0, int(game_left + size[0] / scale / 2 - WIDTH / 2))
-    height = size[1] / scale
-    top = max(0, int(window_top + height * REST_SHARE - REST_PAD))
+    mon_w, mon_h = mon["width"] / scale, mon["height"] / scale
+    if wow:  # The game window, in logical px from the monitor's corner.
+        game_left, window_top = (wow["at"][0] - mon["x"]) / scale, (wow["at"][1] - mon["y"]) / scale
+        area_w, height = wow["size"][0] / scale, wow["size"][1] / scale
+    elif staged:  # The stage, centred, and as large as the monitor allows.
+        area_w, height = min(OWN_STAGE[0], mon_w), min(OWN_STAGE[1], mon_h)
+        game_left, window_top = (mon_w - area_w) / 2, (mon_h - height) / 2
+    else:
+        game_left = window_top = 0.0
+        area_w, height = mon_w, mon_h
+    # On the stage the presence rounds to its centre, since a fractional scale leaves a hair under a whole px, and its
+    # window never starts above the stage's top, as it never starts above a monitor's.
+    left = max(0, (round if staged else int)(game_left + area_w / 2 - WIDTH / 2))
+    top = max(int(window_top) if staged else 0, int(window_top + height * REST_SHARE - REST_PAD))
     lift = max(0, int(window_top + height * TOP_SHARE) - GRAIN_INSET - top)
     # Layer-shell margins count from the area left free by exclusive bars; hyprctl reports them as reserved
     # [left, top, right, bottom].
     rl, rt, rr, rb = (mon.get("reserved") or [0, 0, 0, 0])[:4]
-    free_w, free_h = mon["width"] / scale - rl - rr, mon["height"] / scale - rt - rb
+    free_w, free_h = mon_w - rl - rr, mon_h - rt - rb
     bx, by = max(0.0, game_left - rl), max(0.0, window_top - rt)
-    bounds = (bx, by, min(free_w, game_left - rl + size[0] / scale) - bx, min(free_h, window_top - rt + height) - by)
+    bounds = (bx, by, min(free_w, game_left - rl + area_w) - bx, min(free_h, window_top - rt + height) - by)
     return (gdk_mon, left, 0, lift + top, height, REST_PAD + top, (game_left, window_top, scale) if wow else None,
             bounds)
 
@@ -10405,6 +10422,7 @@ class Overlay(Gtk.Application):
         self._focus_name = None
         self._focus_why = ""
         self._focus_move = None
+        self.own_screen = None  # The own_screen setting: the monitor Rook lives on alone, or None to follow focus.
         # The media viewer: its window, the media showing, the one it replaces while that leaves, the line under the
         # box, the file being checked and decoded in a worker thread, and when a video ended.
         self.viewer = None
@@ -10615,7 +10633,8 @@ class Overlay(Gtk.Application):
             return
         in_game = self.wow and self.game_focused
         monitor, left, top, lift, height, self.scene.rest_pad, game, self.bounds = _placement(
-            self.win.get_display(), in_game)
+            self.win.get_display(), in_game, self.own_screen)
+        in_game = in_game and not self._pinned()  # The own screen wins over the game window.
         old = self.monitor.get_connector() if self.monitor is not None else None
         new = monitor.get_connector() if monitor is not None else None
         if new != old:
@@ -11632,10 +11651,27 @@ class Overlay(Gtk.Application):
         """A backstop once a second: ask Hyprland which monitor has focus, so a missed event or a lost event socket
         never leaves Rook behind. A socket request costs well under a millisecond; it starts no process."""
         monitors = _hypr_socket("j/monitors")
-        name = next((m.get("name") for m in monitors if m.get("focused")), None) if isinstance(monitors, list) else None
+        # While the own screen is connected Rook belongs there, so this also brings Rook back when it is plugged in.
+        pin = desk.own_screen_monitor(monitors, self.own_screen)
+        name = pin["name"] if pin else next((m.get("name") for m in monitors if m.get("focused")), None) \
+            if isinstance(monitors, list) else None
         if name and self.monitor is not None and name != self.monitor.get_connector() and self._focus_move is None:
-            self._follow(name, "the focus check found it there")
+            self._follow(name, "the own screen is connected" if pin else "the focus check found it there")
         return True
+
+    def _set_own_screen(self, pin):
+        """The own_screen setting changed to pin, a monitor or None: Rook moves at once, at rest or in a turn."""
+        if pin == self.own_screen:
+            return
+        self.own_screen = pin
+        if self.scene.is_home(time.monotonic(), self._held()):
+            self._place("the own_screen setting changed")
+        else:
+            self._regather("the own_screen setting changed")
+
+    def _pinned(self):
+        """The connected monitor the own_screen setting names, from Hyprland's list, or None."""
+        return desk.own_screen_monitor(_hypr_socket("j/monitors"), self.own_screen) if self.own_screen else None
 
     def _follow_focus(self):
         """Focus has stayed on another monitor. At rest Rook moves there. During a turn the swarm dissolves here and
@@ -11647,6 +11683,8 @@ class Overlay(Gtk.Application):
         old = self.monitor.get_connector() if self.monitor is not None else None
         if self._focus_name == old:
             return False
+        if (pin := self._pinned()) and self._focus_name != pin["name"]:
+            return False  # Rook lives on its own screen: focus elsewhere never moves or regathers it.
         if self.scene.is_home(now, self._held()):
             self._place(f"at rest, {self._focus_why}")
             return False
@@ -11678,7 +11716,8 @@ class Overlay(Gtk.Application):
             self.game_focused = game
             if self.scene.is_home(time.monotonic(), self._held()):
                 self._place("the game's focus changed")
-            elif game and not self.in_game and self.scene.render is not None and self.scene.render_end is None:
+            elif (game and not self.in_game and self.scene.render is not None and self.scene.render_end is None
+                  and not self._pinned()):
                 # A scene that showed on the desktop follows the owner back into the game, where they are looking.
                 self._regather("a scene followed the game's focus")
         self._apply_state()
@@ -11727,6 +11766,8 @@ class Overlay(Gtk.Application):
             self.stage_on = msg["stage"]
             if not self.stage_on:
                 self._stage_fall_back("the stage setting is off")
+        if "own_screen" in msg and (msg["own_screen"] is None or isinstance(msg["own_screen"], str)):
+            self._set_own_screen(msg["own_screen"] or None)
         if isinstance(msg.get("font"), str):
             self._set_font(msg["font"])
         if isinstance(msg.get("light_dust"), str):
@@ -13835,6 +13876,51 @@ def _check_placement():
                 530, 0, 195, 900.0, 125, (100.0, 80.0, 1.0), (100.0, 48.0, 1600.0, 900.0)
             ), f"game window placement: {got_game}"
 
+            # 5b. own_screen: the stage on the monitor named by connector or by description, whatever has focus.
+            def staged(got):  # The bounds to 1/1000 px, since a fractional scale leaves a hair over whole px.
+                return got[0] and got[0].get_connector(), got[1:6], got[6], tuple(round(v, 3) for v in got[7])
+            m_desk = {"id": 0, "name": "DP-1", "x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1.0,
+                      "focused": True, "reserved": [0, 0, 0, 0], "description": "Example Desk 27"}
+            m_own = {"id": 3, "name": "DP-2", "x": 7120, "y": 0, "width": 1540, "height": 720, "scale": 1.6666666,
+                     "focused": False, "reserved": [0, 0, 0, 0], "description": "Graphica Computer 12.3FHD"}
+            hypr_state["monitors"], hypr_state["clients"] = [m_desk, m_own], []
+            write_state()
+            disp_own = _FakeDisplay(["DP-1", "DP-2"])
+            # The bar display: the stage fills it, the presence centred at 462 of 924, the loop REST_PAD down.
+            on_bar = ("DP-2", (92, 0, 44, 432, 48), None, (0.0, 0.0, 924.0, 432.0))
+            for pin in ("DP-2", "dp-2", "graphica", "  GRAPHICA computer "):
+                assert staged(_placement(disp_own, pin=pin)) == on_bar, (pin, _placement(disp_own, pin=pin))
+            # A scale a hair over 5/3 makes the screen 923.99998 wide: the presence still rounds to its centre.
+            m_own["scale"] = 1.6666667
+            write_state()
+            assert staged(_placement(disp_own, pin="DP-2"))[1][0] == 92, _placement(disp_own, pin="DP-2")
+            m_own["scale"] = 1.6666666
+            write_state()
+            # No such monitor, or off: the focused monitor as before.
+            for pin in ("HDMI-A-9", "off", None, ""):
+                assert _placement(disp_own, pin=pin)[0].get_connector() == "DP-1", pin
+                assert _placement(disp_own, pin=pin)[1:] == got[1:], (pin, _placement(disp_own, pin=pin))
+            # On a bigger monitor the same stage floats in its middle: the same lift and loop, from the stage's top.
+            assert staged(_placement(disp_own, pin="desk 27")) == (
+                "DP-1", (590, 0, 324 + 44, 432, 324 + 48), None, (498.0, 324.0, 924.0, 432.0)), _placement(
+                disp_own, pin="desk 27")
+            # A monitor smaller than the stage gets a stage as large as it is.
+            hypr_state["monitors"] = [{**m_desk, "width": 800, "height": 400}]
+            write_state()
+            assert staged(_placement(_FakeDisplay(["DP-1"]), pin="DP-1")) == (
+                "DP-1", (30, 0, 40, 400, 48), None, (0.0, 0.0, 800.0, 400.0)), _placement(_FakeDisplay(["DP-1"]), pin="DP-1")
+            # The own screen wins over WoW's game window; with it unplugged, WoW places Rook in the game as before.
+            hypr_state["monitors"] = [m_game_mon, {**m_own, "id": 4, "name": "DP-3"}]
+            hypr_state["clients"] = [wow_client]
+            write_state()
+            disp_game = _FakeDisplay(["DP-2", "DP-3"])
+            assert staged(_placement(disp_game, game=True, pin="graphica")) == ("DP-3",) + on_bar[1:]
+            assert _placement(disp_game, game=True, pin="HDMI-A-9")[1:] == got_game[1:]
+            hypr_state["monitors"] = [m_game_mon]
+            write_state()
+            assert _placement(_FakeDisplay(["DP-2"]), game=True, pin="graphica")[1:] == got_game[1:]
+            hypr_state["clients"] = []
+
             # 6 & 7. Follow-the-focused-monitor rule + start-order behaviour (before vs after late sockets).
             # Uses a stubbed Overlay instance and fake GLib/LayerShell hooks: opens no window.
             timers, sec_timers, fd_watches, layer_calls, removed_timers = [], [], [], [], []
@@ -13888,6 +13974,7 @@ def _check_placement():
                 ov._focus_name = None
                 ov._focus_why = ""
                 ov._focus_move = None
+                ov.own_screen = None
                 ov._region_key = None
                 ov._surface = object()
                 ov.quitting = False
@@ -14088,6 +14175,33 @@ def _check_placement():
                     assert ov._focus_name == "DP-1" and timers[-1][1] == FOLLOW_REST_MS, timers[-1]
                     assert ov._follow_focus() is False
                     assert ov.monitor.get_connector() == "DP-1"
+                    # own_screen: Rook moves to the pinned DP-2 at once, and focus on DP-1 never moves it, at rest
+                    # or in a turn, so the swarm never dissolves and regathers there.
+                    m_d2["description"] = "Graphica Computer 12.3FHD"
+                    write_state()
+                    ov._set_own_screen("graphica")
+                    assert ov.own_screen == "graphica" and ov.monitor.get_connector() == "DP-2"
+                    timers.clear()
+                    assert ov._check_focus() is True and ov._focus_move is None and not timers, timers
+                    ov.scene.handle({"state": "thinking"}, 1.0)
+                    scattered.clear()
+                    ov._follow("DP-1", "Hyprland reported focus there")
+                    assert ov._follow_focus() is False and ov.monitor.get_connector() == "DP-2" and not scattered
+                    ov.scene = Scene(0.0)
+                    # Unplugged: the monitor-change path places Rook on the focused monitor, and focus moves it again.
+                    hypr_state["monitors"] = [m_d1]
+                    write_state()
+                    ov._replace("the monitors changed")
+                    assert ov.monitor.get_connector() == "DP-1"
+                    # Plugged back in: the once-a-second check brings Rook back to it.
+                    hypr_state["monitors"] = [m_d1, m_d2]
+                    write_state()
+                    timers.clear()
+                    assert ov._check_focus() is True and ov._focus_name == "DP-2", ov._focus_name
+                    assert ov._follow_focus() is False and ov.monitor.get_connector() == "DP-2"
+                    # Off: Rook follows the focused monitor again at once.
+                    ov._set_own_screen(None)
+                    assert ov.own_screen is None and ov.monitor.get_connector() == "DP-1"
                     # _monitors_changed coalesces bursts into one 300ms timer calling _monitors_settled -> _replace.
                     timers.clear()
                     ov._monitors_changed()

@@ -4766,11 +4766,12 @@ class Companion:
         font, dust = relay.font_in_force(saved)[0], relay.light_dust_in_force(saved)[0]
         theme_pack = relay.theme_pack_in_force(saved)[0]
         stage = relay.stage_in_force(saved)[0]
+        own_screen = relay.own_screen_in_force(saved)[0]
         if self.overlay and self.overlay.returncode is None and (font or dust or theme_pack or self.dark or self.held_waiting):
             waiting = ("TIMER WAITING" if self.held_waiting["kind"] == "timer" else "WAITING") if self.held_waiting else ""
             send(self.overlay, {**({"font": font} if font else {}), **({"light_dust": dust} if dust else {}),
                                 **({"pack": theme_pack} if theme_pack else {}),
-                                "stage": stage == "on",
+                                "stage": stage == "on", "own_screen": None if own_screen == "off" else own_screen,
                                 **({"dark": True} if self.dark else {}),
                                 **({"waiting": waiting} if waiting else {})})
 
@@ -4840,6 +4841,8 @@ class Companion:
                                              "light_dust": {"value": dust, "source": dust_source},
                                              "theme": {"value": theme_pack, "source": theme_source},
                                              "stage": {"value": stage, "source": stage_source},
+                                             "own_screen": dict(zip(("value", "source"),
+                                                                    relay.own_screen_in_force(saved))),
                                              "listen_after": {"value": listen, "source": listen_source},
                                              "smart_turn": {"value": st_mode, "source": st_source},
                                              "smart_turn_threshold": {"value": st_thresh, "source": st_thresh_source},
@@ -4939,6 +4942,7 @@ class Companion:
                                              "light_dust": relay.light_dust_in_force(saved)[0],
                                              "theme": relay.theme_pack_in_force(saved)[0],
                                              "stage": relay.stage_in_force(saved)[0],
+                                             "own_screen": relay.own_screen_in_force(saved)[0],
                                              "listen_after": relay.listen_after_in_force(saved)[0],
                                              "smart_turn": relay.smart_turn_in_force(saved)[0],
                                              "smart_turn_threshold": relay.smart_turn_threshold_in_force(saved)[0],

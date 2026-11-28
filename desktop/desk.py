@@ -1428,6 +1428,17 @@ def hyprland_json(command, timeout=0.5):
     return PLATFORM.hyprland_json(command, timeout=timeout)
 
 
+def own_screen_monitor(monitors, wanted):
+    """The monitor in Hyprland's monitor list that the own_screen setting names, or None. wanted is the connector
+    name, such as DP-2, or text in the monitor's description, in any case, since a port can change on a replug."""
+    wanted = (wanted or "").strip().casefold()
+    if not wanted or wanted == "off" or not isinstance(monitors, list):
+        return None
+    mons = [m for m in monitors if isinstance(m, dict)]
+    return (next((m for m in mons if str(m.get("name", "")).casefold() == wanted), None)
+            or next((m for m in mons if wanted in str(m.get("description", "")).casefold()), None))
+
+
 def sink_inputs(timeout=0.5):
     return PLATFORM.sink_inputs(timeout=timeout)
 
