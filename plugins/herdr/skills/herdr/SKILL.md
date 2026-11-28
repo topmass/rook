@@ -1,17 +1,17 @@
 ---
 name: herdr
 description: "Hand ⟦owner⟧'s work to coding agents in Herdr, and report on them. Use it when ⟦owner⟧ uses Herdr or Pi, or names one: their agents, what they are doing, a send, a new agent, or a Pi session, such as \"what are my Herdr agents doing\", \"tell the Herdr agent to\" or \"start a Pi session\". Also use it for a hand-off that names no orchestrator when your system prompt says such hand-offs go to Herdr."
-allowed-tools: Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr agents*), Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr read *), Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py pi *)
+allowed-tools: Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr agents*), Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr read *), Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py pi *)
 ---
 
 # Herdr and Pi
 
-Herdr runs coding agents in terminal panes, on this machine and on saved Herdr machines. Pi is one of those agents. The command is `/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py`, shown below as `relay.py`. Each command is one call, and its output is short enough to speak from.
+Herdr runs coding agents in terminal panes, on this machine and on saved Herdr machines. Pi is one of those agents. The command is `⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py`, shown below as `relay.py`. Each command is one call, and its output is short enough to speak from.
 
 ## Commands
 
 - `relay.py herdr agents` lists every agent: name, kind, state, folder and machine.
-- `relay.py herdr read AGENT [--machine NAME] [--lines N]` gives the agent's state and the end of its screen.
+- `relay.py herdr read AGENT [--machine NAME] [--lines N]` shows the agent's state and screen, including any visible approval for a blocked agent.
 - `relay.py herdr send AGENT [--machine NAME] "<text>"` sends one message.
 - `relay.py herdr start <folder> --kind claude|codex|pi|... [--model MODEL] [--effort LEVEL] [--name NAME] "<first prompt>"` starts the agent without focus, in a new tab of the folder's Herdr workspace or in a new workspace, and sends the first prompt. Only claude and codex take `--effort`. On a saved machine, give the folder as an absolute path or one that starts with `~/`.
 - `relay.py pi sessions` and `relay.py pi read <session id>` read Pi's saved sessions. They never change them. A live Pi agent runs inside Herdr: start it with `--kind pi`.
