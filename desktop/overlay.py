@@ -1737,6 +1737,7 @@ class Sentence:
         self.sprites = None
         self.scale = None
         self.lines = None  # (first reveal time, top, bottom) per line
+        self.spans = None  # (left, right) per line across the column, as aligned
         self.left = None  # Whether it was laid out at its column's left (see build).
 
     def build(self, cr, scale, left=None):
@@ -1767,12 +1768,15 @@ class Sentence:
         shift = 0.0 if left else (column - layout.get_width() / Pango.SCALE) / 2
         ink, _ = layout.get_pixel_extents()
         self.center, self.width = shift + ink.x + ink.width / 2, ink.width
-        lines = []
+        lines, self.spans = [], []
         it = layout.get_iter()
         while True:
-            line_ink, _ = it.get_line_extents()
+            line_ink, line_logical = it.get_line_extents()
             lines.append((it.get_line_readonly().start_index, it.get_baseline() / Pango.SCALE,
                           line_ink.y / Pango.SCALE, (line_ink.y + line_ink.height) / Pango.SCALE))
+            # Where the whole line lies across its column, as Pango aligned it: its words come in at those places.
+            self.spans.append((shift + line_logical.x / Pango.SCALE,
+                               shift + (line_logical.x + line_logical.width) / Pango.SCALE))
             if not it.next_line():
                 break
         self.sprites, firsts = [], {}
@@ -14976,6 +14980,19 @@ def _check_companion_stage():
                         text, place, x0 + box[2])  # 12 px: the halo's soft edge past the margin.
                     assert y0 + box[3] <= st2.h, (text, place, y0 + box[3])
                     assert len(page.lines) <= 2, (text, place, len(page.lines))
+                    # Every line of a page sits where its whole line belongs: centred under the pair or Rook alone,
+                    # at the column's left in the block and the wide panel; its words come in at those places, so a
+                    # line half spoken shows only its first words, never moved.
+                    tops = sorted({y for _, _, y, _ in page.sprites})
+                    assert len(tops) == len(page.spans), (text, place, tops, page.spans)
+                    for top, (left, right) in zip(tops, page.spans):
+                        first = min(x + 14 for _, x, y, _ in page.sprites if y == top)  # Less the sprite's pad.
+                        assert abs(first - left) < 0.01, (text, place, first, left)  # Words at the line's places.
+                        if place in ("title", "alone"):
+                            assert abs((left + right) / 2 - CAPTION_COLUMN / 2) * COMPANION_CAPTION <= 1.0, (
+                                text, place, left, right)
+                        else:
+                            assert abs(left) * COMPANION_CAPTION <= 1.0, (text, place, left)
                     if len(page.lines) == 2:  # Line one is full: line two's first word would not have fit on it.
                         size = page.scale
                         tops = sorted({y for _, _, y, _ in page.sprites})
