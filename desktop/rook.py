@@ -403,7 +403,7 @@ STEP_MARK = re.compile(r"\{\s*step\s*(\d+)\s*\}[ \t]*", re.IGNORECASE)
 # panel or log. A mark ends at "}", a newline or the text's end; while it is still open at the end of the streamed
 # text, the speech waits. A mark longer than DIAGRAM_HOLD characters is not one: only its "{diagram" goes, and its
 # words are spoken. The hold leaves room for a graph and a few short shapes.
-DIAGRAM_HOLD = 1200
+DIAGRAM_HOLD = 16000
 DIAGRAM_MARK = re.compile(r"\{\s*diagram\b([^{}\n]{0,%d})(?:\}|\n|\Z)\s*" % DIAGRAM_HOLD, re.IGNORECASE)
 DIAGRAM_OPENER = re.compile(r"\{\s*diagram\b\s*", re.IGNORECASE)
 # With no marks, a scene's steps take turns while Rook speaks: each holds the speech's length shared by the steps,
@@ -3042,8 +3042,7 @@ class Companion:
                   "in a third section of SVG paths, with ; between them: {diagram Launch | pad > rocket* | rocket: "
                   "M0-10C4-6 4 2 3 6H-3C-4 2-4-6 0-10ZM-4 1-7 7H-3M4 1 7 7H3}. The grid is viewBox -12 -12 24 24, "
                   "centred on 0, y down. Draw one clear outline in a few strokes, with no fills or text. Keep details "
-                  "2 units apart and points within 10.5 of the centre. Keep each path under 120 characters, and draw "
-                  "at most three.\n"))
+                  "2 units apart and points within 10.5 of the centre.\n"))
         if self.beats_started:
             prompt = apply_beats_prompt(prompt)
         if await asyncio.to_thread(never_onboarded):  # A new install: the person's first press leads into setup.
@@ -8481,7 +8480,7 @@ def check_steps():
         c.stream_text += "}Off it goes."
         c.take_diagram()
         assert c.stream_text == "Off it goes." and c.diagram_names == ["pad", "rocket"] and c.staged == "5"
-        long = "{diagram " + "word " * 250 + "end. More."  # Past DIAGRAM_HOLD it is no mark: its words are spoken.
+        long = "{diagram " + "word " * (DIAGRAM_HOLD // 5 + 50) + "end. More."  # Past DIAGRAM_HOLD it is no mark: its words are spoken.
         c.stream_text = long
         c.take_diagram()
         assert c.stream_text == long[len("{diagram "):] and c.staged == "5", c.stream_text[:40]

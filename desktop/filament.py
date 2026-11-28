@@ -257,11 +257,13 @@ def icon_name(icon):
 
 # ---- shapes a diagram draws itself, as SVG path data ----
 
-# Caps, so a huge or hostile path cannot stall a frame: the text read, the commands, and the points they flatten to.
-SHAPE_TEXT, SHAPE_COMMANDS, SHAPE_POINTS = 1000, 64, 400
+# Safety ceilings, so a runaway path cannot stall a frame: the text read, the commands, and the points they flatten
+# to. Far above any drawing (a detailed icon is under 100 commands). Timed: eight shapes past every ceiling convert in
+# 24 ms and render in 64 ms at scale 1 and 97 ms at scale 2, once per diagram.
+SHAPE_TEXT, SHAPE_COMMANDS, SHAPE_POINTS = 8000, 512, 4096
 SHAPE_FIT = 10.5  # A shape that leaves the grid is centred and shrunk to this half size.
 SHAPES = {}  # A drawn shape's name ("~" and its path) to its strokes, as in ICONS. Only the newest SHAPES_KEPT.
-SHAPES_KEPT = 16
+SHAPES_KEPT = 64
 _TOKEN = re.compile(r"([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|[\s,]+|(.)")
 _ARGS = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7}
 _COST = {"M": 1, "L": 1, "C": 16, "Z": 1}  # The points each op flattens to (_flatten).
@@ -591,9 +593,9 @@ def _check():
     assert len(path_strokes("M-9 0A1 1 0 0 1 9 0")[0][0]) == 3  # Radii too small grow to reach: a half turn.
     strokes, rep = path_strokes("M0 0L24 24")  # Off the grid: centred and shrunk to fit.
     assert strokes == [[("M", -SHAPE_FIT, -SHAPE_FIT), ("L", SHAPE_FIT, SHAPE_FIT)]] and "fitted" in rep[0]
-    strokes, rep = path_strokes("M0 0" + " L1 1" * 99)
+    strokes, rep = path_strokes("M0 0" + " L1 1" * (SHAPE_COMMANDS + 35))
     assert len(strokes[0]) == SHAPE_COMMANDS and any("commands" in r for r in rep)
-    strokes, rep = path_strokes("M0 0" + " C1 1 2 2 3 3" * 40)
+    strokes, rep = path_strokes("M0 0" + " C1 1 2 2 3 3" * (SHAPE_POINTS // 16 + 40))
     assert len(strokes[0]) == 1 + (SHAPE_POINTS - 1) // 16 and any("points" in r for r in rep)
     assert path_strokes("M0 0 L1 1 M5 5 Z M2 2 L3 3")[0] == [[("M", 0, 0), ("L", 1, 1)], [("M", 2, 2), ("L", 3, 3)]]
     for broken in ("", "hello", "M5 5", "12 4 L", "M0 0L1e9 0", "L", "Z Z", "M 1e999 0 L 1 1"):
