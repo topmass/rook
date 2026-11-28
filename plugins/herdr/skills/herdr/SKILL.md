@@ -1,12 +1,12 @@
 ---
 name: herdr
 description: "Hand ⟦owner⟧'s work to coding agents in Herdr, and report on them. Use it when ⟦owner⟧ uses Herdr or Pi, or names one: their agents, what they are doing, a send, a new agent, or a Pi session, such as \"what are my Herdr agents doing\", \"tell the Herdr agent to\" or \"start a Pi session\". Also use it for a hand-off that names no orchestrator when your system prompt says such hand-offs go to Herdr."
-allowed-tools: Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr agents*), Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr read *), Bash(/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py pi *)
+allowed-tools: Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr agents*), Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py herdr read *), Bash(⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py pi *)
 ---
 
 # Herdr and Pi
 
-Herdr runs coding agents in terminal panes, on this machine and on saved Herdr machines. Pi is one of those agents. The command is `/usr/bin/python ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py`, shown below as `relay.py`. Each command is one call, and its output is short enough to speak from.
+Herdr runs coding agents in terminal panes, on this machine and on saved Herdr machines. Pi is one of those agents. The command is `⟦python⟧ ${CLAUDE_PLUGIN_ROOT}/../desktop/relay.py`, shown below as `relay.py`. Each command is one call, and its output is short enough to speak from.
 
 ## Commands
 

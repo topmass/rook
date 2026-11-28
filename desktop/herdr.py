@@ -21,6 +21,7 @@ OWNER_START = settings.OWNER_START_TOKEN  # The same, as the first word of a sen
 READY = ("idle", "done")  # Herdr's states in which an agent takes a prompt.
 SECONDS = 20  # One herdr call, local or over SSH, may take this long.
 START_SECONDS = 45  # herdr agent start waits up to 30 seconds for the agent itself.
+SHELL_START_SECONDS = 5  # A new pane can return before its shell reaches the prompt.
 KEEP = 50  # Intent records kept, newest last.
 # Herdr's error codes that prove a prompt was never written, and exit status 2, a syntax error.
 NOT_SENT = {"agent_blocked", "agent_not_found", "agent_not_ready", "server_not_running", "not_installed"}
@@ -288,9 +289,19 @@ def start(machine, folder, kind, name=None, model=None, effort=None):
     name = name or free_name(f"{kind}-{Path(pane.get('cwd') or kind).name}", taken)
     extra = [*(["--model", model] if model else []),
              *([word.format(effort) for word in EFFORTS[kind][0]] if effort else [])]
+    args = ("agent", "start", name, "--kind", kind, "--pane", pane["pane_id"],
+            *(["--", *extra] if extra else []))
+    shell_deadline = time.monotonic() + SHELL_START_SECONDS
     try:
-        return call(machine, "agent", "start", name, "--kind", kind, "--pane", pane["pane_id"],
-                    *(["--", *extra] if extra else []), timeout=START_SECONDS)["agent"]
+        while True:
+            try:
+                return call(machine, *args, timeout=START_SECONDS)["agent"]
+            except Failed as error:
+                # Herdr rejected the launch before writing to the pane. Retry only that refusal on this new pane.
+                remaining = shell_deadline - time.monotonic()
+                if error.code != "agent_pane_busy" or remaining <= 0:
+                    raise
+                time.sleep(min(0.25, remaining))
     except Failed as error:
         if error.code != "agent_not_ready":  # A blocked start keeps its pane, so the owner can answer it in Herdr.
             try:

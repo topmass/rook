@@ -3402,6 +3402,10 @@ if verb == ["workspace", "create"]:
 if verb == ["pane", "split"]:
     out({"pane": {"pane_id": "w1:p9", "cwd": args[args.index("--cwd") + 1]}})
 if verb == ["agent", "start"]:
+    if state.get("start_busy", 0):
+        state["start_busy"] -= 1
+        (base / "state.json").write_text(json.dumps(state))
+        err("agent_pane_busy", "agent target pane is not an available shell")
     agents[args[2]] = {"name": args[2], "agent": args[args.index("--kind") + 1], "agent_status": "idle",
                        "state_change_seq": 1, "pane_id": args[args.index("--pane") + 1], "cwd": "/tmp/proj"}
     out({"agent": agents[args[2]], "type": "agent_started"})
@@ -3516,13 +3520,14 @@ def check_herdr():
         fake(prompt="ok", screen="line one\n\n\n\nline two   \n\n")
         code, out = run("herdr", "read", "fake3", "--lines", "5")
         assert code == 0 and out == "fake3 (pi) is done in /tmp/proj.\nline one\n\nline two\n", repr(out)
-        # A start opens a new workspace for a new folder, never takes focus, and sends through the guard.
+        # A new pane can report busy before its shell reaches the prompt. Reuse the pane and send only once.
+        fake(start_busy=1)
         code, out = run("herdr", "start", "/tmp/new-proj", "--kind", "pi", "--model", "m-1", "Begin.")
         assert code == 0 and "Started pi-new-proj (pi)" in out and "Sent to pi-new-proj." in out, out
         assert "Rook is not running, so its result waits in Herdr." in out, out  # No Rook runs in this check.
         made = [json.loads(line) for line in calls.read_text().splitlines()]
-        assert ["agent", "start", "pi-new-proj", "--kind", "pi", "--pane", "w9:p1", "--", "--model", "m-1"] in made, made
-        assert ["workspace", "create", "--cwd", "/tmp/new-proj", "--label", "new-proj", "--no-focus"] in made, made
+        assert made.count(["agent", "start", "pi-new-proj", "--kind", "pi", "--pane", "w9:p1", "--", "--model", "m-1"]) == 2, made
+        assert made.count(["workspace", "create", "--cwd", "/tmp/new-proj", "--label", "new-proj", "--no-focus"]) == 1, made
         assert not any("focus" in word and word != "--no-focus" for line in made for word in line), made
         assert prompts("pi-new-proj") == 1
         assert not any(line[:2] == ["pane", "split"] for line in made), made  # Never a pane the owner looks at.
