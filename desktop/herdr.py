@@ -21,6 +21,7 @@ OWNER_START = settings.OWNER_START_TOKEN  # The same, as the first word of a sen
 READY = ("idle", "done")  # Herdr's states in which an agent takes a prompt.
 SECONDS = 20  # One herdr call, local or over SSH, may take this long.
 START_SECONDS = 45  # herdr agent start waits up to 30 seconds for the agent itself.
+SHELL_START_SECONDS = 5  # A new pane can return before its shell reaches the prompt.
 KEEP = 50  # Intent records kept, newest last.
 # Herdr's error codes that prove a prompt was never written, and exit status 2, a syntax error.
 NOT_SENT = {"agent_blocked", "agent_not_found", "agent_not_ready", "server_not_running", "not_installed"}
@@ -89,8 +90,12 @@ def agent_line(info, where):
 SCREEN_LINES = 200  # Claude Code and Codex pad blank lines above their bottom box, so a read takes this many.
 RULE = re.compile(r"[─━]{8,}")
 # The bottom hint of a dialog that waits for a choice. Herdr may read such a dialog as idle.
-DIALOG = re.compile(r"esc to cancel|enter to (confirm|continue)|to choose\b|to select\b", re.I)
+DIALOG = re.compile(r"esc(?:ape)? to (?:cancel|dismiss)|enter to (?:confirm|continue|approve)|to choose\b|to select\b",
+                    re.I)
 TRUST = re.compile(r"one you trust|trust (this|the) (folder|files|contents|directory)", re.I)
+APPROVAL = re.compile(r"would you like to run|do you want to (?:run|allow|proceed)|"
+                      r"approval (?:required|requested|needed)|requires (?:your )?approval|permission (?:request|required)|"
+                      r"approve (?:this|the) (?:command|tool|action)", re.I)
 
 
 def dialog(tail):
@@ -101,9 +106,8 @@ def dialog(tail):
     return "trust" if TRUST.search("\n".join(lines[-15:])) else "dialog"
 
 
-def screen_tail(text, lines):
-    """The last lines of a pane's text, without trailing space, runs of blank lines, the blank padding at the bottom
-    and the input box and footer of Claude Code or Codex, at most settings.READBACK_LIMIT characters. A dialog is kept whole."""
+def screen_tail(text, lines, blocked=False):
+    """Clean the pane text, preserving the heading and command of a blocked approval."""
     kept = []
     for line in (text or "").splitlines():
         line = line.rstrip()
@@ -111,7 +115,13 @@ def screen_tail(text, lines):
             kept.append(line)
     while kept and not kept[-1]:
         kept.pop()
-    if not dialog("\n".join(kept[-15:])):
+    if blocked:
+        prompt = next((i for i in range(len(kept) - 1, -1, -1)
+                       if APPROVAL.search(kept[i])), None)
+        if prompt is not None:
+            head = "\n".join(kept[prompt:prompt + lines]).strip()
+            return head[:settings.READBACK_LIMIT]
+    elif not dialog("\n".join(kept[-15:])):
         # Claude Code's input box starts with ❯ under a rule, and Codex's with ›. The footer follows it.
         for at in range(len(kept) - 1, max(len(kept) - 8, 0) - 1, -1):
             mark = kept[at].lstrip()[:1]
@@ -122,10 +132,41 @@ def screen_tail(text, lines):
     return tail if len(tail) <= settings.READBACK_LIMIT else "..." + tail[-settings.READBACK_LIMIT:]
 
 
-def read_screen(machine, agent, lines, timeout=SECONDS):
-    """The end of an agent's screen, as screen_tail gives it. relay.py and the watcher both read through here."""
-    return screen_tail(call(machine, "agent", "read", agent, "--source", "recent-unwrapped", "--lines",
-                            str(max(lines, SCREEN_LINES)), raw=True, timeout=timeout), lines)
+def read_screen(machine, agent, lines, timeout=SECONDS, *, source=None, blocked=False):
+    """Prefer the visible pane for a blocked agent and share one deadline across fallbacks."""
+    preferred = source or ("visible" if blocked else "recent-unwrapped")
+    deadline = time.monotonic() + timeout
+
+    def read(view, preserve_prompt):
+        count = max(lines, SCREEN_LINES) if preserve_prompt or view == "recent-unwrapped" else lines
+        screen = call(machine, "agent", "read", agent, "--source", view, "--lines", str(count),
+                      raw=True, timeout=max(0.1, deadline - time.monotonic()))
+        return screen_tail(screen, lines, blocked=preserve_prompt)
+
+    try:
+        text = read(preferred, blocked)
+    except Failed as error:
+        if time.monotonic() >= deadline:
+            raise
+        if preferred == "recent-unwrapped" and error.code == "agent_not_idle":
+            text, blocked = read("visible", True), True
+        elif preferred == "visible" and source is None and error.code not in ("timeout", "agent_not_found"):
+            text = read("recent-unwrapped", True)  # An older Herdr has no visible source.
+        else:
+            raise
+    if blocked and source is None and not prompt_shown(text) and time.monotonic() < deadline:
+        try:
+            found = read("detection", True)
+        except Failed:  # An older Herdr has no detection source either.
+            found = ""
+        if prompt_shown(found) or not text:
+            return found
+    return text
+
+
+def prompt_shown(text):
+    """Whether a blocked agent's screen shows its question or approval, not only older output."""
+    return bool(APPROVAL.search(text or "") or dialog(text))
 
 
 def sends_path():
@@ -288,9 +329,19 @@ def start(machine, folder, kind, name=None, model=None, effort=None):
     name = name or free_name(f"{kind}-{Path(pane.get('cwd') or kind).name}", taken)
     extra = [*(["--model", model] if model else []),
              *([word.format(effort) for word in EFFORTS[kind][0]] if effort else [])]
+    args = ("agent", "start", name, "--kind", kind, "--pane", pane["pane_id"],
+            *(["--", *extra] if extra else []))
+    shell_deadline = time.monotonic() + SHELL_START_SECONDS
     try:
-        return call(machine, "agent", "start", name, "--kind", kind, "--pane", pane["pane_id"],
-                    *(["--", *extra] if extra else []), timeout=START_SECONDS)["agent"]
+        while True:
+            try:
+                return call(machine, *args, timeout=START_SECONDS)["agent"]
+            except Failed as error:
+                # Herdr rejected the launch before writing to the pane. Retry only that refusal on this new pane.
+                remaining = shell_deadline - time.monotonic()
+                if error.code != "agent_pane_busy" or remaining <= 0:
+                    raise
+                time.sleep(min(0.25, remaining))
     except Failed as error:
         if error.code != "agent_not_ready":  # A blocked start keeps its pane, so the owner can answer it in Herdr.
             try:
